@@ -44,13 +44,13 @@ export function buildServer() {
   });
   app.register(swaggerUi, { routePrefix: '/docs' });
 
-  //app.register(healthRoutes);
-  //app.register(authRoutes);
-  //app.register(campaignRoutes);
-  //app.register(verificationRoutes);
-  //app.register(uploadRoutes);
-  //app.register(paymentRoutes);
-  //app.register(accountRoutes);
+  app.register(healthRoutes);
+  app.register(authRoutes);
+  app.register(campaignRoutes);
+  app.register(verificationRoutes);
+  app.register(uploadRoutes);
+  app.register(paymentRoutes);
+  app.register(accountRoutes);
 
   return app;
 }
