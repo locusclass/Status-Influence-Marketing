@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "pnpm --filter api start",
+    "startCommand": "pnpm --filter @gig/shared build && pnpm --filter @gig/api build && pnpm --filter @gig/api start",
     "healthcheckPath": "/health",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
