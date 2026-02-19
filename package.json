@@ -1,0 +1,11 @@
+{
+  "name": "gig-marketing",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev:api": "pnpm --filter @gig/shared build && pnpm --filter @gig/api dev",
+    "dev:worker": "pnpm --filter @gig/shared build && pnpm --filter @gig/worker dev",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test"
+  }
+}
