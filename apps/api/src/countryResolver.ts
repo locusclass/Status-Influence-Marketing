@@ -1,41 +1,59 @@
 import countries from 'i18n-iso-countries';
-import enLocale from 'i18n-iso-countries/langs/en.json' assert { type: 'json' };
-import currencyCodes from 'currency-codes';
-import metadata from 'libphonenumber-js/metadata.full.json' assert { type: 'json' };
+import en from 'i18n-iso-countries/langs/en.json' with { type: 'json' };
+import countryToCurrency from 'country-to-currency';
+import metadata from 'libphonenumber-js/metadata.min.json' with { type: 'json' };
 
-countries.registerLocale(enLocale);
+countries.registerLocale(en);
 
-// African Union member ISO-2 codes
-const AFRICAN_COUNTRIES = new Set([
-  'DZ','AO','BJ','BW','BF','BI','CV','CM','CF','TD','KM','CG','CD',
-  'DJ','EG','GQ','ER','SZ','ET','GA','GM','GH','GN','GW','CI','KE',
-  'LS','LR','LY','MG','MW','ML','MR','MU','MA','MZ','NA','NE','NG',
-  'RW','ST','SN','SC','SL','SO','ZA','SS','SD','TZ','TG','TN','UG','ZM','ZW'
-]);
+export interface ResolvedCountry {
+  name: string;
+  iso2: string;
+  currency: string;
+  dialCode: string;
+}
 
-export function resolveCountryData(countryCode: string) {
-  const upper = countryCode.toUpperCase();
+const AFRICAN_ISO2 = [
+  'DZ','AO','BJ','BW','BF','BI','CV','CM','CF','TD','KM','CD','CG','CI',
+  'DJ','EG','GQ','ER','SZ','ET','GA','GM','GH','GN','GW','KE','LS','LR',
+  'LY','MG','MW','ML','MR','MU','YT','MA','MZ','NA','NE','NG','RE','RW',
+  'SH','ST','SN','SC','SL','SO','ZA','SS','SD','TZ','TG','TN','UG','EH',
+  'ZM','ZW'
+];
 
-  if (!AFRICAN_COUNTRIES.has(upper)) {
-    throw new Error('Unsupported country');
+export function getAllAfricanCountries(): ResolvedCountry[] {
+  return AFRICAN_ISO2.map((iso2) => resolveCountry(iso2)).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+}
+
+export function resolveCountry(iso2: string): ResolvedCountry {
+  const upper = iso2.toUpperCase();
+
+  if (!AFRICAN_ISO2.includes(upper)) {
+    throw new Error('unsupported_country');
   }
 
-  const currency = currencyCodes.country(upper)?.[0]?.currency;
-
-  if (!currency) {
-    throw new Error('Currency not found for country');
+  const name = countries.getName(upper, 'en');
+  if (!name) {
+    throw new Error('invalid_country');
   }
 
-  const countryMeta = (metadata as any).countries?.[upper];
+  const currency = countryToCurrency[upper] ?? 'USD';
 
-  if (!countryMeta || !countryMeta[0]) {
-    throw new Error('Phone code not found for country');
-  }
-
-  const phoneCode = `+${countryMeta[0]}`;
+  const dialCode = getDialCode(upper);
 
   return {
+    name,
+    iso2: upper,
     currency,
-    phoneCode,
+    dialCode
   };
+}
+
+function getDialCode(iso2: string): string {
+  const countryMeta = (metadata as any).countries[iso2];
+  if (!countryMeta) return '';
+
+  const callingCode = countryMeta[0];
+  return `+${callingCode}`;
 }
