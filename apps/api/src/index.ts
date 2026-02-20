@@ -1,5 +1,6 @@
 import { buildServer } from './server.js';
 import { config } from './config.js';
+import 'dotenv/config';
 
 const app = buildServer();
 

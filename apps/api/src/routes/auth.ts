@@ -3,12 +3,14 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
+import { resolveCountryData } from '../countryResolver.js';
 
 const registerSchema = z.object({
   email: z.string().email(),
-  phone: z.string().min(7).max(20),
+  phone: z.string().min(6).max(20),
   password: z.string().min(8),
-  role: z.enum(['ADVERTISER', 'DISTRIBUTOR'])
+  role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+  country_code: z.string().length(2)
 });
 
 const loginSchema = z.object({
@@ -21,30 +23,84 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/auth/register', async (request, reply) => {
     const body = registerSchema.parse(request.body);
+
+    // Resolve country → currency + phone prefix
+    const { currency, phoneCode } = resolveCountryData(body.country_code);
+
+    // Normalize phone (remove leading zeros)
+    const normalizedPhone =
+      phoneCode + body.phone.replace(/^0+/, '');
+
     const user = await withTransaction(async (client) => {
       const existing = await userRepo.findByEmail(client, body.email);
       if (existing) {
         reply.code(400);
         return { error: 'email_taken' };
       }
-      const created = await userRepo.createUser(client, body.email, body.phone, hashPassword(body.password), body.role);
+
+      const created = await userRepo.createUser(
+        client,
+        body.email,
+        normalizedPhone,
+        hashPassword(body.password),
+        body.role,
+        body.country_code.toUpperCase(),
+        currency,
+        phoneCode
+      );
+
       await userRepo.ensureWallet(client, created.id);
+
       return created;
     });
 
     if ((user as any).error) return user;
-    const token = app.jwt.sign({ sub: user.id, role: user.role });
-    return { token, user: { id: user.id, email: user.email, role: user.role, phone: user.phone } };
+
+    const token = app.jwt.sign({
+      sub: user.id,
+      role: user.role
+    });
+
+    return {
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        phone: user.phone,
+        country_code: user.country_code,
+        currency: user.preferred_currency
+      }
+    };
   });
 
   app.post('/auth/login', async (request, reply) => {
     const body = loginSchema.parse(request.body);
-    const user = await withTransaction(async (client) => userRepo.findByEmail(client, body.email));
+
+    const user = await withTransaction(async (client) =>
+      userRepo.findByEmail(client, body.email)
+    );
+
     if (!user || !verifyPassword(body.password, user.password_hash)) {
       reply.code(401);
       return { error: 'invalid_credentials' };
     }
-    const token = app.jwt.sign({ sub: user.id, role: user.role });
-    return { token, user: { id: user.id, email: user.email, role: user.role, phone: user.phone } };
+
+    const token = app.jwt.sign({
+      sub: user.id,
+      role: user.role
+    });
+
+    return {
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        phone: user.phone,
+        country_code: user.country_code,
+        currency: user.preferred_currency
+      }
+    };
   });
 }
