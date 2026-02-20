@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { resolveCountryData } from '../countryResolver.js';
+import { resolveCountry } from '../countryResolver.js';
 
 const registerSchema = z.object({
   email: z.string().email(),
