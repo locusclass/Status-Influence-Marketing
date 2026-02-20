@@ -1,33 +1,30 @@
-﻿import { PoolClient } from 'pg';
+import { PoolClient } from 'pg';
 
 export class UserRepo {
+
   async createUser(
     client: PoolClient,
     email: string,
     phone: string,
     passwordHash: string,
     role: 'ADVERTISER' | 'DISTRIBUTOR',
-    countryCode: string,
-    preferredCurrency: string,
-    phoneCountryCode: string
+    country: string,
+    currency: string
   ) {
     const res = await client.query(
       `
-      INSERT INTO users 
-        (email, phone, password_hash, role, country_code, preferred_currency, phone_country_code)
-      VALUES 
-        ($1,$2,$3,$4,$5,$6,$7)
-      RETURNING id, email, role, phone, country_code, preferred_currency
-      `,
-      [
+      INSERT INTO users (
         email,
         phone,
-        passwordHash,
+        password_hash,
         role,
-        countryCode,
-        preferredCurrency,
-        phoneCountryCode
-      ]
+        country,
+        currency
+      )
+      VALUES ($1,$2,$3,$4,$5,$6)
+      RETURNING id, email, role, phone, country, currency
+      `,
+      [email, phone, passwordHash, role, country, currency]
     );
 
     return res.rows[0];
@@ -35,25 +32,39 @@ export class UserRepo {
 
   async findByEmail(client: PoolClient, email: string) {
     const res = await client.query(
-      'SELECT * FROM users WHERE email=$1',
+      `SELECT * FROM users WHERE email=$1`,
       [email]
     );
+
     return res.rows[0];
   }
 
-  async ensureWallet(client: PoolClient, userId: string) {
-    const res = await client.query(
-      'SELECT * FROM wallets WHERE user_id=$1',
+  async ensureWallet(
+    client: PoolClient,
+    userId: string,
+    currency: string
+  ) {
+    const existing = await client.query(
+      `SELECT * FROM wallets WHERE user_id=$1`,
       [userId]
     );
 
-    if (res.rows[0]) return res.rows[0];
+    if (existing.rows[0]) return existing.rows[0];
 
-    const create = await client.query(
-      'INSERT INTO wallets (user_id) VALUES ($1) RETURNING *',
-      [userId]
+    const created = await client.query(
+      `
+      INSERT INTO wallets (
+        user_id,
+        currency,
+        balance_available,
+        balance_escrow
+      )
+      VALUES ($1,$2,0,0)
+      RETURNING *
+      `,
+      [userId, currency]
     );
 
-    return create.rows[0];
+    return created.rows[0];
   }
 }
