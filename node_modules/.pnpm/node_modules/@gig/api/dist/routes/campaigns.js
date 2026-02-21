@@ -1,4 +1,4 @@
-import { CreateCampaignSchema, FundCampaignSchema } from '@gig/shared';
+import { CreateCampaignSchema, FundCampaignSchema } from '@bakule/shared';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';

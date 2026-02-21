@@ -1,12 +1,12 @@
 {
-  "name": "gig-marketing",
+  "name": "bakule",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "pnpm -r build",
-    "start": "pnpm --filter @gig/api start",
-    "dev:api": "pnpm --filter @gig/shared build && pnpm --filter @gig/api dev",
-    "dev:worker": "pnpm --filter @gig/shared build && pnpm --filter @gig/worker dev",
+    "start": "pnpm --filter @bakule/api start",
+    "dev:api": "pnpm --filter @bakule/shared build && pnpm --filter @bakule/api dev",
+    "dev:worker": "pnpm --filter @bakule/shared build && pnpm --filter @bakule/worker dev",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test"
   },

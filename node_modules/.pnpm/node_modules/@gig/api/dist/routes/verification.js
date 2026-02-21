@@ -1,4 +1,4 @@
-import { CreateVerificationSessionSchema, SubmitProofSchema } from '@gig/shared';
+import { CreateVerificationSessionSchema, SubmitProofSchema } from '@bakule/shared';
 import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';

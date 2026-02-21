@@ -32,7 +32,7 @@ importers:
       '@fastify/swagger-ui':
         specifier: ^1.10.0
         version: 1.10.2
-      '@gig/shared':
+      '@bakule/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       country-to-currency:
@@ -96,7 +96,7 @@ importers:
 
   apps/worker:
     dependencies:
-      '@gig/shared':
+      '@bakule/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       pg:
@@ -2861,3 +2861,4 @@ snapshots:
   yocto-queue@0.1.0: {}
 
   zod@3.25.76: {}
+

@@ -1,10 +1,10 @@
 {
-  "name": "@gig/worker",
+  "name": "@bakule/worker",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "pnpm --filter @gig/shared build && tsx watch src/index.ts",
+    "dev": "pnpm --filter @bakule/shared build && tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint . --ext .ts",
     "test": "vitest run"
@@ -14,7 +14,7 @@
     "undici": "^6.19.8",
     "uuid": "^9.0.1",
     "pngjs": "^7.0.0",
-    "@gig/shared": "workspace:*"
+    "@bakule/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

@@ -1,5 +1,5 @@
-﻿import crypto from 'crypto';
-import { VerificationResult } from '@gig/shared';
+import crypto from 'crypto';
+import { VerificationResult } from '@bakule/shared';
 import { Verifier } from './verifier.js';
 
 export class MockVerifier implements Verifier {
@@ -16,3 +16,4 @@ export class MockVerifier implements Verifier {
     };
   }
 }
+

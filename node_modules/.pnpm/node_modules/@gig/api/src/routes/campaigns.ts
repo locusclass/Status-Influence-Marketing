@@ -1,5 +1,5 @@
-﻿import { FastifyInstance } from 'fastify';
-import { CreateCampaignSchema, FundCampaignSchema } from '@gig/shared';
+import { FastifyInstance } from 'fastify';
+import { CreateCampaignSchema, FundCampaignSchema } from '@bakule/shared';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
@@ -93,3 +93,4 @@ export async function campaignRoutes(app: FastifyInstance) {
     return { redirect_url: order.redirect_url, pesapal_txn: pesapalTxn };
   });
 }
+

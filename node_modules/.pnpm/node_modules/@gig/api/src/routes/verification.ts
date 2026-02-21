@@ -1,5 +1,5 @@
-﻿import { FastifyInstance } from 'fastify';
-import { CreateVerificationSessionSchema, SubmitProofSchema } from '@gig/shared';
+import { FastifyInstance } from 'fastify';
+import { CreateVerificationSessionSchema, SubmitProofSchema } from '@bakule/shared';
 import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
@@ -51,3 +51,4 @@ export async function verificationRoutes(app: FastifyInstance) {
     return { proof };
   });
 }
+

@@ -49,7 +49,7 @@ export function buildServer() {
   app.register(swagger, {
     openapi: {
       info: {
-        title: 'Gig Marketing API',
+        title: 'Bakule API',
         version: '0.1.0',
       },
     },

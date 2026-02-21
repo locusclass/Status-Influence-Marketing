@@ -1,4 +1,4 @@
-﻿import { VerificationResult } from '@gig/shared';
+import { VerificationResult } from '@bakule/shared';
 import { Verifier } from './verifier.js';
 import { fetch } from 'undici';
 
@@ -34,3 +34,4 @@ export class GeminiVerifier implements Verifier {
     return data;
   }
 }
+
