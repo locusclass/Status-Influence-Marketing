@@ -7,6 +7,14 @@ import { config } from '../config.js';
 export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
 
+  app.get('/payments/pesapal/ipn', async () => {
+    return {
+      ok: true,
+      method: 'POST',
+      note: 'This endpoint expects a signed PesaPal IPN webhook.',
+    };
+  });
+
   app.post('/payments/pesapal/ipn', async (request, reply) => {
     const signature = request.headers['x-pesapal-signature'] as string | undefined;
     const rawBody = (request as any).rawBody?.toString() ?? '';
