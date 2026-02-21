@@ -19,8 +19,9 @@ export async function paymentRoutes(app: FastifyInstance) {
     const signature = request.headers['x-pesapal-signature'] as string | undefined;
     const rawBody = (request as any).rawBody?.toString() ?? '';
     if (!signature || !verifyWebhookSignature(rawBody, signature, config.pesapal.payoutWebhookSecret)) {
-      reply.code(401);
-      return { error: 'invalid_signature' };
+      // Allow dashboard IPN validation pings to succeed without signature.
+      reply.code(200);
+      return { status: 'ignored', reason: 'invalid_signature' };
     }
 
     const body = request.body as any;
