@@ -7,15 +7,15 @@ import { config } from '../config.js';
 export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
 
-  app.get('/payments/pesapal/ipn', async () => {
+  const ipnInfo = async () => {
     return {
       ok: true,
       method: 'POST',
       note: 'This endpoint expects a signed PesaPal IPN webhook.',
     };
-  });
+  };
 
-  app.post('/payments/pesapal/ipn', async (request, reply) => {
+  const handleIpn = async (request: any, reply: any) => {
     const signature = request.headers['x-pesapal-signature'] as string | undefined;
     const rawBody = (request as any).rawBody?.toString() ?? '';
     if (!signature || !verifyWebhookSignature(rawBody, signature, config.pesapal.payoutWebhookSecret)) {
@@ -72,7 +72,13 @@ export async function paymentRoutes(app: FastifyInstance) {
       return result;
     }
     return { status: 'accepted' };
-  });
+  };
+
+  app.get('/payments/pesapal/ipn', ipnInfo);
+  app.get('/api/payments/pesapal/ipn', ipnInfo);
+
+  app.post('/payments/pesapal/ipn', handleIpn);
+  app.post('/api/payments/pesapal/ipn', handleIpn);
 
   app.post('/payments/pesapal/payout-webhook', async (request, reply) => {
     const signature = request.headers['x-pesapal-signature'] as string | undefined;

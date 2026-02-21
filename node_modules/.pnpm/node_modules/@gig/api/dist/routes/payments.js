@@ -4,7 +4,14 @@ import { getTransactionStatus, verifyWebhookSignature } from '../services/pesapa
 import { config } from '../config.js';
 export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
-    app.post('/payments/pesapal/ipn', async (request, reply) => {
+    const ipnInfo = async () => {
+        return {
+            ok: true,
+            method: 'POST',
+            note: 'This endpoint expects a signed PesaPal IPN webhook.',
+        };
+    };
+    const handleIpn = async (request, reply) => {
         const signature = request.headers['x-pesapal-signature'];
         const rawBody = request.rawBody?.toString() ?? '';
         if (!signature || !verifyWebhookSignature(rawBody, signature, config.pesapal.payoutWebhookSecret)) {
@@ -55,7 +62,11 @@ export async function paymentRoutes(app) {
             return result;
         }
         return { status: 'accepted' };
-    });
+    };
+    app.get('/payments/pesapal/ipn', ipnInfo);
+    app.get('/api/payments/pesapal/ipn', ipnInfo);
+    app.post('/payments/pesapal/ipn', handleIpn);
+    app.post('/api/payments/pesapal/ipn', handleIpn);
     app.post('/payments/pesapal/payout-webhook', async (request, reply) => {
         const signature = request.headers['x-pesapal-signature'];
         const rawBody = request.rawBody?.toString() ?? '';
