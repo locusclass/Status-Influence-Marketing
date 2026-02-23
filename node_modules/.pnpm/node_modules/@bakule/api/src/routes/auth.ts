@@ -30,7 +30,12 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/auth/register', async (request, reply) => {
-    const body = registerSchema.parse(request.body);
+    const parsed = registerSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    const body = parsed.data;
 
     const countryData = resolveCountry(body.country);
 
@@ -82,7 +87,12 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/auth/login', async (request, reply) => {
-    const body = loginSchema.parse(request.body);
+    const parsed = loginSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    const body = parsed.data;
 
     const user = await withTransaction(async (client) =>
       userRepo.findByEmail(client, body.email)
