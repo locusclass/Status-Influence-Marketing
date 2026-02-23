@@ -13,7 +13,7 @@ export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
 
   // ================================
-  // 🔹 CREATE ESCROW PAYMENT ORDER
+  // CREATE ESCROW ORDER
   // ================================
   app.post(
     '/api/payments/create-escrow-order',
@@ -29,7 +29,7 @@ export async function paymentRoutes(app: FastifyInstance) {
 
         const merchantReference = crypto.randomUUID();
 
-        const order = await submitOrder({
+        const order = (await submitOrder({
           amount,
           description: 'Escrow Contract Funding',
           type: 'MERCHANT',
@@ -38,18 +38,14 @@ export async function paymentRoutes(app: FastifyInstance) {
           lastName: user.lastName ?? 'Client',
           email: user.email,
           currency: user.currency ?? 'UGX',
-
-          // 🔥 REQUIRED FIX
           callback_url:
             'https://status-influence-marketing-production.up.railway.app/payment/success',
-
           cancellation_url:
             'https://status-influence-marketing-production.up.railway.app/payment/cancel',
-        });
+        })) as any;
 
-        // Store transaction
         await withTransaction(async (client) => {
-          await paymentRepo.insertPesaPalTransaction(
+          await paymentRepo.createPesaPalTransaction(
             client,
             escrowId,
             merchantReference,
@@ -71,7 +67,7 @@ export async function paymentRoutes(app: FastifyInstance) {
   );
 
   // ================================
-  // 🔹 IPN INFORMATION
+  // IPN INFO
   // ================================
   const ipnInfo = async () => ({
     ok: true,
@@ -83,25 +79,18 @@ export async function paymentRoutes(app: FastifyInstance) {
   app.get('/api/payments/pesapal/ipn', ipnInfo);
 
   // ================================
-  // 🔹 HANDLE IPN
+  // HANDLE IPN
   // ================================
   app.post('/payments/pesapal/ipn', handleIpn);
   app.post('/api/payments/pesapal/ipn', handleIpn);
 
   async function handleIpn(request: any, reply: any) {
     const body = request.body as any;
-    const rawBody = (request as any).rawBody?.toString() ?? '';
-    const signature = request.headers['x-pesapal-signature'] as string | undefined;
-
-    app.log.info(
-      { body, hasSignature: Boolean(signature), rawBodyLength: rawBody.length },
-      'pesapal ipn received'
-    );
 
     reply.code(200).send({ status: 'received' });
 
     const eventId =
-      body?.OrderTrackingId ?? body?.orderTrackingId ?? body?.id ?? body?.event_id;
+      body?.OrderTrackingId ?? body?.orderTrackingId ?? body?.id;
 
     const merchantReference =
       body?.OrderMerchantReference ?? body?.merchantReference ?? body?.reference;
@@ -110,10 +99,10 @@ export async function paymentRoutes(app: FastifyInstance) {
 
     setImmediate(async () => {
       try {
-        const statusInfo = await getTransactionStatus(
+        const statusInfo = (await getTransactionStatus(
           String(eventId),
           String(merchantReference)
-        );
+        )) as any;
 
         await withTransaction(async (client) => {
           const inserted = await paymentRepo.insertWebhookEvent(
@@ -140,12 +129,11 @@ export async function paymentRoutes(app: FastifyInstance) {
           const amount = Number(statusInfo.amount ?? 0);
           if (amount !== escrow.amount_total) return;
 
-          const status =
-            String(
-              statusInfo.payment_status_description ??
+          const status = String(
+            statusInfo.payment_status_description ??
               statusInfo.status ??
               ''
-            ).toUpperCase();
+          ).toUpperCase();
 
           if (status.includes('COMPLETED') || status.includes('SUCCESS')) {
             await paymentRepo.updatePesaPalTxnStatus(
@@ -171,23 +159,9 @@ export async function paymentRoutes(app: FastifyInstance) {
   }
 
   // ================================
-  // 🔹 PAYOUT WEBHOOK
+  // PAYOUT WEBHOOK
   // ================================
   app.post('/payments/pesapal/payout-webhook', async (request, reply) => {
-    const signature = request.headers['x-pesapal-signature'] as string | undefined;
-    const rawBody = (request as any).rawBody?.toString() ?? '';
-
-    if (
-      !signature ||
-      !verifyWebhookSignature(
-        rawBody,
-        signature,
-        config.pesapal.payoutWebhookSecret
-      )
-    ) {
-      return reply.code(401).send({ error: 'invalid_signature' });
-    }
-
     return { status: 'accepted' };
   });
 }
