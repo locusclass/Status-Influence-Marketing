@@ -70,10 +70,10 @@ export function buildServer() {
         try {
           const result = await registerIpnUrl();
 
-          // 🔍 Log full raw response safely (temporary diagnostic)
-          app.log.info(
-            { result },
-            'pesapal raw ipn registration response'
+          // 🔍 Force visible raw logging
+          console.log(
+            '[pesapal] raw ipn registration response:',
+            JSON.stringify(result, null, 2)
           );
 
           const ipnId =
