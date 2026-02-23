@@ -8,7 +8,6 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { config } from './config.js';
-import { getIpnList } from './services/pesapal.js';
 import {
   authRoutes,
   campaignRoutes,
@@ -57,6 +56,7 @@ export function buildServer() {
 
   app.register(swaggerUi, { routePrefix: '/docs' });
 
+  // Routes
   app.register(healthRoutes);
   app.register(authRoutes);
   app.register(campaignRoutes);
@@ -65,20 +65,23 @@ export function buildServer() {
   app.register(paymentRoutes);
   app.register(accountRoutes);
 
+  // 🔒 Final stabilized PesaPal configuration
   app.addHook('onReady', async () => {
-    if (!config.pesapal.ipnId && config.pesapal.callbackUrl) {
-      setImmediate(async () => {
-        try {
-          const result = await getIpnList();
+    if (!config.pesapal.ipnId) {
+      app.log.warn('PESAPAL_IPN_ID is not set. Payments will fail.');
+    } else {
+      app.log.info(
+        { ipnId: config.pesapal.ipnId },
+        'PesaPal IPN locked'
+      );
+    }
 
-          console.log(
-            '[pesapal] existing IPNs:',
-            JSON.stringify(result, null, 2)
-          );
-        } catch (error) {
-          app.log.warn({ error }, 'pesapal get IPN list failed');
-        }
-      });
+    if (!config.pesapal.callbackUrl) {
+      app.log.warn('PESAPAL_CALLBACK_URL is not set.');
+    }
+
+    if (!config.pesapal.consumerKey || !config.pesapal.consumerSecret) {
+      app.log.warn('PesaPal credentials are not fully configured.');
     }
   });
 
