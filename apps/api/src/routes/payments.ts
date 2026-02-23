@@ -1,4 +1,4 @@
-﻿import { FastifyInstance } from 'fastify';
+import { FastifyInstance } from 'fastify';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { getTransactionStatus, verifyWebhookSignature } from '../services/pesapal.js';
