@@ -34,10 +34,40 @@ CREATE TABLE IF NOT EXISTS campaigns (
   platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'INSTAGRAM', 'X')),
   payout_amount INTEGER NOT NULL,
   budget_total INTEGER NOT NULL,
+  media_type TEXT NOT NULL CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO')),
+  media_text TEXT,
+  media_url TEXT,
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'media_type'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN media_type TEXT NOT NULL DEFAULT 'TEXT' CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'media_text'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN media_text TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'media_url'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN media_url TEXT;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS contracts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
