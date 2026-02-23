@@ -1,3 +1,5 @@
+// apps/api/src/server.ts
+
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -6,7 +8,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { config } from './config.js';
-import { registerIpnUrl } from './services/pesapal.js';
+import { getIpnList } from './services/pesapal.js';
 import {
   authRoutes,
   campaignRoutes,
@@ -55,7 +57,6 @@ export function buildServer() {
 
   app.register(swaggerUi, { routePrefix: '/docs' });
 
-  // Routes
   app.register(healthRoutes);
   app.register(authRoutes);
   app.register(campaignRoutes);
@@ -68,31 +69,14 @@ export function buildServer() {
     if (!config.pesapal.ipnId && config.pesapal.callbackUrl) {
       setImmediate(async () => {
         try {
-          const result = await registerIpnUrl();
+          const result = await getIpnList();
 
-          // 🔍 Force visible raw logging
           console.log(
-            '[pesapal] raw ipn registration response:',
+            '[pesapal] existing IPNs:',
             JSON.stringify(result, null, 2)
           );
-
-          const ipnId =
-            result?.ipn_id ??
-            result?.ipnId ??
-            result?.data?.ipn_id ??
-            result?.data?.ipnId;
-
-          if (ipnId) {
-            config.pesapal.ipnId = String(ipnId);
-            app.log.info({ ipnId }, 'pesapal ipn registered');
-          } else {
-            app.log.warn(
-              { result },
-              'pesapal ipn register returned no ipn_id'
-            );
-          }
         } catch (error) {
-          app.log.warn({ error }, 'pesapal ipn register failed');
+          app.log.warn({ error }, 'pesapal get IPN list failed');
         }
       });
     }
