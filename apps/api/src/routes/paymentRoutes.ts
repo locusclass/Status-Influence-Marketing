@@ -1,20 +1,18 @@
 import { FastifyInstance } from 'fastify';
+import crypto from 'crypto';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import {
+  submitOrder,
   getTransactionStatus,
-  verifyWebhookSignature,
-  submitOrder
 } from '../services/pesapal.js';
-import { config } from '../config.js';
-import crypto from 'crypto';
 
 export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
 
-  // ================================
+  // =====================================================
   // CREATE ESCROW ORDER
-  // ================================
+  // =====================================================
   app.post(
     '/api/payments/create-escrow-order',
     { preHandler: app.authenticate },
@@ -29,7 +27,7 @@ export async function paymentRoutes(app: FastifyInstance) {
 
         const merchantReference = crypto.randomUUID();
 
-        const order = (await submitOrder({
+        const order = await submitOrder({
           amount,
           description: 'Escrow Contract Funding',
           type: 'MERCHANT',
@@ -42,16 +40,16 @@ export async function paymentRoutes(app: FastifyInstance) {
             'https://status-influence-marketing-production.up.railway.app/payment/success',
           cancellation_url:
             'https://status-influence-marketing-production.up.railway.app/payment/cancel',
-        })) as any;
+        });
 
+        // 🔥 FIXED — 2 ARGUMENT SIGNATURE
         await withTransaction(async (client) => {
-          await paymentRepo.createPesaPalTransaction(
-            client,
+          await paymentRepo.createPesaPalTransaction(client, {
             escrowId,
             merchantReference,
             amount,
-            order.order_tracking_id
-          );
+            orderTrackingId: order.order_tracking_id,
+          });
         });
 
         return reply.send({
@@ -59,16 +57,16 @@ export async function paymentRoutes(app: FastifyInstance) {
           order_tracking_id: order.order_tracking_id,
           merchant_reference: merchantReference,
         });
-      } catch (err) {
-        app.log.error({ err }, 'create escrow order failed');
+      } catch (error) {
+        app.log.error({ error }, 'create escrow order failed');
         return reply.code(500).send({ error: 'Payment creation failed' });
       }
     }
   );
 
-  // ================================
-  // IPN INFO
-  // ================================
+  // =====================================================
+  // IPN INFO ROUTE (For Dashboard Registration)
+  // =====================================================
   const ipnInfo = async () => ({
     ok: true,
     method: 'POST',
@@ -78,36 +76,39 @@ export async function paymentRoutes(app: FastifyInstance) {
   app.get('/payments/pesapal/ipn', ipnInfo);
   app.get('/api/payments/pesapal/ipn', ipnInfo);
 
-  // ================================
-  // HANDLE IPN
-  // ================================
+  // =====================================================
+  // HANDLE IPN WEBHOOK
+  // =====================================================
   app.post('/payments/pesapal/ipn', handleIpn);
   app.post('/api/payments/pesapal/ipn', handleIpn);
 
   async function handleIpn(request: any, reply: any) {
     const body = request.body as any;
 
+    // Immediately acknowledge PesaPal
     reply.code(200).send({ status: 'received' });
 
-    const eventId =
+    const orderTrackingId =
       body?.OrderTrackingId ?? body?.orderTrackingId ?? body?.id;
 
     const merchantReference =
-      body?.OrderMerchantReference ?? body?.merchantReference ?? body?.reference;
+      body?.OrderMerchantReference ??
+      body?.merchantReference ??
+      body?.reference;
 
-    if (!eventId || !merchantReference) return;
+    if (!orderTrackingId || !merchantReference) return;
 
     setImmediate(async () => {
       try {
-        const statusInfo = (await getTransactionStatus(
-          String(eventId),
+        const statusInfo = await getTransactionStatus(
+          String(orderTrackingId),
           String(merchantReference)
-        )) as any;
+        );
 
         await withTransaction(async (client) => {
           const inserted = await paymentRepo.insertWebhookEvent(
             client,
-            String(eventId),
+            String(orderTrackingId),
             body
           );
           if (!inserted) return;
@@ -140,15 +141,20 @@ export async function paymentRoutes(app: FastifyInstance) {
               client,
               merchantReference,
               'COMPLETED',
-              String(eventId)
+              String(orderTrackingId)
             );
-            await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
+
+            await paymentRepo.markEscrowFunded(
+              client,
+              escrow.id,
+              txn.id
+            );
           } else if (status.includes('FAILED')) {
             await paymentRepo.updatePesaPalTxnStatus(
               client,
               merchantReference,
               'FAILED',
-              String(eventId)
+              String(orderTrackingId)
             );
           }
         });
@@ -158,10 +164,10 @@ export async function paymentRoutes(app: FastifyInstance) {
     });
   }
 
-  // ================================
-  // PAYOUT WEBHOOK
-  // ================================
-  app.post('/payments/pesapal/payout-webhook', async (request, reply) => {
+  // =====================================================
+  // PAYOUT WEBHOOK PLACEHOLDER
+  // =====================================================
+  app.post('/payments/pesapal/payout-webhook', async () => {
     return { status: 'accepted' };
   });
 }
