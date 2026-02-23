@@ -56,14 +56,19 @@ export function buildServer() {
 
   app.register(swaggerUi, { routePrefix: '/docs' });
 
+  const registerRoutes = (instance: FastifyInstance) => {
+    instance.register(healthRoutes);
+    instance.register(authRoutes);
+    instance.register(campaignRoutes);
+    instance.register(verificationRoutes);
+    instance.register(uploadRoutes);
+    instance.register(paymentRoutes);
+    instance.register(accountRoutes);
+  };
+
   // Routes
-  app.register(healthRoutes);
-  app.register(authRoutes);
-  app.register(campaignRoutes);
-  app.register(verificationRoutes);
-  app.register(uploadRoutes);
-  app.register(paymentRoutes);
-  app.register(accountRoutes);
+  registerRoutes(app);
+  app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
 
   // 🔒 Final stabilized PesaPal configuration
   app.addHook('onReady', async () => {

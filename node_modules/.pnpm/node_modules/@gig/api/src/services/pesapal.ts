@@ -1,4 +1,6 @@
-﻿import { fetch } from 'undici';
+// apps/api/src/services/pesapal.js
+
+import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config } from '../config.js';
 
@@ -13,6 +15,7 @@ async function getToken(): Promise<string> {
   if (cachedToken && Date.now() < cachedToken.expiresAt - 30_000) {
     return cachedToken.token;
   }
+
   const res = await fetch(`${config.pesapal.baseUrl}/api/Auth/RequestToken`, {
     method: 'POST',
     headers: {
@@ -23,18 +26,27 @@ async function getToken(): Promise<string> {
       consumer_secret: config.pesapal.consumerSecret
     })
   });
+
   if (!res.ok) {
     const errorText = await res.text();
     throw new Error(`PesaPal token error: ${res.status} ${res.statusText} ${errorText}`);
   }
+
   const data = (await res.json()) as TokenResponse;
-  cachedToken = { token: data.token, expiresAt: Date.now() + data.expires_in * 1000 };
+
+  cachedToken = {
+    token: data.token,
+    expiresAt: Date.now() + data.expires_in * 1000
+  };
+
   console.info('[pesapal] OAuth token acquired', { expiresIn: data.expires_in });
+
   return data.token;
 }
 
 export async function registerIpnUrl(): Promise<any> {
   const token = await getToken();
+
   const res = await fetch(`${config.pesapal.baseUrl}/api/URLSetup/RegisterIPN`, {
     method: 'POST',
     headers: {
@@ -46,7 +58,30 @@ export async function registerIpnUrl(): Promise<any> {
       ipn_notification_type: 'POST'
     })
   });
-  if (!res.ok) throw new Error(`PesaPal IPN register failed: ${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PesaPal IPN register failed: ${res.status} ${text}`);
+  }
+
+  return res.json();
+}
+
+export async function getIpnList(): Promise<any> {
+  const token = await getToken();
+
+  const res = await fetch(`${config.pesapal.baseUrl}/api/URLSetup/GetIpnList`, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PesaPal get IPN list failed: ${res.status} ${text}`);
+  }
+
   return res.json();
 }
 
@@ -63,6 +98,7 @@ export async function submitOrder(input: {
   cancellation_url: string;
 }) {
   const token = await getToken();
+
   const res = await fetch(`${config.pesapal.baseUrl}/api/Transactions/SubmitOrderRequest`, {
     method: 'POST',
     headers: {
@@ -84,20 +120,32 @@ export async function submitOrder(input: {
       }
     })
   });
-  if (!res.ok) throw new Error(`PesaPal submit order failed: ${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PesaPal submit order failed: ${res.status} ${text}`);
+  }
+
   return res.json();
 }
 
 export async function getTransactionStatus(orderTrackingId: string, merchantReference: string) {
   const token = await getToken();
+
   const url = `${config.pesapal.baseUrl}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}&merchantReference=${encodeURIComponent(merchantReference)}`;
+
   const res = await fetch(url, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`
     }
   });
-  if (!res.ok) throw new Error(`PesaPal status failed: ${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PesaPal status failed: ${res.status} ${text}`);
+  }
+
   return res.json();
 }
 
@@ -110,6 +158,7 @@ export async function requestPayout(input: {
   receiverPhone: string;
 }) {
   const token = await getToken();
+
   const res = await fetch(`${config.pesapal.baseUrl}/api/Transactions/SubmitB2C`, {
     method: 'POST',
     headers: {
@@ -129,7 +178,12 @@ export async function requestPayout(input: {
       }
     })
   });
-  if (!res.ok) throw new Error(`PesaPal payout failed: ${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PesaPal payout failed: ${res.status} ${text}`);
+  }
+
   return res.json();
 }
 

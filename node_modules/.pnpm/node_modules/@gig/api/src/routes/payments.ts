@@ -6,6 +6,8 @@ import { config } from '../config.js';
 
 export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
+  const deepLinkReturn = 'bakule://payment/return';
+  const deepLinkCancel = 'bakule://payment/cancel';
 
   const ipnInfo = async () => {
     return {
@@ -76,10 +78,15 @@ export async function paymentRoutes(app: FastifyInstance) {
   };
 
   app.get('/payments/pesapal/ipn', ipnInfo);
-  app.get('/api/payments/pesapal/ipn', ipnInfo);
-
   app.post('/payments/pesapal/ipn', handleIpn);
-  app.post('/api/payments/pesapal/ipn', handleIpn);
+
+  app.get('/payments/return', async (_request, reply) => {
+    reply.redirect(deepLinkReturn);
+  });
+
+  app.get('/payments/cancel', async (_request, reply) => {
+    reply.redirect(deepLinkCancel);
+  });
 
   app.post('/payments/pesapal/payout-webhook', async (request, reply) => {
     const signature = request.headers['x-pesapal-signature'] as string | undefined;
