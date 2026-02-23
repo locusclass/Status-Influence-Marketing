@@ -183,6 +183,181 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
+  app.get('/admin/finance', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
+    const groupByRaw = (query?.group_by ?? '').toString().toLowerCase();
+    const groupBy = groupByRaw === 'day' || groupByRaw === 'month' ? groupByRaw : null;
+    return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(source_id::text ILIKE $${idx} OR reference ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.type) {
+        conditions.push(`source_type = $${idx}`);
+        params.push(query.type);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (query?.min_amount) {
+        conditions.push(`amount >= $${idx}`);
+        params.push(Number(query.min_amount));
+        idx++;
+      }
+      if (query?.max_amount) {
+        conditions.push(`amount <= $${idx}`);
+        params.push(Number(query.max_amount));
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await client.query(
+        `
+        WITH combined AS (
+          SELECT
+            p.id AS source_id,
+            'PAYOUT'::text AS source_type,
+            p.status::text AS status,
+            p.amount::int AS amount,
+            p.pesapal_reference::text AS reference,
+            p.user_id::text AS user_id,
+            p.created_at AS created_at
+          FROM payout_requests p
+          UNION ALL
+          SELECT
+            t.id AS source_id,
+            t.type::text AS source_type,
+            t.status::text AS status,
+            t.amount::int AS amount,
+            t.merchant_reference::text AS reference,
+            NULL::text AS user_id,
+            t.created_at AS created_at
+          FROM pesapal_transactions t
+        )
+        SELECT *
+        FROM combined
+        ${where}
+        ORDER BY created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `,
+        [...params, limit, offset]
+      );
+
+      const summary = await client.query(
+        `
+        WITH combined AS (
+          SELECT
+            'PAYOUT'::text AS source_type,
+            p.status::text AS status,
+            p.amount::int AS amount,
+            p.pesapal_reference::text AS reference,
+            p.id AS source_id,
+            p.created_at AS created_at
+          FROM payout_requests p
+          UNION ALL
+          SELECT
+            t.type::text AS source_type,
+            t.status::text AS status,
+            t.amount::int AS amount,
+            t.merchant_reference::text AS reference,
+            t.id AS source_id,
+            t.created_at AS created_at
+          FROM pesapal_transactions t
+        ),
+        filtered AS (
+          SELECT *
+          FROM combined
+          ${where}
+        )
+        SELECT
+          COALESCE(SUM(amount), 0)::bigint AS total_amount,
+          COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS payout_amount,
+          COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS pesapal_amount
+        FROM filtered
+        `,
+        params
+      );
+
+      let series: any[] = [];
+      if (groupBy) {
+        const seriesRes = await client.query(
+          `
+          WITH combined AS (
+            SELECT
+              'PAYOUT'::text AS source_type,
+              p.status::text AS status,
+              p.amount::int AS amount,
+              p.pesapal_reference::text AS reference,
+              p.id AS source_id,
+              p.created_at AS created_at
+            FROM payout_requests p
+            UNION ALL
+            SELECT
+              t.type::text AS source_type,
+              t.status::text AS status,
+              t.amount::int AS amount,
+              t.merchant_reference::text AS reference,
+              t.id AS source_id,
+              t.created_at AS created_at
+            FROM pesapal_transactions t
+          ),
+          filtered AS (
+            SELECT *
+            FROM combined
+            ${where}
+          )
+          SELECT
+            date_trunc('${groupBy}', created_at) AS bucket,
+            COALESCE(SUM(amount), 0)::bigint AS total_amount,
+            COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS payout_amount,
+            COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS pesapal_amount,
+            ROUND(COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0) * 0.15)::bigint AS platform_fee
+          FROM filtered
+          GROUP BY bucket
+          ORDER BY bucket DESC
+          LIMIT 366
+          `,
+          params
+        );
+        series = seriesRes.rows;
+      }
+
+      const totals = summary.rows[0] ?? {};
+      const payoutAmount = Number(totals.payout_amount ?? 0);
+      const platformFee = Math.round(payoutAmount * 0.15);
+      return {
+        summary: {
+          total_amount: Number(totals.total_amount ?? 0),
+          payout_amount: payoutAmount,
+          pesapal_amount: Number(totals.pesapal_amount ?? 0),
+          platform_fee: platformFee
+        },
+        rows: rows.rows,
+        series
+      };
+    });
+  });
+
   app.get('/admin/overview', { preHandler: [app.adminOnly] }, async () => {
     return withTransaction(async (client) => {
       const users = await client.query('SELECT COUNT(*)::int AS count FROM users');
