@@ -209,13 +209,25 @@ CREATE TABLE IF NOT EXISTS pesapal_webhook_events (
 
 CREATE TABLE IF NOT EXISTS admin_audit_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  actor_id UUID,
+  actor_id TEXT,
   action TEXT NOT NULL,
   target_type TEXT NOT NULL,
   target_id TEXT,
   meta JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'admin_audit_logs' AND column_name = 'actor_id' AND data_type = 'uuid'
+  ) THEN
+    ALTER TABLE admin_audit_logs
+      ALTER COLUMN actor_id TYPE TEXT
+      USING actor_id::text;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS job_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

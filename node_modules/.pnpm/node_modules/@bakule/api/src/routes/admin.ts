@@ -70,7 +70,7 @@ const AuditQuerySchema = z.object({
   q: z.string().optional(),
   action: z.string().optional(),
   target_type: z.string().optional(),
-  actor_id: z.string().uuid().optional(),
+  actor_id: z.string().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
   limit: z.string().optional(),
@@ -105,7 +105,7 @@ async function logAudit(
   await client.query(
     `INSERT INTO admin_audit_logs (actor_id, action, target_type, target_id, meta)
      VALUES ($1,$2,$3,$4,$5)`,
-    [actorId, action, targetType, targetId, meta ?? null]
+    [actorId || null, action, targetType, targetId, meta ?? null]
   );
 }
 
