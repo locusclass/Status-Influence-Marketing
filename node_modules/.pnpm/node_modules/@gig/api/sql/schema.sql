@@ -23,9 +23,28 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   phone TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR')),
+  role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$ BEGIN
+  ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+  ALTER TABLE users
+    ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+  ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
+  ALTER TABLE users
+    ADD CONSTRAINT users_status_check CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'status'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'
+      CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -37,6 +56,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   media_type TEXT NOT NULL CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO')),
   media_text TEXT,
   media_url TEXT,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED')),
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -66,6 +86,15 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE campaigns
       ADD COLUMN media_url TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'status'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'
+      CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED'));
   END IF;
 END $$;
 

@@ -15,8 +15,8 @@ export class CampaignRepo {
   }) {
     const res = await client.query(
       `INSERT INTO campaigns
-      (advertiser_id, title, platform, payout_amount, budget_total, media_type, media_text, media_url, start_date, end_date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      (advertiser_id, title, platform, payout_amount, budget_total, media_type, media_text, media_url, status, start_date, end_date)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       RETURNING *`,
       [
         input.advertiser_id,
@@ -27,6 +27,7 @@ export class CampaignRepo {
         input.media_type,
         input.media_text ?? null,
         input.media_url ?? null,
+        'ACTIVE',
         input.start_date,
         input.end_date
       ]

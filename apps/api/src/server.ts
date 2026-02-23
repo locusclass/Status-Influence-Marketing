@@ -15,7 +15,8 @@ import {
   paymentRoutes,
   uploadRoutes,
   verificationRoutes,
-  accountRoutes
+  accountRoutes,
+  adminRoutes
 } from './routes/index.js';
 
 export function buildServer() {
@@ -45,6 +46,18 @@ export function buildServer() {
     }
   });
 
+  app.decorate('adminOnly', async (request: any, reply: any) => {
+    try {
+      await request.jwtVerify();
+      const role = (request.user as any)?.role as string | undefined;
+      if (role !== 'ADMIN') {
+        return reply.code(403).send({ error: 'forbidden' });
+      }
+    } catch {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+  });
+
   app.register(swagger, {
     openapi: {
       info: {
@@ -64,6 +77,7 @@ export function buildServer() {
     instance.register(uploadRoutes);
     instance.register(paymentRoutes);
     instance.register(accountRoutes);
+    instance.register(adminRoutes);
   };
 
   // Routes

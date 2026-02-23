@@ -3,5 +3,6 @@
 declare module 'fastify' {
   interface FastifyInstance {
     authenticate: any;
+    adminOnly: any;
   }
 }
