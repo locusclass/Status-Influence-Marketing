@@ -7,8 +7,12 @@ export const config = {
   uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
   fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
   pesapal: {
-    env: process.env.PESAPAL_ENV ?? 'sandbox',
-    baseUrl: process.env.PESAPAL_BASE_URL ?? 'https://cybqa.pesapal.com/pesapalv3',
+    env: process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox',
+    baseUrl:
+      process.env.PESAPAL_BASE_URL ??
+      ((process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox') === 'live'
+        ? 'https://pay.pesapal.com/v3'
+        : 'https://cybqa.pesapal.com/pesapalv3'),
     consumerKey: process.env.PESAPAL_CONSUMER_KEY ?? '',
     consumerSecret: process.env.PESAPAL_CONSUMER_SECRET ?? '',
     ipnId: process.env.PESAPAL_IPN_ID ?? '',

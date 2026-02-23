@@ -16,63 +16,63 @@ export async function paymentRoutes(app: FastifyInstance) {
   };
 
   const handleIpn = async (request: any, reply: any) => {
-    const signature = request.headers['x-pesapal-signature'] as string | undefined;
-    const rawBody = (request as any).rawBody?.toString() ?? '';
-    if (!signature || !verifyWebhookSignature(rawBody, signature, config.pesapal.payoutWebhookSecret)) {
-      // Allow dashboard IPN validation pings to succeed without signature.
-      reply.code(200);
-      return { status: 'ignored', reason: 'invalid_signature' };
-    }
-
     const body = request.body as any;
-    const eventId = body.OrderTrackingId ?? body.orderTrackingId ?? body.id ?? body.event_id;
-    if (!eventId) {
-      reply.code(400);
-      return { error: 'missing_event_id' };
+    const rawBody = (request as any).rawBody?.toString() ?? '';
+    const signature = request.headers['x-pesapal-signature'] as string | undefined;
+
+    app.log.info({ body, hasSignature: Boolean(signature), rawBodyLength: rawBody.length }, 'pesapal ipn received');
+
+    // Respond immediately as required by PesaPal.
+    reply.code(200).send({ status: 'received' });
+
+    const eventId = body?.OrderTrackingId ?? body?.orderTrackingId ?? body?.id ?? body?.event_id;
+    const merchantReference = body?.OrderMerchantReference ?? body?.merchantReference ?? body?.reference;
+    if (!eventId || !merchantReference) {
+      app.log.warn({ eventId, merchantReference }, 'pesapal ipn missing identifiers');
+      return;
     }
 
-    const merchantReference = body.OrderMerchantReference ?? body.merchantReference ?? body.reference;
-    if (!merchantReference) {
-      reply.code(400);
-      return { error: 'missing_merchant_reference' };
-    }
+    // Process asynchronously to avoid delaying the IPN response.
+    setImmediate(async () => {
+      try {
+        const statusInfo = (await getTransactionStatus(String(eventId), String(merchantReference))) as Record<string, unknown>;
 
-    const statusInfo = (await getTransactionStatus(eventId, merchantReference)) as Record<string, unknown>;
+        const result = await withTransaction(async (client) => {
+          const inserted = await paymentRepo.insertWebhookEvent(client, String(eventId), body);
+          if (!inserted) {
+            return { ok: true, duplicate: true };
+          }
 
-    const result = await withTransaction(async (client) => {
-      const inserted = await paymentRepo.insertWebhookEvent(client, String(eventId), body);
-      if (!inserted) {
-        return { ok: true, duplicate: true };
+          const txnRows = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1', [merchantReference]);
+          const txn = txnRows.rows[0];
+          if (!txn) return { ok: false, error: 'txn_not_found' };
+
+          const amountRaw = statusInfo.amount ?? statusInfo.Amount;
+          const amount = typeof amountRaw === 'string' ? parseInt(amountRaw, 10) : Number(amountRaw ?? 0);
+          const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
+          const escrow = escrowRows.rows[0];
+          if (!escrow || amount !== escrow.amount_total) {
+            return { ok: false, error: 'amount_mismatch' };
+          }
+
+          const statusRaw = statusInfo.payment_status_description ?? statusInfo.status;
+          const status = typeof statusRaw === 'string' ? statusRaw.toUpperCase() : '';
+          if (status.includes('COMPLETED') || status.includes('SUCCESS')) {
+            await paymentRepo.updatePesaPalTxnStatus(client, merchantReference, 'COMPLETED', String(eventId));
+            await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
+          } else if (status.includes('FAILED')) {
+            await paymentRepo.updatePesaPalTxnStatus(client, merchantReference, 'FAILED', String(eventId));
+          }
+          return { ok: true };
+        });
+
+        if (!result.ok) {
+          app.log.warn({ result, eventId, merchantReference }, 'pesapal ipn processing issue');
+        }
+      } catch (error) {
+        app.log.error({ error, eventId, merchantReference }, 'pesapal ipn processing failed');
       }
-
-      const txnRows = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1', [merchantReference]);
-      const txn = txnRows.rows[0];
-      if (!txn) return { ok: false, error: 'txn_not_found' };
-
-      const amountRaw = statusInfo.amount ?? statusInfo.Amount;
-      const amount = typeof amountRaw === 'string' ? parseInt(amountRaw, 10) : 0;
-      const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
-      const escrow = escrowRows.rows[0];
-      if (!escrow || amount !== escrow.amount_total) {
-        return { ok: false, error: 'amount_mismatch' };
-      }
-
-      const statusRaw = statusInfo.payment_status_description ?? statusInfo.status;
-      const status = typeof statusRaw === 'string' ? statusRaw.toUpperCase() : '';
-      if (status.includes('COMPLETED') || status.includes('SUCCESS')) {
-        await paymentRepo.updatePesaPalTxnStatus(client, merchantReference, 'COMPLETED', eventId);
-        await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
-      } else if (status.includes('FAILED')) {
-        await paymentRepo.updatePesaPalTxnStatus(client, merchantReference, 'FAILED', eventId);
-      }
-      return { ok: true };
     });
-
-    if (!result.ok) {
-      reply.code(400);
-      return result;
-    }
-    return { status: 'accepted' };
   };
 
   app.get('/payments/pesapal/ipn', ipnInfo);

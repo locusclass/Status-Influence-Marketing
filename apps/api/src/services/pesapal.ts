@@ -24,10 +24,12 @@ async function getToken(): Promise<string> {
     })
   });
   if (!res.ok) {
-    throw new Error(`PesaPal token error: ${res.status}`);
+    const errorText = await res.text();
+    throw new Error(`PesaPal token error: ${res.status} ${res.statusText} ${errorText}`);
   }
   const data = (await res.json()) as TokenResponse;
   cachedToken = { token: data.token, expiresAt: Date.now() + data.expires_in * 1000 };
+  console.info('[pesapal] OAuth token acquired', { expiresIn: data.expires_in });
   return data.token;
 }
 

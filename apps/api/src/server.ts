@@ -6,6 +6,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { config } from './config.js';
+import { registerIpnUrl } from './services/pesapal.js';
 import {
   authRoutes,
   campaignRoutes,
@@ -65,6 +66,25 @@ export function buildServer() {
   app.register(uploadRoutes);
   app.register(paymentRoutes);
   app.register(accountRoutes);
+
+  app.addHook('onReady', async () => {
+    if (!config.pesapal.ipnId && config.pesapal.callbackUrl) {
+      setImmediate(async () => {
+        try {
+          const result = await registerIpnUrl();
+          const ipnId = result?.ipn_id ?? result?.ipnId ?? result?.data?.ipn_id;
+          if (ipnId) {
+            config.pesapal.ipnId = String(ipnId);
+            app.log.info({ ipnId }, 'pesapal ipn registered');
+          } else {
+            app.log.warn({ result }, 'pesapal ipn register returned no ipn_id');
+          }
+        } catch (error) {
+          app.log.warn({ error }, 'pesapal ipn register failed');
+        }
+      });
+    }
+  });
 
   return app;
 }
