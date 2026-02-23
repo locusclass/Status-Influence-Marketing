@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
+import { config } from '../config.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR'])
@@ -58,7 +59,33 @@ const UpdateJobSchema = z.object({
   last_error: z.string().optional().nullable()
 });
 
+const AdminAccessSchema = z.object({
+  phrase: z.string().min(6)
+});
+
 export async function adminRoutes(app: FastifyInstance) {
+  app.post('/admin/access', async (request, reply) => {
+    const body = AdminAccessSchema.parse(request.body);
+    if (!config.adminAccessPhrase || body.phrase !== config.adminAccessPhrase) {
+      reply.code(401);
+      return { error: 'invalid_phrase' };
+    }
+
+    const token = app.jwt.sign({
+      sub: 'ariaka-access',
+      role: 'ADMIN'
+    });
+
+    return {
+      token,
+      user: {
+        id: 'ariaka-access',
+        email: 'ariaka-access@local',
+        role: 'ADMIN'
+      }
+    };
+  });
+
   app.get('/admin/overview', { preHandler: [app.adminOnly] }, async () => {
     return withTransaction(async (client) => {
       const users = await client.query('SELECT COUNT(*)::int AS count FROM users');

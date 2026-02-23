@@ -19,5 +19,6 @@ export const config = {
     callbackUrl: process.env.PESAPAL_CALLBACK_URL ?? '',
     payoutCallbackUrl: process.env.PESAPAL_PAYOUT_CALLBACK_URL ?? '',
     payoutWebhookSecret: process.env.PESAPAL_PAYOUT_WEBHOOK_SECRET ?? ''
-  }
+  },
+  adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? ''
 };
