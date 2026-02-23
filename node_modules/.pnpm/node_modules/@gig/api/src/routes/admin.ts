@@ -298,6 +298,44 @@ export async function adminRoutes(app: FastifyInstance) {
         params
       );
 
+      const escrowConditions: string[] = [];
+      const escrowParams: any[] = [];
+      let eidx = 1;
+
+      if (range.from) {
+        escrowConditions.push(`created_at >= $${eidx}`);
+        escrowParams.push(range.from);
+        eidx++;
+      }
+      if (range.to) {
+        escrowConditions.push(`created_at <= $${eidx}`);
+        escrowParams.push(range.to);
+        eidx++;
+      }
+      if (query?.min_amount) {
+        escrowConditions.push(`amount_total >= $${eidx}`);
+        escrowParams.push(Number(query.min_amount));
+        eidx++;
+      }
+      if (query?.max_amount) {
+        escrowConditions.push(`amount_total <= $${eidx}`);
+        escrowParams.push(Number(query.max_amount));
+        eidx++;
+      }
+      if (query?.status && ['PENDING', 'FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(query.status)) {
+        escrowConditions.push(`status = $${eidx}`);
+        escrowParams.push(query.status);
+        eidx++;
+      } else {
+        escrowConditions.push(`status IN ('FUNDED','PARTIALLY_DISBURSED','COMPLETED')`);
+      }
+
+      const escrowWhere = escrowConditions.length ? `WHERE ${escrowConditions.join(' AND ')}` : '';
+      const escrowRes = await client.query(
+        `SELECT COALESCE(SUM(amount_total), 0)::bigint AS contracts_financed FROM escrow_ledger ${escrowWhere}`,
+        escrowParams
+      );
+
       let series: any[] = [];
       if (groupBy) {
         const seriesRes = await client.query(
@@ -345,12 +383,14 @@ export async function adminRoutes(app: FastifyInstance) {
       const totals = summary.rows[0] ?? {};
       const payoutAmount = Number(totals.payout_amount ?? 0);
       const platformFee = Math.round(payoutAmount * 0.15);
+      const contractsFinanced = Number(escrowRes.rows[0]?.contracts_financed ?? 0);
       return {
         summary: {
           total_amount: Number(totals.total_amount ?? 0),
           payout_amount: payoutAmount,
           pesapal_amount: Number(totals.pesapal_amount ?? 0),
-          platform_fee: platformFee
+          platform_fee: platformFee,
+          contracts_financed: contractsFinanced
         },
         rows: rows.rows,
         series
