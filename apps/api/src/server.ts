@@ -20,11 +20,8 @@ import {
 export function buildServer() {
   const app = Fastify({ logger: true });
 
-  // ✅ Let Fastify handle JSON parsing normally
-  // (Removed custom content-type parser that was breaking Flutter Web)
-
   app.register(cors, {
-    origin: true, // allow all origins (safe for API layer)
+    origin: true,
     credentials: true,
   });
 
@@ -72,12 +69,27 @@ export function buildServer() {
       setImmediate(async () => {
         try {
           const result = await registerIpnUrl();
-          const ipnId = result?.ipn_id ?? result?.ipnId ?? result?.data?.ipn_id;
+
+          // 🔍 Log full raw response safely (temporary diagnostic)
+          app.log.info(
+            { result },
+            'pesapal raw ipn registration response'
+          );
+
+          const ipnId =
+            result?.ipn_id ??
+            result?.ipnId ??
+            result?.data?.ipn_id ??
+            result?.data?.ipnId;
+
           if (ipnId) {
             config.pesapal.ipnId = String(ipnId);
             app.log.info({ ipnId }, 'pesapal ipn registered');
           } else {
-            app.log.warn({ result }, 'pesapal ipn register returned no ipn_id');
+            app.log.warn(
+              { result },
+              'pesapal ipn register returned no ipn_id'
+            );
           }
         } catch (error) {
           app.log.warn({ error }, 'pesapal ipn register failed');
