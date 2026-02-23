@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
+import { PaymentRepo } from '../repositories/paymentRepo.js';
+import { getTransactionStatus } from '../services/pesapal.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR'])
@@ -56,14 +58,60 @@ const AdjustWalletSchema = z.object({
 const UpdateJobSchema = z.object({
   status: z.enum(['QUEUED', 'PROCESSING', 'RETRY', 'FAILED', 'DONE']).optional(),
   attempts: z.number().int().min(0).optional(),
-  last_error: z.string().optional().nullable()
+  last_error: z.string().optional().nullable(),
+  retry_reason: z.string().optional().nullable()
 });
 
 const AdminAccessSchema = z.object({
   phrase: z.string().min(6)
 });
 
+const AuditQuerySchema = z.object({
+  q: z.string().optional(),
+  action: z.string().optional(),
+  target_type: z.string().optional(),
+  actor_id: z.string().uuid().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  limit: z.string().optional(),
+  offset: z.string().optional()
+});
+
+function parsePaging(query: any) {
+  const limitRaw = Number(query?.limit ?? 50);
+  const offsetRaw = Number(query?.offset ?? 0);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+  const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+  return { limit, offset };
+}
+
+function parseDateRange(from?: string, to?: string) {
+  const start = from ? new Date(from) : null;
+  const end = to ? new Date(to) : null;
+  return {
+    from: start && !isNaN(start.getTime()) ? start.toISOString() : null,
+    to: end && !isNaN(end.getTime()) ? end.toISOString() : null
+  };
+}
+
+async function logAudit(
+  client: any,
+  actorId: string,
+  action: string,
+  targetType: string,
+  targetId: string | null,
+  meta: any
+) {
+  await client.query(
+    `INSERT INTO admin_audit_logs (actor_id, action, target_type, target_id, meta)
+     VALUES ($1,$2,$3,$4,$5)`,
+    [actorId, action, targetType, targetId, meta ?? null]
+  );
+}
+
 export async function adminRoutes(app: FastifyInstance) {
+  const paymentRepo = new PaymentRepo();
+
   app.post('/admin/access', async (request, reply) => {
     const body = AdminAccessSchema.parse(request.body);
     if (!config.adminAccessPhrase || body.phrase !== config.adminAccessPhrase) {
@@ -86,6 +134,55 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  app.get('/admin/audit', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = AuditQuerySchema.parse(request.query ?? {});
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query.from, query.to);
+    return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query.q) {
+        conditions.push(`(action ILIKE $${idx} OR target_type ILIKE $${idx} OR target_id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query.action) {
+        conditions.push(`action = $${idx}`);
+        params.push(query.action);
+        idx++;
+      }
+      if (query.target_type) {
+        conditions.push(`target_type = $${idx}`);
+        params.push(query.target_type);
+        idx++;
+      }
+      if (query.actor_id) {
+        conditions.push(`actor_id = $${idx}`);
+        params.push(query.actor_id);
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const list = await client.query(
+        `SELECT * FROM admin_audit_logs ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      );
+      return { logs: list.rows };
+    });
+  });
+
   app.get('/admin/overview', { preHandler: [app.adminOnly] }, async () => {
     return withTransaction(async (client) => {
       const users = await client.query('SELECT COUNT(*)::int AS count FROM users');
@@ -105,9 +202,46 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get('/admin/users', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/users', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      const res = await client.query('SELECT * FROM users ORDER BY created_at DESC LIMIT 500');
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(email ILIKE $${idx} OR phone ILIKE $${idx} OR id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.role) {
+        conditions.push(`role = $${idx}`);
+        params.push(query.role);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await client.query(
+        `SELECT * FROM users ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      );
       return { users: res.rows };
     });
   });
@@ -120,6 +254,16 @@ export async function adminRoutes(app: FastifyInstance) {
         'UPDATE users SET role=$2 WHERE id=$1 RETURNING *',
         [params.id, body.role]
       );
+      if (res.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_USER_ROLE',
+          'user',
+          params.id,
+          { role: body.role }
+        );
+      }
       return res.rows[0];
     });
     if (!result) {
@@ -137,6 +281,16 @@ export async function adminRoutes(app: FastifyInstance) {
         'UPDATE users SET status=$2 WHERE id=$1 RETURNING *',
         [params.id, body.status]
       );
+      if (res.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_USER_STATUS',
+          'user',
+          params.id,
+          { status: body.status }
+        );
+      }
       return res.rows[0];
     });
     if (!result) {
@@ -154,6 +308,16 @@ export async function adminRoutes(app: FastifyInstance) {
         'UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id, email, role',
         [params.id, hashPassword(body.password)]
       );
+      if (res.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'RESET_USER_PASSWORD',
+          'user',
+          params.id,
+          {}
+        );
+      }
       return res.rows[0];
     });
     if (!result) {
@@ -163,9 +327,56 @@ export async function adminRoutes(app: FastifyInstance) {
     return { user: result };
   });
 
-  app.get('/admin/campaigns', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/campaigns', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      const res = await client.query('SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 500');
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(title ILIKE $${idx} OR id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (query?.platform) {
+        conditions.push(`platform = $${idx}`);
+        params.push(query.platform);
+        idx++;
+      }
+      if (query?.min_amount) {
+        conditions.push(`budget_total >= $${idx}`);
+        params.push(Number(query.min_amount));
+        idx++;
+      }
+      if (query?.max_amount) {
+        conditions.push(`budget_total <= $${idx}`);
+        params.push(Number(query.max_amount));
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await client.query(
+        `SELECT * FROM campaigns ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      );
       return { campaigns: res.rows };
     });
   });
@@ -202,6 +413,16 @@ export async function adminRoutes(app: FastifyInstance) {
           body.end_date ?? null
         ]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_CAMPAIGN',
+          'campaign',
+          params.id,
+          body
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -211,15 +432,51 @@ export async function adminRoutes(app: FastifyInstance) {
     return { campaign: res };
   });
 
-  app.get('/admin/proofs', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/proofs', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(p.id::text ILIKE $${idx} OR c.title ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`p.status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (query?.decision) {
+        conditions.push(`p.decision = $${idx}`);
+        params.push(query.decision);
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`p.created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`p.created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT p.*, c.title AS campaign_title
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN campaigns c ON c.id = s.campaign_id
+         ${where}
          ORDER BY p.created_at DESC
-         LIMIT 500`
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { proofs: res.rows };
     });
@@ -241,6 +498,16 @@ export async function adminRoutes(app: FastifyInstance) {
          RETURNING *`,
         [params.id, body.status ?? null, body.decision ?? null]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_PROOF',
+          'proof',
+          params.id,
+          body
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -250,9 +517,46 @@ export async function adminRoutes(app: FastifyInstance) {
     return { proof: res };
   });
 
-  app.get('/admin/wallets', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/wallets', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      const res = await client.query('SELECT * FROM wallets ORDER BY created_at DESC LIMIT 500');
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(id::text ILIKE $${idx} OR user_id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.min_amount) {
+        conditions.push(`balance >= $${idx}`);
+        params.push(Number(query.min_amount));
+        idx++;
+      }
+      if (query?.max_amount) {
+        conditions.push(`balance <= $${idx}`);
+        params.push(Number(query.max_amount));
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await client.query(
+        `SELECT * FROM wallets ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      );
       return { wallets: res.rows };
     });
   });
@@ -272,6 +576,14 @@ export async function adminRoutes(app: FastifyInstance) {
       await client.query(
         'INSERT INTO wallet_txns (wallet_id, amount, direction, reference) VALUES ($1,$2,$3,$4)',
         [params.id, body.amount, body.direction, body.reference ?? 'ADMIN_ADJUST']
+      );
+      await logAudit(
+        client,
+        (request.user as any).sub,
+        'ADJUST_WALLET',
+        'wallet',
+        params.id,
+        { amount: body.amount, direction: body.direction, reference: body.reference }
       );
       return updated.rows[0];
     });
@@ -293,14 +605,55 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get('/admin/escrows', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/escrows', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(c.title ILIKE $${idx} OR e.id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`e.status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (query?.min_amount) {
+        conditions.push(`e.amount_total >= $${idx}`);
+        params.push(Number(query.min_amount));
+        idx++;
+      }
+      if (query?.max_amount) {
+        conditions.push(`e.amount_total <= $${idx}`);
+        params.push(Number(query.max_amount));
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`e.created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`e.created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT e.*, c.title AS campaign_title
          FROM escrow_ledger e
          JOIN campaigns c ON c.id = e.campaign_id
+         ${where}
          ORDER BY e.created_at DESC
-         LIMIT 500`
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { escrows: res.rows };
     });
@@ -314,6 +667,16 @@ export async function adminRoutes(app: FastifyInstance) {
         'UPDATE escrow_ledger SET status=$2 WHERE id=$1 RETURNING *',
         [params.id, body.status]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_ESCROW',
+          'escrow',
+          params.id,
+          { status: body.status }
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -323,28 +686,100 @@ export async function adminRoutes(app: FastifyInstance) {
     return { escrow: res };
   });
 
-  app.get('/admin/payouts', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/payouts', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(p.id::text ILIKE $${idx} OR u.email ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`p.status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (query?.min_amount) {
+        conditions.push(`p.amount >= $${idx}`);
+        params.push(Number(query.min_amount));
+        idx++;
+      }
+      if (query?.max_amount) {
+        conditions.push(`p.amount <= $${idx}`);
+        params.push(Number(query.max_amount));
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`p.created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`p.created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT p.*, u.email AS user_email
          FROM payout_requests p
          JOIN users u ON u.id = p.user_id
+         ${where}
          ORDER BY p.created_at DESC
-         LIMIT 500`
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { payouts: res.rows };
     });
   });
 
-  app.get('/admin/contracts', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/contracts', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(c.title ILIKE $${idx} OR u.email ILIKE $${idx} OR ctr.id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`ctr.status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`ctr.created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`ctr.created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT ctr.*, c.title AS campaign_title, u.email AS distributor_email
          FROM contracts ctr
          JOIN campaigns c ON c.id = ctr.campaign_id
          JOIN users u ON u.id = ctr.distributor_id
+         ${where}
          ORDER BY ctr.created_at DESC
-         LIMIT 500`
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { contracts: res.rows };
     });
@@ -366,6 +801,16 @@ export async function adminRoutes(app: FastifyInstance) {
          RETURNING *`,
         [params.id, body.status ?? null, body.distributor_id ?? null]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_CONTRACT',
+          'contract',
+          params.id,
+          body
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -376,17 +821,27 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.get('/admin/jobs', { preHandler: [app.adminOnly] }, async (request) => {
-    const query = request.query as { status?: string };
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
       if (query?.status) {
-        const res = await client.query(
-          'SELECT * FROM job_queue WHERE status=$1 ORDER BY updated_at DESC LIMIT 500',
-          [query.status]
-        );
-        return { jobs: res.rows };
+        conditions.push(`status = $${idx}`);
+        params.push(query.status);
+        idx++;
       }
+      if (query?.q) {
+        conditions.push(`(job_type ILIKE $${idx} OR id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        'SELECT * FROM job_queue ORDER BY updated_at DESC LIMIT 500'
+        `SELECT * FROM job_queue ${where} ORDER BY updated_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { jobs: res.rows };
     });
@@ -401,10 +856,21 @@ export async function adminRoutes(app: FastifyInstance) {
          SET status=COALESCE($2, status),
              attempts=COALESCE($3, attempts),
              last_error=COALESCE($4, last_error),
+             retry_reason=COALESCE($5, retry_reason),
              updated_at=now()
          WHERE id=$1 RETURNING *`,
-        [params.id, body.status ?? null, body.attempts ?? null, body.last_error ?? null]
+        [params.id, body.status ?? null, body.attempts ?? null, body.last_error ?? null, body.retry_reason ?? null]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_JOB',
+          'job',
+          params.id,
+          body
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -416,13 +882,28 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.post('/admin/jobs/:id/retry', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const params = request.params as { id: string };
+    const body = (request.body ?? {}) as { reason?: string };
     const res = await withTransaction(async (client) => {
       const updated = await client.query(
         `UPDATE job_queue
-         SET status='QUEUED', attempts=0, last_error=NULL, run_at=now(), updated_at=now()
+         SET status='QUEUED',
+             attempts=0,
+             retry_reason=COALESCE($2, retry_reason),
+             run_at=now(),
+             updated_at=now()
          WHERE id=$1 RETURNING *`,
-        [params.id]
+        [params.id, body.reason ?? null]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'RETRY_JOB',
+          'job',
+          params.id,
+          { reason: body.reason ?? null }
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -440,6 +921,16 @@ export async function adminRoutes(app: FastifyInstance) {
         'UPDATE payout_requests SET status=$2 WHERE id=$1 RETURNING *',
         [params.id, body.status]
       );
+      if (updated.rows[0]) {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_PAYOUT',
+          'payout',
+          params.id,
+          { status: body.status }
+        );
+      }
       return updated.rows[0];
     });
     if (!res) {
@@ -449,21 +940,191 @@ export async function adminRoutes(app: FastifyInstance) {
     return { payout: res };
   });
 
-  app.get('/admin/pesapal/transactions', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/pesapal/transactions', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(merchant_reference ILIKE $${idx} OR id::text ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (query?.status) {
+        conditions.push(`status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (query?.type) {
+        conditions.push(`type = $${idx}`);
+        params.push(query.type);
+        idx++;
+      }
+      if (query?.min_amount) {
+        conditions.push(`amount >= $${idx}`);
+        params.push(Number(query.min_amount));
+        idx++;
+      }
+      if (query?.max_amount) {
+        conditions.push(`amount <= $${idx}`);
+        params.push(Number(query.max_amount));
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`created_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`created_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        'SELECT * FROM pesapal_transactions ORDER BY created_at DESC LIMIT 500'
+        `SELECT * FROM pesapal_transactions ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { transactions: res.rows };
     });
   });
 
-  app.get('/admin/pesapal/webhooks', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/pesapal/webhooks', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query?.q) {
+        conditions.push(`(event_id ILIKE $${idx})`);
+        params.push(`%${query.q}%`);
+        idx++;
+      }
+      if (range.from) {
+        conditions.push(`received_at >= $${idx}`);
+        params.push(range.from);
+        idx++;
+      }
+      if (range.to) {
+        conditions.push(`received_at <= $${idx}`);
+        params.push(range.to);
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        'SELECT * FROM pesapal_webhook_events ORDER BY received_at DESC LIMIT 500'
+        `SELECT * FROM pesapal_webhook_events ${where} ORDER BY received_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
       );
       return { webhooks: res.rows };
+    });
+  });
+
+  app.post('/admin/pesapal/webhooks/:eventId/replay', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { eventId: string };
+    return withTransaction(async (client) => {
+      const res = await client.query(
+        'SELECT * FROM pesapal_webhook_events WHERE event_id=$1',
+        [params.eventId]
+      );
+      const event = res.rows[0];
+      if (!event) {
+        reply.code(404);
+        return { error: 'event_not_found' };
+      }
+
+      const body = event.payload ?? {};
+      const reference =
+        body.reference ?? body.merchant_reference ?? body.OrderMerchantReference ?? body.merchantReference;
+      const trackingId =
+        body.OrderTrackingId ?? body.orderTrackingId ?? body.id ?? body.event_id ?? body.tracking_id;
+      const statusRaw = (body.status ?? body.payment_status_description ?? '').toString().toUpperCase();
+
+      // Heuristic: payout webhooks usually have status + reference
+      const isPayout = Boolean(body.status || body.tracking_id || body.merchant_reference);
+
+      if (isPayout && reference) {
+        const payoutRows = await client.query(
+          'SELECT * FROM payout_requests WHERE pesapal_reference=$1',
+          [reference]
+        );
+        const payout = payoutRows.rows[0];
+        if (!payout) {
+          reply.code(404);
+          return { error: 'payout_not_found' };
+        }
+
+        if (statusRaw.includes('PAID') || statusRaw.includes('COMPLETED') || statusRaw.includes('SUCCESS')) {
+          await paymentRepo.updatePayoutStatus(client, payout.id, 'PAID', reference);
+        } else if (statusRaw.includes('FAILED')) {
+          await paymentRepo.updatePayoutStatus(client, payout.id, 'FAILED', reference);
+        }
+
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'REPLAY_WEBHOOK_PAYOUT',
+          'payout',
+          payout.id,
+          { event_id: params.eventId }
+        );
+
+        return { ok: true, type: 'PAYOUT' };
+      }
+
+      if (trackingId && reference) {
+        const statusInfo = (await getTransactionStatus(String(trackingId), String(reference))) as Record<string, unknown>;
+        const txnRows = await client.query(
+          'SELECT * FROM pesapal_transactions WHERE merchant_reference=$1',
+          [reference]
+        );
+        const txn = txnRows.rows[0];
+        if (!txn) {
+          reply.code(404);
+          return { error: 'txn_not_found' };
+        }
+
+        const amountRaw = (statusInfo as any).amount ?? (statusInfo as any).Amount;
+        const amount = typeof amountRaw === 'string' ? parseInt(amountRaw, 10) : Number(amountRaw ?? 0);
+        const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
+        const escrow = escrowRows.rows[0];
+        if (!escrow || amount !== escrow.amount_total) {
+          reply.code(400);
+          return { error: 'amount_mismatch' };
+        }
+
+        const statusText = ((statusInfo as any).payment_status_description ?? (statusInfo as any).status ?? '')
+          .toString()
+          .toUpperCase();
+        if (statusText.includes('COMPLETED') || statusText.includes('SUCCESS')) {
+          await paymentRepo.updatePesaPalTxnStatus(client, reference, 'COMPLETED', String(trackingId));
+          await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
+        } else if (statusText.includes('FAILED')) {
+          await paymentRepo.updatePesaPalTxnStatus(client, reference, 'FAILED', String(trackingId));
+        }
+
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'REPLAY_WEBHOOK_IPN',
+          'escrow',
+          escrow.id,
+          { event_id: params.eventId }
+        );
+
+        return { ok: true, type: 'IPN' };
+      }
+
+      reply.code(400);
+      return { error: 'unhandled_payload' };
     });
   });
 }

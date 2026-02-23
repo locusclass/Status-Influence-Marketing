@@ -9,10 +9,17 @@ export class JobRepo {
     return res.rows[0];
   }
 
-  async updateJob(client: PoolClient, jobId: string, status: string, attempts: number, lastError?: string) {
+  async updateJob(
+    client: PoolClient,
+    jobId: string,
+    status: string,
+    attempts: number,
+    lastError?: string,
+    retryReason?: string
+  ) {
     const res = await client.query(
-      'UPDATE job_queue SET status=$2, attempts=$3, last_error=$4, updated_at=now() WHERE id=$1 RETURNING *',
-      [jobId, status, attempts, lastError ?? null]
+      'UPDATE job_queue SET status=$2, attempts=$3, last_error=$4, retry_reason=$5, updated_at=now() WHERE id=$1 RETURNING *',
+      [jobId, status, attempts, lastError ?? null, retryReason ?? null]
     );
     return res.rows[0];
   }

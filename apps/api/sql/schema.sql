@@ -207,6 +207,16 @@ CREATE TABLE IF NOT EXISTS pesapal_webhook_events (
   received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID,
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT,
+  meta JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS job_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   job_type TEXT NOT NULL,
@@ -216,11 +226,43 @@ CREATE TABLE IF NOT EXISTS job_queue (
   max_attempts INTEGER NOT NULL DEFAULT 5,
   run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_error TEXT,
+  retry_reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'job_queue' AND column_name = 'retry_reason'
+  ) THEN
+    ALTER TABLE job_queue
+      ADD COLUMN retry_reason TEXT;
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_job_queue_run ON job_queue(status, run_at);
+CREATE INDEX IF NOT EXISTS idx_job_queue_created_at ON job_queue(created_at);
+CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status);
 CREATE INDEX IF NOT EXISTS idx_proofs_session ON proofs(session_id);
 CREATE INDEX IF NOT EXISTS idx_trust_events_user ON trust_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_pesapal_txn_ref ON pesapal_transactions(merchant_reference);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE INDEX IF NOT EXISTS idx_campaigns_created_at ON campaigns(created_at);
+CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+CREATE INDEX IF NOT EXISTS idx_proofs_created_at ON proofs(created_at);
+CREATE INDEX IF NOT EXISTS idx_proofs_status ON proofs(status);
+CREATE INDEX IF NOT EXISTS idx_payouts_created_at ON payout_requests(created_at);
+CREATE INDEX IF NOT EXISTS idx_payouts_status ON payout_requests(status);
+CREATE INDEX IF NOT EXISTS idx_escrows_created_at ON escrow_ledger(created_at);
+CREATE INDEX IF NOT EXISTS idx_escrows_status ON escrow_ledger(status);
+CREATE INDEX IF NOT EXISTS idx_contracts_created_at ON contracts(created_at);
+CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status);
+CREATE INDEX IF NOT EXISTS idx_wallets_created_at ON wallets(created_at);
+CREATE INDEX IF NOT EXISTS idx_pesapal_created_at ON pesapal_transactions(created_at);
+CREATE INDEX IF NOT EXISTS idx_pesapal_status ON pesapal_transactions(status);
+CREATE INDEX IF NOT EXISTS idx_webhooks_received_at ON pesapal_webhook_events(received_at);
+CREATE INDEX IF NOT EXISTS idx_audit_created_at ON admin_audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON admin_audit_logs(action);
