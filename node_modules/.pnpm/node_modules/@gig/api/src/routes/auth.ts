@@ -21,6 +21,14 @@ const loginSchema = z.object({
 export async function authRoutes(app: FastifyInstance) {
   const userRepo = new UserRepo();
 
+  app.get('/auth/register', async () => {
+    return {
+      ok: true,
+      method: 'POST',
+      note: 'Use POST /auth/register with JSON body { email, phone, password, role, country }.',
+    };
+  });
+
   app.post('/auth/register', async (request, reply) => {
     const body = registerSchema.parse(request.body);
 
