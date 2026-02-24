@@ -10,10 +10,11 @@ export class VerificationRepo {
     script?: any;
     expires_at: string;
   }) {
+    const scriptJson = input.script == null ? null : JSON.stringify(input.script);
     const res = await client.query(
       `INSERT INTO verification_sessions
       (user_id, campaign_id, platform, challenge_code, challenge_phrase, script, expires_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
       RETURNING *`,
       [
         input.user_id,
@@ -21,7 +22,7 @@ export class VerificationRepo {
         input.platform,
         input.challenge_code,
         input.challenge_phrase,
-        input.script ?? null,
+        scriptJson,
         input.expires_at
       ]
     );
@@ -39,10 +40,11 @@ export class VerificationRepo {
     video_url: string;
     meta?: any;
   }) {
+    const metaJson = input.meta == null ? null : JSON.stringify(input.meta);
     const res = await client.query(
       `INSERT INTO proofs (session_id, user_id, video_url, meta)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [input.session_id, input.user_id, input.video_url, input.meta ?? null]
+       VALUES ($1,$2,$3,$4::jsonb) RETURNING *`,
+      [input.session_id, input.user_id, input.video_url, metaJson]
     );
     return res.rows[0];
   }

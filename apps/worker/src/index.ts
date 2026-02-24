@@ -238,7 +238,7 @@ async function processVerificationJob(job: any) {
              observed_post_hash=$4,
              challenge_seen=$5,
              confidence=$6,
-             review_reasons=$7,
+             review_reasons=$7::jsonb,
              status=$2
          WHERE id=$1`,
         [
