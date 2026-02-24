@@ -11,6 +11,10 @@ export async function verificationRoutes(app: FastifyInstance) {
 
   app.post('/verification/sessions', { preHandler: [app.authenticate] }, async (request) => {
     const body = CreateVerificationSessionSchema.parse(request.body);
+    const authUser = (request.user as any)?.sub as string | undefined;
+    if (!authUser || authUser !== body.user_id) {
+      return { error: 'unauthorized' } as any;
+    }
     const challenge_code = generateChallengeCode();
     const challenge_phrase = generateChallengePhrase();
     const expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();

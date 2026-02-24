@@ -32,4 +32,26 @@ export async function accountRoutes(app: FastifyInstance) {
     });
     return { proofs };
   });
+
+  app.get('/proofs/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const params = request.params as { id: string };
+    const proof = await withTransaction(async (client) => {
+      const res = await client.query(
+        `SELECT p.*, c.title AS campaign_title
+         FROM proofs p
+         JOIN verification_sessions s ON s.id = p.session_id
+         JOIN campaigns c ON c.id = s.campaign_id
+         WHERE p.user_id=$1 AND p.id=$2
+         LIMIT 1`,
+        [userId, params.id]
+      );
+      return res.rows[0];
+    });
+    if (!proof) {
+      reply.code(404);
+      return { error: 'proof_not_found' };
+    }
+    return { proof };
+  });
 }

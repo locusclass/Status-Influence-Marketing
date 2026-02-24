@@ -133,34 +133,38 @@ async function processVerificationJob(job: any) {
         ]
       );
 
-      const delta =
-        finalDecision === 'VERIFIED'
-          ? 2
-          : finalDecision === 'REJECTED'
-          ? -5
-          : -1;
+      const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
 
-      await client.query(
-        'INSERT INTO trust_events (user_id, event_type, delta) VALUES ($1,$2,$3)',
-        [proof.user_id, finalDecision, delta]
-      );
+      if (!isAdvertiserProof) {
+        const delta =
+          finalDecision === 'VERIFIED'
+            ? 2
+            : finalDecision === 'REJECTED'
+            ? -5
+            : -1;
 
-      await client.query(
-        `INSERT INTO trust_scores (user_id, score)
-         VALUES ($1, 50)
-         ON CONFLICT (user_id) DO NOTHING`,
-        [proof.user_id]
-      );
+        await client.query(
+          'INSERT INTO trust_events (user_id, event_type, delta) VALUES ($1,$2,$3)',
+          [proof.user_id, finalDecision, delta]
+        );
 
-      await client.query(
-        `UPDATE trust_scores
-         SET score = LEAST(100, GREATEST(0, score + $2)),
-             updated_at = now()
-         WHERE user_id=$1`,
-        [proof.user_id, delta]
-      );
+        await client.query(
+          `INSERT INTO trust_scores (user_id, score)
+           VALUES ($1, 50)
+           ON CONFLICT (user_id) DO NOTHING`,
+          [proof.user_id]
+        );
 
-      if (finalDecision === 'VERIFIED') {
+        await client.query(
+          `UPDATE trust_scores
+           SET score = LEAST(100, GREATEST(0, score + $2)),
+               updated_at = now()
+           WHERE user_id=$1`,
+          [proof.user_id, delta]
+        );
+      }
+
+      if (finalDecision === 'VERIFIED' && !isAdvertiserProof) {
         const trustRow = await client.query(
           'SELECT score FROM trust_scores WHERE user_id=$1',
           [proof.user_id]
