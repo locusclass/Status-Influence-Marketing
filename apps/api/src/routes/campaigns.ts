@@ -5,6 +5,7 @@ import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { submitOrder } from '../services/pesapal.js';
 import { v4 as uuid } from 'uuid';
+import { config } from '../config.js';
 
 export async function campaignRoutes(app: FastifyInstance) {
   const campaignRepo = new CampaignRepo();
@@ -43,12 +44,30 @@ export async function campaignRoutes(app: FastifyInstance) {
     const body = FundCampaignSchema.parse({ campaign_id: params.id, ...(request.body as any) });
 
     const { order, pesapalTxn } = await withTransaction(async (client) => {
+      if (!config.pesapal.ipnId) {
+        reply.code(503);
+        return { error: 'pesapal_ipn_not_configured' } as any;
+      }
+
       const authUser = (request.user as any)?.sub as string | undefined;
-      const userEmailRes = authUser ? await client.query('SELECT email FROM users WHERE id=$1', [authUser]) : null;
+      const userEmailRes = authUser
+        ? await client.query('SELECT email, currency FROM users WHERE id=$1', [authUser])
+        : null;
       const userEmail = userEmailRes?.rows?.[0]?.email as string | undefined;
+      const rawCurrency = (userEmailRes?.rows?.[0]?.currency as string | undefined) ?? 'UGX';
+      const userCurrency = rawCurrency.toUpperCase().length == 3 ? rawCurrency.toUpperCase() : 'UGX';
       if (!userEmail) {
         reply.code(400);
         return { error: 'user_email_missing' } as any;
+      }
+      if (!body.return_url || !body.cancel_url) {
+        reply.code(400);
+        return { error: 'payment_redirect_urls_missing' } as any;
+      }
+      const isValidUrl = (url: string) => /^https?:\/\//i.test(url);
+      if (!isValidUrl(body.return_url) || !isValidUrl(body.cancel_url)) {
+        reply.code(400);
+        return { error: 'payment_redirect_urls_invalid' } as any;
       }
       const firstName = userEmail.split('@')[0] ?? 'User';
       const campaign = await campaignRepo.getCampaign(client, params.id);
@@ -81,7 +100,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         firstName,
         lastName: 'User',
         email: userEmail,
-        currency: 'UGX',
+        currency: userCurrency,
         callback_url: body.return_url,
         cancellation_url: body.cancel_url
       });
