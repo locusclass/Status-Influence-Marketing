@@ -106,7 +106,7 @@ export async function uploadRoutes(app: FastifyInstance) {
         reply.code(416);
         return { error: 'invalid_range' };
       }
-      const start = parseInt(match[1], 10);
+      const start = parseInt(match[1] ?? '0', 10);
       const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
       if (start >= fileSize || end >= fileSize) {
         reply.code(416);
