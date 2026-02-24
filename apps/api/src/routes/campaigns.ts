@@ -89,8 +89,15 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { order, pesapalTxn };
     });
 
-    if ((order as any)?.error) return order;
-    const redirectUrl = (order as any)?.redirect_url;
+    const orderAny = order as any;
+    const pesapalError = orderAny?.error ?? orderAny?.errro;
+    const status = orderAny?.status;
+    if (pesapalError || (status && status !== '200' && status !== 200)) {
+      app.log.error({ order }, 'pesapal_submit_order_failed');
+      reply.code(502);
+      return { error: 'pesapal_submit_failed', pesapal_response: order };
+    }
+    const redirectUrl = orderAny?.redirect_url;
     if (!redirectUrl) {
       app.log.error({ order }, 'pesapal_submit_order_missing_redirect_url');
       reply.code(502);
