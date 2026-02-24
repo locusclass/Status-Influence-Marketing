@@ -81,7 +81,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         firstName,
         lastName: 'User',
         email: userEmail,
-        currency: 'KES',
+        currency: 'UGX',
         callback_url: body.return_url,
         cancellation_url: body.cancel_url
       });
@@ -90,7 +90,13 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
 
     if ((order as any)?.error) return order;
-    return { redirect_url: order.redirect_url, pesapal_txn: pesapalTxn };
+    const redirectUrl = (order as any)?.redirect_url;
+    if (!redirectUrl) {
+      app.log.error({ order }, 'pesapal_submit_order_missing_redirect_url');
+      reply.code(502);
+      return { error: 'pesapal_missing_redirect_url', pesapal_response: order };
+    }
+    return { redirect_url: redirectUrl, pesapal_txn: pesapalTxn };
   });
 }
 

@@ -51,6 +51,7 @@ export async function registerIpnUrl(): Promise<any> {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
+      'Accept': 'application/json',
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
