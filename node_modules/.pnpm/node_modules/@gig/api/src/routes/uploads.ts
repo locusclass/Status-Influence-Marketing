@@ -78,11 +78,11 @@ export async function uploadRoutes(app: FastifyInstance) {
       data.file.on('error', (err: any) => reject(err));
     });
 
-    return {
-      file_url: `/uploads/files/${path.basename(targetPath)}?mime=${encodeURIComponent(
-        data.mimetype
-      )}`
-    };
+      return {
+        file_url: `/uploads/files/${path.basename(targetPath)}?mime=${encodeURIComponent(
+          data.mimetype ?? 'application/octet-stream'
+        )}`
+      };
   });
 
   app.get('/uploads/files/:file', async (request, reply) => {
