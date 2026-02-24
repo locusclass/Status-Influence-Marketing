@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS verification_sessions (
   platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'INSTAGRAM', 'X')),
   challenge_code TEXT NOT NULL,
   challenge_phrase TEXT NOT NULL,
+  script JSONB,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -127,9 +128,38 @@ CREATE TABLE IF NOT EXISTS proofs (
   observed_post_hash TEXT,
   challenge_seen BOOLEAN,
   confidence NUMERIC(5,2),
+  review_reasons JSONB,
+  meta JSONB,
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'VERIFIED', 'REJECTED', 'MANUAL_REVIEW')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'verification_sessions' AND column_name = 'script'
+  ) THEN
+    ALTER TABLE verification_sessions
+      ADD COLUMN script JSONB;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'proofs' AND column_name = 'review_reasons'
+  ) THEN
+    ALTER TABLE proofs
+      ADD COLUMN review_reasons JSONB;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'proofs' AND column_name = 'meta'
+  ) THEN
+    ALTER TABLE proofs
+      ADD COLUMN meta JSONB;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS trust_scores (
   user_id UUID PRIMARY KEY REFERENCES users(id),

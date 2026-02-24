@@ -20,7 +20,16 @@ export async function accountRoutes(app: FastifyInstance) {
     const userId = (request.user as any).sub as string;
     const proofs = await withTransaction(async (client) => {
       const res = await client.query(
-        `SELECT p.*, c.title AS campaign_title
+        `SELECT p.id,
+                p.status,
+                p.decision,
+                p.observed_views,
+                p.observed_post_hash,
+                p.challenge_seen,
+                p.confidence,
+                p.video_url,
+                p.created_at,
+                c.title AS campaign_title
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN campaigns c ON c.id = s.campaign_id
@@ -38,7 +47,16 @@ export async function accountRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const proof = await withTransaction(async (client) => {
       const res = await client.query(
-        `SELECT p.*, c.title AS campaign_title
+        `SELECT p.id,
+                p.status,
+                p.decision,
+                p.observed_views,
+                p.observed_post_hash,
+                p.challenge_seen,
+                p.confidence,
+                p.video_url,
+                p.created_at,
+                c.title AS campaign_title
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN campaigns c ON c.id = s.campaign_id

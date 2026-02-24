@@ -17,14 +17,17 @@ export declare const SubmitProofSchema: z.ZodObject<{
     session_id: z.ZodString;
     proof_video_url: z.ZodString;
     device_fingerprint: z.ZodString;
+    client_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
 }, "strip", z.ZodTypeAny, {
     session_id: string;
     proof_video_url: string;
     device_fingerprint: string;
+    client_meta?: Record<string, any> | undefined;
 }, {
     session_id: string;
     proof_video_url: string;
     device_fingerprint: string;
+    client_meta?: Record<string, any> | undefined;
 }>;
 export declare const CreateCampaignSchema: z.ZodObject<{
     advertiser_id: z.ZodString;

@@ -2,6 +2,7 @@
 import { platformAdapters } from './verification/adapters.js';
 import { MockVerifier } from './verification/mockVerifier.js';
 import { GeminiVerifier } from './verification/geminiVerifier.js';
+import { DeterministicVerifier } from './verification/deterministicVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { requestPayout } from './services/pesapal.js';
 import { downloadToTemp, removeTemp } from './utils.js';
@@ -11,6 +12,8 @@ const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'mock';
 const verifier =
   verifierProvider === 'gemini'
     ? new GeminiVerifier()
+    : verifierProvider === 'deterministic'
+    ? new DeterministicVerifier()
     : new MockVerifier();
 
 async function fetchNextJob() {
@@ -49,6 +52,129 @@ async function fetchNextJob() {
   } finally {
     client.release();
   }
+}
+
+type ReviewReason = { code: string; message: string };
+
+function buildReviewReasons(input: {
+  tamper: any;
+  result: any;
+  script?: any;
+  clientMeta?: any;
+}): ReviewReason[] {
+  const reasons: ReviewReason[] = [];
+  if (input.tamper.cut_spike) {
+    reasons.push({ code: 'TAMPER_CUT_SPIKE', message: 'Abrupt scene changes detected.' });
+  }
+  if (input.tamper.frozen_frames) {
+    reasons.push({ code: 'TAMPER_FROZEN_FRAMES', message: 'Frozen frames detected in the recording.' });
+  }
+  if (input.tamper.timestamp_inconsistent) {
+    reasons.push({ code: 'TAMPER_TIMESTAMP', message: 'Recording timestamp metadata inconsistent.' });
+  }
+  if (input.tamper.overlay_suspected) {
+    reasons.push({ code: 'TAMPER_OVERLAY', message: 'Overlay anomalies detected near target UI.' });
+  }
+  if (input.result.challenge_seen === false) {
+    reasons.push({ code: 'CHALLENGE_NOT_SEEN', message: 'Challenge code/phrase not visible or not detected.' });
+  }
+  if (typeof input.result.confidence === 'number' && input.result.confidence < 0.7) {
+    reasons.push({ code: 'LOW_CONFIDENCE', message: 'Verification confidence is below threshold.' });
+  }
+  if (!input.result.observed_views || input.result.observed_views <= 0) {
+    reasons.push({ code: 'VIEWS_MISSING', message: 'View count could not be verified.' });
+  }
+  if (input.script && Array.isArray(input.script)) {
+    const requiredSteps = input.script.filter((s: any) => s?.required !== false).length;
+    const completedSteps = input.clientMeta?.steps?.length ?? 0;
+    if (completedSteps < requiredSteps) {
+      reasons.push({
+        code: 'STEPS_INCOMPLETE',
+        message: 'Required verification gestures were not completed.',
+      });
+    }
+  }
+  return reasons;
+}
+
+async function finalizePayout(client: any, proof: any, campaign: any) {
+  const trustRow = await client.query(
+    'SELECT score FROM trust_scores WHERE user_id=$1',
+    [proof.user_id]
+  );
+  const trustScore = trustRow.rows[0]?.score ?? 50;
+
+  const escrowRes = await client.query(
+    'SELECT * FROM escrow_ledger WHERE campaign_id=$1',
+    [campaign.id]
+  );
+  const escrow = escrowRes.rows[0];
+
+  if (!escrow || escrow.status === 'PENDING') {
+    throw new Error('escrow_not_funded');
+  }
+
+  const payoutInsert = await client.query(
+    `INSERT INTO payout_requests (proof_id, user_id, amount, status)
+     VALUES ($1,$2,$3,'REQUESTED')
+     ON CONFLICT (proof_id) DO NOTHING
+     RETURNING *`,
+    [proof.id, proof.user_id, campaign.payout_amount]
+  );
+
+  const payoutRow = payoutInsert.rows[0];
+  if (!payoutRow) return;
+
+  if (trustScore < 60) {
+    await client.query(
+      "UPDATE payout_requests SET status='REQUESTED' WHERE id=$1",
+      [payoutRow.id]
+    );
+    return;
+  }
+
+  const updatedEscrow = await client.query(
+    `UPDATE escrow_ledger
+     SET amount_available = amount_available - $2,
+         status = CASE
+           WHEN amount_available - $2 <= 0
+           THEN 'COMPLETED'
+           ELSE 'PARTIALLY_DISBURSED'
+         END
+     WHERE id=$1 AND amount_available >= $2
+     RETURNING *`,
+    [escrow.id, campaign.payout_amount]
+  );
+
+  if (!updatedEscrow.rows[0]) {
+    throw new Error('insufficient_escrow');
+  }
+
+  const userRes = await client.query(
+    'SELECT email, phone FROM users WHERE id=$1',
+    [proof.user_id]
+  );
+  const user = userRes.rows[0];
+
+  if (!user?.phone) {
+    throw new Error('missing_payout_phone');
+  }
+
+  const payoutReference = uuid();
+
+  await client.query(
+    "UPDATE payout_requests SET status='PROCESSING', pesapal_reference=$2 WHERE id=$1",
+    [payoutRow.id, payoutReference]
+  );
+
+  await requestPayout({
+    amount: campaign.payout_amount,
+    currency: 'KES',
+    narration: `Payout for proof ${proof.id}`,
+    reference: payoutReference,
+    receiverName: user.email?.split('@')[0] ?? 'Distributor',
+    receiverPhone: user.phone,
+  });
 }
 
 async function processVerificationJob(job: any) {
@@ -98,20 +224,11 @@ async function processVerificationJob(job: any) {
       expires_at: session.expires_at,
     });
 
-    let finalDecision = result.decision;
-
-    const tamperFlags = [
-      tamper.cut_spike,
-      tamper.frozen_frames,
-      tamper.timestamp_inconsistent,
-      tamper.overlay_suspected,
-    ].filter(Boolean).length;
-
-    if (tamperFlags >= 2) {
-      finalDecision = 'REJECTED';
-    } else if (tamperFlags === 1 && finalDecision === 'VERIFIED') {
-      finalDecision = 'MANUAL_REVIEW';
-    }
+    const reasons = buildReviewReasons({ tamper, result, script: session.script, clientMeta: proof.meta });
+    const finalDecision =
+      result.decision === 'VERIFIED' && reasons.length === 0
+        ? 'VERIFIED'
+        : 'MANUAL_REVIEW';
 
     await withTransaction(async (client) => {
       await client.query(
@@ -121,6 +238,7 @@ async function processVerificationJob(job: any) {
              observed_post_hash=$4,
              challenge_seen=$5,
              confidence=$6,
+             review_reasons=$7,
              status=$2
          WHERE id=$1`,
         [
@@ -130,6 +248,7 @@ async function processVerificationJob(job: any) {
           result.observed_post_hash,
           result.challenge_seen,
           result.confidence,
+          JSON.stringify(reasons),
         ]
       );
 
@@ -165,84 +284,7 @@ async function processVerificationJob(job: any) {
       }
 
       if (finalDecision === 'VERIFIED' && !isAdvertiserProof) {
-        const trustRow = await client.query(
-          'SELECT score FROM trust_scores WHERE user_id=$1',
-          [proof.user_id]
-        );
-        const trustScore = trustRow.rows[0]?.score ?? 50;
-
-        const escrowRes = await client.query(
-          'SELECT * FROM escrow_ledger WHERE campaign_id=$1',
-          [campaign.id]
-        );
-        const escrow = escrowRes.rows[0];
-
-        if (!escrow || escrow.status === 'PENDING') {
-          throw new Error('escrow_not_funded');
-        }
-
-        const payoutInsert = await client.query(
-          `INSERT INTO payout_requests (proof_id, user_id, amount, status)
-           VALUES ($1,$2,$3,'REQUESTED')
-           ON CONFLICT (proof_id) DO NOTHING
-           RETURNING *`,
-          [proof.id, proof.user_id, campaign.payout_amount]
-        );
-
-        const payoutRow = payoutInsert.rows[0];
-
-        if (payoutRow) {
-          if (trustScore < 60) {
-            await client.query(
-              "UPDATE payout_requests SET status='REQUESTED' WHERE id=$1",
-              [payoutRow.id]
-            );
-            return;
-          }
-
-          const updatedEscrow = await client.query(
-            `UPDATE escrow_ledger
-             SET amount_available = amount_available - $2,
-                 status = CASE
-                   WHEN amount_available - $2 <= 0
-                   THEN 'COMPLETED'
-                   ELSE 'PARTIALLY_DISBURSED'
-                 END
-             WHERE id=$1 AND amount_available >= $2
-             RETURNING *`,
-            [escrow.id, campaign.payout_amount]
-          );
-
-          if (!updatedEscrow.rows[0]) {
-            throw new Error('insufficient_escrow');
-          }
-
-          const userRes = await client.query(
-            'SELECT email, phone FROM users WHERE id=$1',
-            [proof.user_id]
-          );
-          const user = userRes.rows[0];
-
-          if (!user?.phone) {
-            throw new Error('missing_payout_phone');
-          }
-
-          const payoutReference = uuid();
-
-          await client.query(
-            "UPDATE payout_requests SET status='PROCESSING', pesapal_reference=$2 WHERE id=$1",
-            [payoutRow.id, payoutReference]
-          );
-
-          await requestPayout({
-            amount: campaign.payout_amount,
-            currency: 'KES',
-            narration: `Payout for proof ${proof.id}`,
-            reference: payoutReference,
-            receiverName: user.email?.split('@')[0] ?? 'Distributor',
-            receiverPhone: user.phone,
-          });
-        }
+        await finalizePayout(client, proof, campaign);
       }
     });
 
@@ -272,6 +314,52 @@ async function processVerificationJob(job: any) {
   }
 }
 
+async function processPayoutJob(job: any) {
+  const proofId = job.payload.proof_id;
+
+  try {
+    const proofRes = await pool.query('SELECT * FROM proofs WHERE id=$1', [proofId]);
+    const proof = proofRes.rows[0];
+    if (!proof) throw new Error('proof_not_found');
+    if (proof.status !== 'VERIFIED') throw new Error('proof_not_verified');
+
+    const sessionRes = await pool.query('SELECT * FROM verification_sessions WHERE id=$1', [proof.session_id]);
+    const session = sessionRes.rows[0];
+    if (!session) throw new Error('session_not_found');
+
+    const campaignRes = await pool.query('SELECT * FROM campaigns WHERE id=$1', [session.campaign_id]);
+    const campaign = campaignRes.rows[0];
+    if (!campaign) throw new Error('campaign_not_found');
+
+    await withTransaction(async (client) => {
+      const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
+      if (!isAdvertiserProof) {
+        await finalizePayout(client, proof, campaign);
+      }
+    });
+
+    await pool.query(
+      "UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1",
+      [job.id]
+    );
+  } catch (err: any) {
+    const attempts = job.attempts + 1;
+    const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
+    const delay = Math.min(60 * attempts, 300);
+
+    await pool.query(
+      `UPDATE job_queue
+       SET status=$2,
+           attempts=$3,
+           last_error=$4,
+           run_at=now() + ($5 || ' seconds')::interval,
+           updated_at=now()
+       WHERE id=$1`,
+      [job.id, nextStatus, attempts, err?.message ?? 'error', delay]
+    );
+  }
+}
+
 async function loop() {
   while (true) {
     const job = await fetchNextJob();
@@ -283,6 +371,8 @@ async function loop() {
 
     if (job.job_type === 'VERIFY_PROOF') {
       await processVerificationJob(job);
+    } else if (job.job_type === 'PAYOUT_PROOF') {
+      await processPayoutJob(job);
     } else {
       await pool.query(
         "UPDATE job_queue SET status='FAILED', last_error='unknown_job_type' WHERE id=$1",

@@ -4,6 +4,7 @@ import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
+import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
 
 const UpdateUserRoleSchema = z.object({
@@ -110,6 +111,7 @@ async function logAudit(
 }
 
 export async function adminRoutes(app: FastifyInstance) {
+  const jobRepo = new JobRepo();
   const paymentRepo = new PaymentRepo();
 
   app.post('/admin/access', async (request, reply) => {
@@ -722,6 +724,11 @@ export async function adminRoutes(app: FastifyInstance) {
           params.id,
           body
         );
+
+        const proof = updated.rows[0];
+        if (proof.status === 'VERIFIED' && proof.decision === 'VERIFIED') {
+          await jobRepo.enqueue(client, 'PAYOUT_PROOF', { proof_id: proof.id });
+        }
       }
       return updated.rows[0];
     });

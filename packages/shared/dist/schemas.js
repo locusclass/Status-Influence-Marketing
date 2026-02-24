@@ -8,7 +8,8 @@ export const CreateVerificationSessionSchema = z.object({
 export const SubmitProofSchema = z.object({
     session_id: z.string().uuid(),
     proof_video_url: z.string().url(),
-    device_fingerprint: z.string().min(16)
+    device_fingerprint: z.string().min(16),
+    client_meta: z.record(z.any()).optional()
 });
 export const CreateCampaignSchema = z.object({
     advertiser_id: z.string().uuid(),
