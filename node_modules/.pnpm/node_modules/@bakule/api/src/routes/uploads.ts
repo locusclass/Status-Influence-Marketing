@@ -5,9 +5,14 @@ import { config } from '../config.js';
 import { signUpload, verifyUpload } from '../utils.js';
 
 export async function uploadRoutes(app: FastifyInstance) {
-  app.post('/uploads/sign', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/uploads/sign', { preHandler: [app.authenticate] }, async (request, reply) => {
     const { file_name, mime_type } = request.body as { file_name: string; mime_type: string };
-    if (!file_name || !mime_type || !mime_type.startsWith('video/')) {
+    if (
+      !file_name ||
+      !mime_type ||
+      (!mime_type.startsWith('video/') && !mime_type.startsWith('image/'))
+    ) {
+      reply.code(400);
       return { error: 'invalid_file' };
     }
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -39,7 +44,7 @@ export async function uploadRoutes(app: FastifyInstance) {
       reply.code(401);
       return { error: 'invalid_signature' };
     }
-    if (!mime.startsWith('video/')) {
+    if (!mime.startsWith('video/') && !mime.startsWith('image/')) {
       reply.code(400);
       return { error: 'invalid_mime' };
     }
@@ -49,7 +54,7 @@ export async function uploadRoutes(app: FastifyInstance) {
       reply.code(400);
       return { error: 'missing_file' };
     }
-    if (!data.mimetype.startsWith('video/')) {
+    if (!data.mimetype.startsWith('video/') && !data.mimetype.startsWith('image/')) {
       reply.code(400);
       return { error: 'invalid_mime' };
     }
@@ -73,7 +78,11 @@ export async function uploadRoutes(app: FastifyInstance) {
       data.file.on('error', (err: any) => reject(err));
     });
 
-    return { file_url: `/uploads/files/${path.basename(targetPath)}` };
+    return {
+      file_url: `/uploads/files/${path.basename(targetPath)}?mime=${encodeURIComponent(
+        data.mimetype
+      )}`
+    };
   });
 
   app.get('/uploads/files/:file', async (request, reply) => {
@@ -84,7 +93,8 @@ export async function uploadRoutes(app: FastifyInstance) {
       reply.code(404);
       return { error: 'not_found' };
     }
-    reply.type('video/mp4');
+    const mime = String((request.query as any).mime ?? '');
+    reply.type(mime || 'application/octet-stream');
     return fs.createReadStream(filePath);
   });
 }
