@@ -255,12 +255,7 @@ async function processVerificationJob(job: any) {
       const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
 
       if (!isAdvertiserProof) {
-        const delta =
-          finalDecision === 'VERIFIED'
-            ? 2
-            : finalDecision === 'REJECTED'
-            ? -5
-            : -1;
+        const delta = finalDecision === 'VERIFIED' ? 2 : -1;
 
         await client.query(
           'INSERT INTO trust_events (user_id, event_type, delta) VALUES ($1,$2,$3)',
