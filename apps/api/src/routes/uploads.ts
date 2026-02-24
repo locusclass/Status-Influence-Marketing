@@ -94,7 +94,33 @@ export async function uploadRoutes(app: FastifyInstance) {
       return { error: 'not_found' };
     }
     const mime = String((request.query as any).mime ?? '');
+    const stat = await fs.promises.stat(filePath);
+    const fileSize = stat.size;
+    const range = request.headers.range;
+    reply.header('Accept-Ranges', 'bytes');
     reply.type(mime || 'application/octet-stream');
+
+    if (range) {
+      const match = /bytes=(\d+)-(\d*)/.exec(range);
+      if (!match) {
+        reply.code(416);
+        return { error: 'invalid_range' };
+      }
+      const start = parseInt(match[1], 10);
+      const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+      if (start >= fileSize || end >= fileSize) {
+        reply.code(416);
+        return { error: 'range_not_satisfiable' };
+      }
+      const chunkSize = end - start + 1;
+      reply
+        .code(206)
+        .header('Content-Range', `bytes ${start}-${end}/${fileSize}`)
+        .header('Content-Length', chunkSize);
+      return fs.createReadStream(filePath, { start, end });
+    }
+
+    reply.header('Content-Length', fileSize);
     return fs.createReadStream(filePath);
   });
 }
