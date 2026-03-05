@@ -3,8 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
-import { VerificationResult } from '@bakule/shared';
-import { Verifier } from './verifier.js';
+import { Verifier, WorkerVerificationResult } from './verifier.js';
 import { platformAdapters } from './adapters.js';
 
 function run(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -45,7 +44,7 @@ function parseViews(text: string): number | null {
 }
 
 export class DeterministicVerifier implements Verifier {
-  async verify(videoPath: string, campaignSpec: any, challenge: any): Promise<VerificationResult> {
+  async verify(videoPath: string, campaignSpec: any, challenge: any): Promise<WorkerVerificationResult> {
     const adapter = platformAdapters[campaignSpec?.platform ?? ''] ?? null;
     const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gm-det-'));
     const framePath = path.join(tmpDir, 'frame.png');

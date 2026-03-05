@@ -1,12 +1,11 @@
 import crypto from 'crypto';
-import { VerificationResult } from '@bakule/shared';
-import { Verifier } from './verifier.js';
+import { Verifier, WorkerVerificationResult } from './verifier.js';
 
 export class MockVerifier implements Verifier {
-  async verify(videoPath: string, _campaignSpec: any, _challenge: any): Promise<VerificationResult> {
+  async verify(videoPath: string, _campaignSpec: any, _challenge: any): Promise<WorkerVerificationResult> {
     const hash = crypto.createHash('sha256').update(videoPath).digest('hex');
     const score = parseInt(hash.slice(0, 2), 16);
-    const decision: VerificationResult['decision'] = score > 180 ? 'VERIFIED' : score > 80 ? 'MANUAL_REVIEW' : 'REJECTED';
+    const decision: WorkerVerificationResult['decision'] = score > 180 ? 'VERIFIED' : score > 80 ? 'MANUAL_REVIEW' : 'REJECTED';
     return {
       observed_views: 100 + (score % 50),
       observed_post_hash: hash.slice(0, 12),

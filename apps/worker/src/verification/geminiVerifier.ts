@@ -1,5 +1,4 @@
-import { VerificationResult } from '@bakule/shared';
-import { Verifier } from './verifier.js';
+import { Verifier, WorkerVerificationResult } from './verifier.js';
 import { fetch } from 'undici';
 
 export class GeminiVerifier implements Verifier {
@@ -11,7 +10,7 @@ export class GeminiVerifier implements Verifier {
     this.apiKey = apiKey ?? process.env.GEMINI_API_KEY ?? '';
   }
 
-  async verify(videoPath: string, campaignSpec: any, challenge: any): Promise<VerificationResult> {
+  async verify(videoPath: string, campaignSpec: any, challenge: any): Promise<WorkerVerificationResult> {
     if (!this.apiUrl || !this.apiKey) {
       throw new Error('Gemini verifier not configured');
     }
@@ -30,7 +29,7 @@ export class GeminiVerifier implements Verifier {
     if (!res.ok) {
       throw new Error(`Gemini verifier error: ${res.status}`);
     }
-    const data = (await res.json()) as VerificationResult;
+    const data = (await res.json()) as WorkerVerificationResult;
     return data;
   }
 }

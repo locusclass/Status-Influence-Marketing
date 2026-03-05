@@ -6,6 +6,8 @@ import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from 
 import { config } from '../config.js';
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
+const MIN_RECORDING_SECONDS = 58;
+const MAX_RECORDING_SECONDS = 75;
 const platformInstructionPool = {
     WHATSAPP_STATUS: [
         'Open the status post and keep it centered in frame.',
@@ -81,6 +83,34 @@ function buildVerificationScript(platform) {
         at_second: 55,
     });
     return scripted;
+}
+function extractRequiredStepIds(script) {
+    const steps = Array.isArray(script) ? script : [];
+    return steps.filter((step) => step?.required !== false).map((step) => String(step?.id ?? '')).filter(Boolean);
+}
+function validateStrictClientMeta(clientMeta, script) {
+    if (!clientMeta || typeof clientMeta !== 'object')
+        return 'client_meta_required';
+    const startedAt = Date.parse(String(clientMeta?.recording_started_at ?? ''));
+    const stoppedAt = Date.parse(String(clientMeta?.recording_stopped_at ?? ''));
+    if (!Number.isFinite(startedAt) || !Number.isFinite(stoppedAt) || stoppedAt <= startedAt) {
+        return 'client_meta_recording_window_invalid';
+    }
+    const duration = Math.round((stoppedAt - startedAt) / 1000);
+    if (duration < MIN_RECORDING_SECONDS || duration > MAX_RECORDING_SECONDS) {
+        return 'client_meta_recording_duration_invalid';
+    }
+    const events = Array.isArray(clientMeta?.steps) ? clientMeta.steps : [];
+    if (!events.length)
+        return 'client_meta_steps_missing';
+    const completed = new Set(events
+        .map((event) => String(event?.id ?? '').trim())
+        .filter(Boolean));
+    const requiredIds = extractRequiredStepIds(script);
+    const missing = requiredIds.filter((id) => !completed.has(id));
+    if (missing.length > 0)
+        return 'client_meta_required_steps_missing';
+    return null;
 }
 function isAllowedProofVideoUrl(value) {
     if (value.startsWith('/uploads/files/') || value.startsWith('/api/uploads/files/')) {
@@ -169,6 +199,13 @@ export async function verificationRoutes(app) {
         return {
             session,
             session_duration_seconds: SESSION_DURATION_SECONDS,
+            recording_policy: {
+                mode: 'SCREEN_RECORDING',
+                duration_seconds: SESSION_DURATION_SECONDS,
+                min_duration_seconds: MIN_RECORDING_SECONDS,
+                max_duration_seconds: MAX_RECORDING_SECONDS,
+                strict_trace_required: true,
+            },
         };
     });
     app.post('/verification/proofs', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -190,6 +227,9 @@ export async function verificationRoutes(app) {
                 return { error: 'session_user_mismatch' };
             if (new Date(session.expires_at).getTime() < Date.now())
                 return { error: 'session_expired' };
+            const strictMetaError = validateStrictClientMeta(body.client_meta, session.script);
+            if (strictMetaError)
+                return { error: strictMetaError };
             const existingForSession = await client.query('SELECT id FROM proofs WHERE session_id=$1 LIMIT 1', [body.session_id]);
             if (existingForSession.rows[0])
                 return { error: 'proof_already_submitted' };
@@ -226,6 +266,11 @@ export async function verificationRoutes(app) {
                 session_not_found: 404,
                 session_user_mismatch: 403,
                 session_expired: 409,
+                client_meta_required: 400,
+                client_meta_recording_window_invalid: 400,
+                client_meta_recording_duration_invalid: 400,
+                client_meta_steps_missing: 400,
+                client_meta_required_steps_missing: 400,
                 proof_already_submitted: 409,
                 contract_not_active: 403,
                 duplicate_campaign_proof: 409,

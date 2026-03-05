@@ -67,6 +67,11 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 - `PORT`
 - `DATABASE_URL`
 - `FINGERPRINT_PEPPER`
+- `VERIFIER_PROVIDER` (`python_bot|deterministic|gemini|mock`)
+- `PYTHON_EXECUTABLE` (for python bot, e.g. `python3`)
+- `PYTHON_VERIFIER_SCRIPT` (defaults to `apps/worker/scripts/wa_status_verifier.py`)
+- `WA_VERIFIER_FPS`
+- `WA_VERIFIER_MAX_SECONDS`
 - `PESAPAL_ENV`
 - `PESAPAL_BASE_URL`
 - `PESAPAL_CONSUMER_KEY`
@@ -77,7 +82,9 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 
 ## Threat model for screen recording verification
 - Replay attacks: challenge code + phrase tied to session with expiry.
+- Strict client trace gate: submission rejected unless 58-75 second recording window and all required random steps are present.
 - Video tampering: histogram spike cut detection, frozen frame detection, timestamp consistency, overlay edge density anomaly.
+- Python bot adjudication: ffprobe + OCR + liveness + tamper heuristics produce machine verdict and score report stored on proof metadata.
 - Device spoofing: device fingerprint hashed with server-side pepper.
 - Metrics manipulation: platform adapter ROI checks and UI pattern hints.
 - Double payout: escrow ledger and payout requests are idempotent and enforced by unique constraints.

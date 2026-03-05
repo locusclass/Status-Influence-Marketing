@@ -597,7 +597,11 @@ export async function adminRoutes(app) {
                 idx++;
             }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT p.*, c.title AS campaign_title
+            const res = await client.query(`SELECT
+           p.*,
+           c.title AS campaign_title,
+           s.script AS verification_script,
+           p.meta->'verification_report' AS verification_report
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN campaigns c ON c.id = s.campaign_id

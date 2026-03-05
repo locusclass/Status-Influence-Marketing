@@ -3,16 +3,19 @@ import { platformAdapters } from './verification/adapters.js';
 import { MockVerifier } from './verification/mockVerifier.js';
 import { GeminiVerifier } from './verification/geminiVerifier.js';
 import { DeterministicVerifier } from './verification/deterministicVerifier.js';
+import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { requestPayout } from './services/pesapal.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'deterministic';
+const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
-    : verifierProvider === 'deterministic'
-        ? new DeterministicVerifier()
-        : new MockVerifier();
+    : verifierProvider === 'python_bot'
+        ? new PythonBotVerifier()
+        : verifierProvider === 'deterministic'
+            ? new DeterministicVerifier()
+            : new MockVerifier();
 let lastContractExpirySweepAt = 0;
 if (process.env.NODE_ENV === 'production' && verifierProvider === 'mock') {
     throw new Error('VERIFIER_PROVIDER=mock is not allowed in production');
@@ -115,6 +118,29 @@ function buildReviewReasons(input) {
     }
     if (!input.result.observed_views || input.result.observed_views <= 0) {
         reasons.push({ code: 'VIEWS_MISSING', message: 'View count could not be verified.' });
+    }
+    const botVerdict = String(input.result?.verifier_report?.verdict ?? '');
+    if (botVerdict === 'REJECTED') {
+        reasons.push({
+            code: 'PYTHON_BOT_REJECTED',
+            message: 'Python verification bot rejected the recording as non-authentic.',
+        });
+    }
+    const botSignals = Array.isArray(input.result?.verifier_report?.tamper_signals)
+        ? input.result.verifier_report.tamper_signals
+        : [];
+    if (botSignals.length > 0) {
+        reasons.push({
+            code: 'PYTHON_BOT_TAMPER_SIGNALS',
+            message: `Python verification detected tamper signals: ${botSignals.join(', ')}`,
+        });
+    }
+    const scrollDetected = Boolean(input.result?.verifier_report?.scroll_detected);
+    if (!scrollDetected) {
+        reasons.push({
+            code: 'LIVENESS_SCROLL_MISSING',
+            message: 'No reliable list scroll/liveness signal detected by the Python verifier.',
+        });
     }
     if (trace.required_steps > 0 && trace.unique_completed_steps < trace.required_steps) {
         reasons.push({
@@ -298,6 +324,7 @@ async function processVerificationJob(job) {
             challenge_seen: Boolean(result.challenge_seen),
             observed_views: Number(result.observed_views ?? 0),
             tamper,
+            python_bot: result.verifier_report ?? null,
             trace,
             strict_mode: true,
         };
