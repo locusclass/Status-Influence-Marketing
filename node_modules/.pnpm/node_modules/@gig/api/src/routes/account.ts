@@ -2,6 +2,14 @@
 import { withTransaction } from '../db.js';
 
 export async function accountRoutes(app: FastifyInstance) {
+  const parsePaging = (query: any) => {
+    const limitRaw = Number(query?.limit ?? 50);
+    const offsetRaw = Number(query?.offset ?? 0);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+    return { limit, offset };
+  };
+
   app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
     const data = await withTransaction(async (client) => {
@@ -18,6 +26,8 @@ export async function accountRoutes(app: FastifyInstance) {
 
   app.get('/proofs', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
     const proofs = await withTransaction(async (client) => {
       const res = await client.query(
         `SELECT p.id,
@@ -34,12 +44,53 @@ export async function accountRoutes(app: FastifyInstance) {
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN campaigns c ON c.id = s.campaign_id
          WHERE p.user_id=$1
-         ORDER BY p.created_at DESC`,
-        [userId]
+         ORDER BY p.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [userId, limit, offset]
       );
       return res.rows;
     });
     return { proofs };
+  });
+
+  app.get('/dashboard/summary', { preHandler: [app.authenticate] }, async (request) => {
+    const userId = (request.user as any).sub as string;
+    const role = (request.user as any).role as string;
+    return withTransaction(async (client) => {
+      if (role === 'ADVERTISER') {
+        const campaignsRes = await client.query(
+          `SELECT c.id,
+                  c.title,
+                  c.created_at,
+                  latest.latest_created_at
+           FROM campaigns c
+           LEFT JOIN LATERAL (
+             SELECT MAX(p.created_at) AS latest_created_at
+             FROM proofs p
+             JOIN verification_sessions s ON s.id = p.session_id
+             WHERE s.campaign_id = c.id
+           ) latest ON true
+           WHERE c.advertiser_id=$1
+           ORDER BY c.created_at DESC
+           LIMIT 200`,
+          [userId]
+        );
+        return { advertiser_campaigns: campaignsRes.rows };
+      }
+
+      const distributorRes = await client.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status='PENDING' OR status='MANUAL_REVIEW')::int AS pending_or_review_count
+         FROM proofs
+         WHERE user_id=$1`,
+        [userId]
+      );
+      return {
+        distributor: {
+          pending_or_review_count: distributorRes.rows[0]?.pending_or_review_count ?? 0
+        }
+      };
+    });
   });
 
   app.get('/proofs/:id', { preHandler: [app.authenticate] }, async (request, reply) => {

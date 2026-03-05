@@ -97,7 +97,7 @@ function buildReviewReasons(input: {
   return reasons;
 }
 
-async function finalizePayout(client: any, proof: any, campaign: any) {
+async function preparePayoutRequest(client: any, proof: any, campaign: any) {
   const trustRow = await client.query(
     'SELECT score FROM trust_scores WHERE user_id=$1',
     [proof.user_id]
@@ -114,23 +114,59 @@ async function finalizePayout(client: any, proof: any, campaign: any) {
     throw new Error('escrow_not_funded');
   }
 
-  const payoutInsert = await client.query(
-    `INSERT INTO payout_requests (proof_id, user_id, amount, status)
-     VALUES ($1,$2,$3,'REQUESTED')
-     ON CONFLICT (proof_id) DO NOTHING
-     RETURNING *`,
-    [proof.id, proof.user_id, campaign.payout_amount]
+  const existingPayoutRes = await client.query(
+    'SELECT * FROM payout_requests WHERE proof_id=$1',
+    [proof.id]
   );
+  let payoutRow = existingPayoutRes.rows[0];
+  if (!payoutRow) {
+    const payoutInsert = await client.query(
+      `INSERT INTO payout_requests (proof_id, user_id, amount, status)
+       VALUES ($1,$2,$3,'REQUESTED')
+       RETURNING *`,
+      [proof.id, proof.user_id, campaign.payout_amount]
+    );
+    payoutRow = payoutInsert.rows[0];
+  }
 
-  const payoutRow = payoutInsert.rows[0];
-  if (!payoutRow) return;
+  if (!payoutRow) return null;
+  if (payoutRow.status === 'PAID') return null;
 
   if (trustScore < 60) {
     await client.query(
       "UPDATE payout_requests SET status='REQUESTED' WHERE id=$1",
       [payoutRow.id]
     );
-    return;
+    return null;
+  }
+
+  if (payoutRow.status === 'PROCESSING' && payoutRow.pesapal_reference) {
+    const userRes = await client.query(
+      'SELECT email, phone, preferred_currency FROM users WHERE id=$1',
+      [proof.user_id]
+    );
+    const user = userRes.rows[0];
+    if (!user?.phone) {
+      throw new Error('missing_payout_phone');
+    }
+    return {
+      payoutId: payoutRow.id,
+      escrowId: escrow.id,
+      amount: campaign.payout_amount,
+      reference: payoutRow.pesapal_reference,
+      receiverName: user.email?.split('@')[0] ?? 'Distributor',
+      receiverPhone: user.phone,
+      currency: (user.preferred_currency ?? 'UGX').toString().toUpperCase(),
+      narration: `Payout for proof ${proof.id}`,
+    };
+  }
+
+  if (payoutRow.status === 'FAILED') {
+    const resetRes = await client.query(
+      "UPDATE payout_requests SET status='REQUESTED' WHERE id=$1 RETURNING *",
+      [payoutRow.id]
+    );
+    payoutRow = resetRes.rows[0] ?? payoutRow;
   }
 
   const updatedEscrow = await client.query(
@@ -151,7 +187,7 @@ async function finalizePayout(client: any, proof: any, campaign: any) {
   }
 
   const userRes = await client.query(
-    'SELECT email, phone FROM users WHERE id=$1',
+    'SELECT email, phone, preferred_currency FROM users WHERE id=$1',
     [proof.user_id]
   );
   const user = userRes.rows[0];
@@ -167,13 +203,60 @@ async function finalizePayout(client: any, proof: any, campaign: any) {
     [payoutRow.id, payoutReference]
   );
 
-  await requestPayout({
+  return {
+    payoutId: payoutRow.id,
+    escrowId: escrow.id,
     amount: campaign.payout_amount,
-    currency: 'KES',
-    narration: `Payout for proof ${proof.id}`,
     reference: payoutReference,
     receiverName: user.email?.split('@')[0] ?? 'Distributor',
     receiverPhone: user.phone,
+    currency: (user.preferred_currency ?? 'UGX').toString().toUpperCase(),
+    narration: `Payout for proof ${proof.id}`,
+  };
+}
+
+async function compensatePayoutFailure(proofId: string, campaignId: string) {
+  await withTransaction(async (client) => {
+    const payoutRes = await client.query(
+      'SELECT * FROM payout_requests WHERE proof_id=$1',
+      [proofId]
+    );
+    const payout = payoutRes.rows[0];
+    if (!payout || payout.status !== 'PROCESSING') {
+      return;
+    }
+    await client.query(
+      "UPDATE payout_requests SET status='FAILED' WHERE id=$1",
+      [payout.id]
+    );
+    await client.query(
+      `UPDATE escrow_ledger
+       SET amount_available = amount_available + $2,
+           status = CASE
+             WHEN amount_available + $2 >= amount_total THEN 'FUNDED'
+             ELSE 'PARTIALLY_DISBURSED'
+           END
+       WHERE campaign_id=$1`,
+      [campaignId, payout.amount]
+    );
+  });
+}
+
+async function submitPayout(input: {
+  amount: number;
+  currency: string;
+  narration: string;
+  reference: string;
+  receiverName: string;
+  receiverPhone: string;
+}) {
+  await requestPayout({
+    amount: input.amount,
+    currency: input.currency,
+    narration: input.narration,
+    reference: input.reference,
+    receiverName: input.receiverName,
+    receiverPhone: input.receiverPhone,
   });
 }
 
@@ -279,7 +362,21 @@ async function processVerificationJob(job: any) {
       }
 
       if (finalDecision === 'VERIFIED' && !isAdvertiserProof) {
-        await finalizePayout(client, proof, campaign);
+        const existingPayoutJob = await client.query(
+          `SELECT id
+           FROM job_queue
+           WHERE job_type='PAYOUT_PROOF'
+             AND payload->>'proof_id'=$1
+             AND status IN ('QUEUED','PROCESSING','RETRY')
+           LIMIT 1`,
+          [proof.id]
+        );
+        if (!existingPayoutJob.rows[0]) {
+          await client.query(
+            'INSERT INTO job_queue (job_type, payload) VALUES ($1,$2)',
+            ['PAYOUT_PROOF', { proof_id: proof.id }]
+          );
+        }
       }
     });
 
@@ -326,18 +423,43 @@ async function processPayoutJob(job: any) {
     const campaign = campaignRes.rows[0];
     if (!campaign) throw new Error('campaign_not_found');
 
-    await withTransaction(async (client) => {
+    const payoutRequest = await withTransaction(async (client) => {
       const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
       if (!isAdvertiserProof) {
-        await finalizePayout(client, proof, campaign);
+        return preparePayoutRequest(client, proof, campaign);
       }
+      return null;
     });
+
+    if (payoutRequest) {
+      await submitPayout({
+        amount: payoutRequest.amount,
+        currency: payoutRequest.currency,
+        narration: payoutRequest.narration,
+        reference: payoutRequest.reference,
+        receiverName: payoutRequest.receiverName,
+        receiverPhone: payoutRequest.receiverPhone,
+      });
+    }
 
     await pool.query(
       "UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1",
       [job.id]
     );
   } catch (err: any) {
+    try {
+      const proofRes = await pool.query('SELECT * FROM proofs WHERE id=$1', [proofId]);
+      const proof = proofRes.rows[0];
+      if (proof) {
+        const sessionRes = await pool.query('SELECT * FROM verification_sessions WHERE id=$1', [proof.session_id]);
+        const session = sessionRes.rows[0];
+        if (session) {
+          await compensatePayoutFailure(proofId, session.campaign_id);
+        }
+      }
+    } catch {
+      // best-effort compensation only
+    }
     const attempts = job.attempts + 1;
     const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
     const delay = Math.min(60 * attempts, 300);

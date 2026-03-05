@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
+export declare const MediaTypeSchema: z.ZodEnum<["TEXT", "IMAGE", "VIDEO"]>;
 export declare const CreateVerificationSessionSchema: z.ZodObject<{
     user_id: z.ZodString;
     campaign_id: z.ZodString;
@@ -29,30 +30,56 @@ export declare const SubmitProofSchema: z.ZodObject<{
     device_fingerprint: string;
     client_meta?: Record<string, any> | undefined;
 }>;
-export declare const CreateCampaignSchema: z.ZodObject<{
-    advertiser_id: z.ZodString;
+export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title: z.ZodString;
     platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
     payout_amount: z.ZodNumber;
     budget_total: z.ZodNumber;
     start_date: z.ZodString;
     end_date: z.ZodString;
+    media_type: z.ZodEnum<["TEXT", "IMAGE", "VIDEO"]>;
+    media_text: z.ZodOptional<z.ZodString>;
+    media_url: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
-    advertiser_id: string;
     title: string;
     payout_amount: number;
     budget_total: number;
     start_date: string;
     end_date: string;
+    media_type: "TEXT" | "IMAGE" | "VIDEO";
+    media_text?: string | undefined;
+    media_url?: string | undefined;
 }, {
     platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
-    advertiser_id: string;
     title: string;
     payout_amount: number;
     budget_total: number;
     start_date: string;
     end_date: string;
+    media_type: "TEXT" | "IMAGE" | "VIDEO";
+    media_text?: string | undefined;
+    media_url?: string | undefined;
+}>, {
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
+    title: string;
+    payout_amount: number;
+    budget_total: number;
+    start_date: string;
+    end_date: string;
+    media_type: "TEXT" | "IMAGE" | "VIDEO";
+    media_text?: string | undefined;
+    media_url?: string | undefined;
+}, {
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
+    title: string;
+    payout_amount: number;
+    budget_total: number;
+    start_date: string;
+    end_date: string;
+    media_type: "TEXT" | "IMAGE" | "VIDEO";
+    media_text?: string | undefined;
+    media_url?: string | undefined;
 }>;
 export declare const FundCampaignSchema: z.ZodObject<{
     campaign_id: z.ZodString;

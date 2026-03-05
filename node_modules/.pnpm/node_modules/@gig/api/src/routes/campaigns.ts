@@ -11,9 +11,45 @@ export async function campaignRoutes(app: FastifyInstance) {
   const campaignRepo = new CampaignRepo();
   const paymentRepo = new PaymentRepo();
 
-  app.get('/campaigns', { preHandler: [app.authenticate] }, async () => {
+  app.get('/campaigns', { preHandler: [app.authenticate] }, async (request) => {
+    const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
+    const query = (request.query ?? {}) as {
+      limit?: string | number;
+      offset?: string | number;
+      platform?: string;
+      status?: string;
+    };
+    const limitRaw = Number(query.limit ?? 50);
+    const offsetRaw = Number(query.offset ?? 0);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
     const campaigns = await withTransaction(async (client) => {
-      const res = await client.query('SELECT * FROM campaigns ORDER BY created_at DESC');
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (query.platform) {
+        conditions.push(`platform = $${idx}`);
+        params.push(query.platform);
+        idx++;
+      }
+      if (query.status) {
+        conditions.push(`status = $${idx}`);
+        params.push(query.status);
+        idx++;
+      }
+      if (role !== 'ADMIN') {
+        conditions.push(`(advertiser_id = $${idx} OR status = 'ACTIVE')`);
+        params.push(authUser ?? '');
+        idx++;
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await client.query(
+        `SELECT * FROM campaigns ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      );
       return res.rows;
     });
     return { campaigns };
@@ -113,10 +149,23 @@ export async function campaignRoutes(app: FastifyInstance) {
     return summary;
   });
 
-  app.post('/campaigns', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
     const body = CreateCampaignSchema.parse(request.body);
+    const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    if (role !== 'ADVERTISER' && role !== 'ADMIN') {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
     const campaign = await withTransaction(async (client) => {
-      const created = await campaignRepo.createCampaign(client, body);
+      const created = await campaignRepo.createCampaign(client, {
+        ...body,
+        advertiser_id: authUser
+      });
       await paymentRepo.createEscrow(client, created.id, created.budget_total);
       return created;
     });
@@ -134,8 +183,9 @@ export async function campaignRoutes(app: FastifyInstance) {
       }
 
       const authUser = (request.user as any)?.sub as string | undefined;
+      const role = (request.user as any)?.role as string | undefined;
       const userEmailRes = authUser
-        ? await client.query('SELECT email, currency FROM users WHERE id=$1', [authUser])
+        ? await client.query('SELECT email, preferred_currency AS currency FROM users WHERE id=$1', [authUser])
         : null;
       const userEmail = userEmailRes?.rows?.[0]?.email as string | undefined;
       const rawCurrency = (userEmailRes?.rows?.[0]?.currency as string | undefined) ?? 'UGX';
@@ -158,6 +208,10 @@ export async function campaignRoutes(app: FastifyInstance) {
       if (!campaign) {
         reply.code(404);
         return { error: 'campaign_not_found' } as any;
+      }
+      if (campaign.advertiser_id !== authUser && role !== 'ADMIN') {
+        reply.code(403);
+        return { error: 'not_campaign_advertiser' } as any;
       }
       const escrow = await paymentRepo.getEscrowByCampaign(client, params.id);
       if (!escrow) {

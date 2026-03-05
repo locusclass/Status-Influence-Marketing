@@ -3,8 +3,11 @@ export const config = {
     databaseUrl: process.env.DATABASE_URL ?? '',
     fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
     pesapal: {
-        env: process.env.PESAPAL_ENV ?? 'sandbox',
-        baseUrl: process.env.PESAPAL_BASE_URL ?? 'https://cybqa.pesapal.com/pesapalv3',
+        env: process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox',
+        baseUrl: process.env.PESAPAL_BASE_URL ??
+            ((process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox') === 'live'
+                ? 'https://pay.pesapal.com/v3'
+                : 'https://cybqa.pesapal.com/pesapalv3'),
         consumerKey: process.env.PESAPAL_CONSUMER_KEY ?? '',
         consumerSecret: process.env.PESAPAL_CONSUMER_SECRET ?? '',
         payoutCallbackUrl: process.env.PESAPAL_PAYOUT_CALLBACK_URL ?? '',

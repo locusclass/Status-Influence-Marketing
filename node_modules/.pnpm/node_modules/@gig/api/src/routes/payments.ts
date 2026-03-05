@@ -24,6 +24,15 @@ export async function paymentRoutes(app: FastifyInstance) {
 
     app.log.info({ body, hasSignature: Boolean(signature), rawBodyLength: rawBody.length }, 'pesapal ipn received');
 
+    if (config.pesapal.ipnWebhookSecret) {
+      if (!signature || !verifyWebhookSignature(rawBody, signature, config.pesapal.ipnWebhookSecret)) {
+        reply.code(401).send({ error: 'invalid_signature' });
+        return;
+      }
+    } else {
+      app.log.warn('PESAPAL_IPN_WEBHOOK_SECRET is not set; IPN signature verification is disabled');
+    }
+
     // Respond immediately as required by PesaPal.
     reply.code(200).send({ status: 'received' });
 

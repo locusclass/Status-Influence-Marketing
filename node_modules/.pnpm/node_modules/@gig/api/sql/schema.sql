@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
+  country TEXT NOT NULL DEFAULT 'UG',
+  preferred_currency TEXT NOT NULL DEFAULT 'UGX',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -43,6 +45,22 @@ DO $$ BEGIN
     ALTER TABLE users
       ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'
       CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'country'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN country TEXT NOT NULL DEFAULT 'UG';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'preferred_currency'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN preferred_currency TEXT NOT NULL DEFAULT 'UGX';
   END IF;
 END $$;
 
@@ -185,9 +203,40 @@ CREATE TABLE IF NOT EXISTS device_fingerprints (
 CREATE TABLE IF NOT EXISTS wallets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL UNIQUE REFERENCES users(id),
+  currency TEXT NOT NULL DEFAULT 'UGX',
+  balance_available INTEGER NOT NULL DEFAULT 0,
+  balance_escrow INTEGER NOT NULL DEFAULT 0,
   balance INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'wallets' AND column_name = 'currency'
+  ) THEN
+    ALTER TABLE wallets
+      ADD COLUMN currency TEXT NOT NULL DEFAULT 'UGX';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'wallets' AND column_name = 'balance_available'
+  ) THEN
+    ALTER TABLE wallets
+      ADD COLUMN balance_available INTEGER NOT NULL DEFAULT 0;
+    UPDATE wallets SET balance_available = balance;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'wallets' AND column_name = 'balance_escrow'
+  ) THEN
+    ALTER TABLE wallets
+      ADD COLUMN balance_escrow INTEGER NOT NULL DEFAULT 0;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS wallet_txns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

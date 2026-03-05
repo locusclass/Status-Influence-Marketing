@@ -61,6 +61,7 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 - `PESAPAL_CALLBACK_URL`
 - `PESAPAL_PAYOUT_CALLBACK_URL`
 - `PESAPAL_PAYOUT_WEBHOOK_SECRET`
+- `PESAPAL_IPN_WEBHOOK_SECRET`
 
 ### Worker
 - `PORT`

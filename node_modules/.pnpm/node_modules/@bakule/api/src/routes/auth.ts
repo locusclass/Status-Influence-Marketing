@@ -80,7 +80,7 @@ export async function authRoutes(app: FastifyInstance) {
         role: user.role,
         phone: user.phone,
         country: user.country,
-        currency: user.currency,
+        currency: user.currency ?? user.preferred_currency ?? 'UGX',
         dialCode: countryData.dialCode
       }
     };
@@ -116,7 +116,7 @@ export async function authRoutes(app: FastifyInstance) {
         role: user.role,
         phone: user.phone,
         country: user.country,
-        currency: user.currency
+        currency: user.currency ?? user.preferred_currency ?? 'UGX'
       }
     };
   });

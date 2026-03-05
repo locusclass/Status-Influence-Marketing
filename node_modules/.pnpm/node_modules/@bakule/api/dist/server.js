@@ -1,3 +1,4 @@
+// apps/api/src/server.ts
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -6,13 +7,11 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { config } from './config.js';
-import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes } from './routes/index.js';
+import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
 export function buildServer() {
     const app = Fastify({ logger: true });
-    // ✅ Let Fastify handle JSON parsing normally
-    // (Removed custom content-type parser that was breaking Flutter Web)
     app.register(cors, {
-        origin: true, // allow all origins (safe for API layer)
+        origin: true,
         credentials: true,
     });
     app.register(rateLimit, {
@@ -31,6 +30,18 @@ export function buildServer() {
             reply.code(401).send({ error: 'unauthorized' });
         }
     });
+    app.decorate('adminOnly', async (request, reply) => {
+        try {
+            await request.jwtVerify();
+            const role = request.user?.role;
+            if (role !== 'ADMIN') {
+                return reply.code(403).send({ error: 'forbidden' });
+            }
+        }
+        catch {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
+    });
     app.register(swagger, {
         openapi: {
             info: {
@@ -40,13 +51,33 @@ export function buildServer() {
         },
     });
     app.register(swaggerUi, { routePrefix: '/docs' });
+    const registerRoutes = (instance) => {
+        instance.register(healthRoutes);
+        instance.register(authRoutes);
+        instance.register(campaignRoutes);
+        instance.register(verificationRoutes);
+        instance.register(uploadRoutes);
+        instance.register(paymentRoutes);
+        instance.register(accountRoutes);
+        instance.register(adminRoutes);
+    };
     // Routes
-    app.register(healthRoutes);
-    app.register(authRoutes);
-    app.register(campaignRoutes);
-    app.register(verificationRoutes);
-    app.register(uploadRoutes);
-    app.register(paymentRoutes);
-    app.register(accountRoutes);
+    registerRoutes(app);
+    app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
+    // 🔒 Final stabilized PesaPal configuration
+    app.addHook('onReady', async () => {
+        if (!config.pesapal.ipnId) {
+            app.log.warn('PESAPAL_IPN_ID is not set. Payments will fail.');
+        }
+        else {
+            app.log.info({ ipnId: config.pesapal.ipnId }, 'PesaPal IPN locked');
+        }
+        if (!config.pesapal.callbackUrl) {
+            app.log.warn('PESAPAL_CALLBACK_URL is not set.');
+        }
+        if (!config.pesapal.consumerKey || !config.pesapal.consumerSecret) {
+            app.log.warn('PesaPal credentials are not fully configured.');
+        }
+    });
     return app;
 }

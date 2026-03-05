@@ -18,7 +18,6 @@ export const SubmitProofSchema = z.object({
 
 export const CreateCampaignSchema = z
   .object({
-    advertiser_id: z.string().uuid(),
     title: z.string().min(3).max(120),
     platform: PlatformAdapterSchema,
     payout_amount: z.number().int().positive(),

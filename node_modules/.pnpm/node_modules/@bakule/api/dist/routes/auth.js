@@ -16,8 +16,20 @@ const loginSchema = z.object({
 });
 export async function authRoutes(app) {
     const userRepo = new UserRepo();
+    app.get('/auth/register', async () => {
+        return {
+            ok: true,
+            method: 'POST',
+            note: 'Use POST /auth/register with JSON body { email, phone, password, role, country }.',
+        };
+    });
     app.post('/auth/register', async (request, reply) => {
-        const body = registerSchema.parse(request.body);
+        const parsed = registerSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const body = parsed.data;
         const countryData = resolveCountry(body.country);
         const user = await withTransaction(async (client) => {
             const existing = await userRepo.findByEmail(client, body.email);
@@ -43,13 +55,18 @@ export async function authRoutes(app) {
                 role: user.role,
                 phone: user.phone,
                 country: user.country,
-                currency: user.currency,
+                currency: user.currency ?? user.preferred_currency ?? 'UGX',
                 dialCode: countryData.dialCode
             }
         };
     });
     app.post('/auth/login', async (request, reply) => {
-        const body = loginSchema.parse(request.body);
+        const parsed = loginSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const body = parsed.data;
         const user = await withTransaction(async (client) => userRepo.findByEmail(client, body.email));
         if (!user || !verifyPassword(body.password, user.password_hash)) {
             reply.code(401);
@@ -67,7 +84,7 @@ export async function authRoutes(app) {
                 role: user.role,
                 phone: user.phone,
                 country: user.country,
-                currency: user.currency
+                currency: user.currency ?? user.preferred_currency ?? 'UGX'
             }
         };
     });

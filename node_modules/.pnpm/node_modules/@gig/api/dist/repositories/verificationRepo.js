@@ -1,14 +1,16 @@
 export class VerificationRepo {
     async createSession(client, input) {
+        const scriptJson = input.script == null ? null : JSON.stringify(input.script);
         const res = await client.query(`INSERT INTO verification_sessions
-      (user_id, campaign_id, platform, challenge_code, challenge_phrase, expires_at)
-      VALUES ($1,$2,$3,$4,$5,$6)
+      (user_id, campaign_id, platform, challenge_code, challenge_phrase, script, expires_at)
+      VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
       RETURNING *`, [
             input.user_id,
             input.campaign_id,
             input.platform,
             input.challenge_code,
             input.challenge_phrase,
+            scriptJson,
             input.expires_at
         ]);
         return res.rows[0];
@@ -18,8 +20,9 @@ export class VerificationRepo {
         return res.rows[0];
     }
     async createProof(client, input) {
-        const res = await client.query(`INSERT INTO proofs (session_id, user_id, video_url)
-       VALUES ($1,$2,$3) RETURNING *`, [input.session_id, input.user_id, input.video_url]);
+        const metaJson = input.meta == null ? null : JSON.stringify(input.meta);
+        const res = await client.query(`INSERT INTO proofs (session_id, user_id, video_url, meta)
+       VALUES ($1,$2,$3,$4::jsonb) RETURNING *`, [input.session_id, input.user_id, input.video_url, metaJson]);
         return res.rows[0];
     }
     async updateProofResult(client, proofId, result) {

@@ -5,3 +5,4 @@ export * from './verification.js';
 export * from './payments.js';
 export * from './uploads.js';
 export * from './account.js';
+export * from './admin.js';

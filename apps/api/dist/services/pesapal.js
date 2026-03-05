@@ -1,3 +1,4 @@
+// apps/api/src/services/pesapal.js
 import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config } from '../config.js';
@@ -17,10 +18,15 @@ async function getToken() {
         })
     });
     if (!res.ok) {
-        throw new Error(`PesaPal token error: ${res.status}`);
+        const errorText = await res.text();
+        throw new Error(`PesaPal token error: ${res.status} ${res.statusText} ${errorText}`);
     }
     const data = (await res.json());
-    cachedToken = { token: data.token, expiresAt: Date.now() + data.expires_in * 1000 };
+    cachedToken = {
+        token: data.token,
+        expiresAt: Date.now() + data.expires_in * 1000
+    };
+    console.info('[pesapal] OAuth token acquired', { expiresIn: data.expires_in });
     return data.token;
 }
 export async function registerIpnUrl() {
@@ -29,6 +35,7 @@ export async function registerIpnUrl() {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -36,8 +43,24 @@ export async function registerIpnUrl() {
             ipn_notification_type: 'POST'
         })
     });
-    if (!res.ok)
-        throw new Error(`PesaPal IPN register failed: ${res.status}`);
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PesaPal IPN register failed: ${res.status} ${text}`);
+    }
+    return res.json();
+}
+export async function getIpnList() {
+    const token = await getToken();
+    const res = await fetch(`${config.pesapal.baseUrl}/api/URLSetup/GetIpnList`, {
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${token}`
+        }
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PesaPal get IPN list failed: ${res.status} ${text}`);
+    }
     return res.json();
 }
 export async function submitOrder(input) {
@@ -63,8 +86,10 @@ export async function submitOrder(input) {
             }
         })
     });
-    if (!res.ok)
-        throw new Error(`PesaPal submit order failed: ${res.status}`);
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PesaPal submit order failed: ${res.status} ${text}`);
+    }
     return res.json();
 }
 export async function getTransactionStatus(orderTrackingId, merchantReference) {
@@ -76,8 +101,10 @@ export async function getTransactionStatus(orderTrackingId, merchantReference) {
             'Authorization': `Bearer ${token}`
         }
     });
-    if (!res.ok)
-        throw new Error(`PesaPal status failed: ${res.status}`);
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PesaPal status failed: ${res.status} ${text}`);
+    }
     return res.json();
 }
 export async function requestPayout(input) {
@@ -101,8 +128,10 @@ export async function requestPayout(input) {
             }
         })
     });
-    if (!res.ok)
-        throw new Error(`PesaPal payout failed: ${res.status}`);
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PesaPal payout failed: ${res.status} ${text}`);
+    }
     return res.json();
 }
 export function verifyWebhookSignature(rawBody, signature, secret) {
