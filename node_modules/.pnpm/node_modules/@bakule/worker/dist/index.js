@@ -7,13 +7,16 @@ import { runTamperChecks } from './verification/tamper.js';
 import { requestPayout } from './services/pesapal.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'mock';
+const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'deterministic';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
     : verifierProvider === 'deterministic'
         ? new DeterministicVerifier()
         : new MockVerifier();
 let lastContractExpirySweepAt = 0;
+if (process.env.NODE_ENV === 'production' && verifierProvider === 'mock') {
+    throw new Error('VERIFIER_PROVIDER=mock is not allowed in production');
+}
 async function fetchNextJob() {
     const client = await pool.connect();
     try {
@@ -42,7 +45,55 @@ async function fetchNextJob() {
         client.release();
     }
 }
+function evaluateClientTrace(script, clientMeta, tamperDuration) {
+    const steps = Array.isArray(script) ? script : [];
+    const requiredStepIds = steps.filter((s) => s?.required !== false).map((s) => String(s.id ?? ''));
+    const uniqueRequired = new Set(requiredStepIds.filter(Boolean));
+    const events = Array.isArray(clientMeta?.steps) ? clientMeta.steps : [];
+    const completedIds = [];
+    const completedAt = [];
+    for (const event of events) {
+        const id = String(event?.id ?? '').trim();
+        if (!id)
+            continue;
+        completedIds.push(id);
+        const ts = Date.parse(String(event?.completed_at ?? ''));
+        if (!Number.isNaN(ts))
+            completedAt.push(ts);
+    }
+    const startedAt = Date.parse(String(clientMeta?.recording_started_at ?? ''));
+    const stoppedAt = Date.parse(String(clientMeta?.recording_stopped_at ?? ''));
+    const declaredDuration = Number.isFinite(startedAt) && Number.isFinite(stoppedAt) && stoppedAt > startedAt
+        ? Math.round((stoppedAt - startedAt) / 1000)
+        : 0;
+    const duration = tamperDuration > 0 ? Math.round(tamperDuration) : declaredDuration;
+    let timelineOrderValid = true;
+    for (let i = 1; i < completedAt.length; i += 1) {
+        const current = completedAt[i] ?? 0;
+        const previous = completedAt[i - 1] ?? 0;
+        if (current < previous) {
+            timelineOrderValid = false;
+            break;
+        }
+    }
+    const uniqueCompleted = new Set(completedIds);
+    const requiredCompletedCount = [...uniqueRequired].filter((id) => uniqueCompleted.has(id)).length;
+    const strictDuration = duration >= 58 && duration <= 75;
+    const valid = uniqueRequired.size > 0 &&
+        requiredCompletedCount >= uniqueRequired.size &&
+        timelineOrderValid &&
+        strictDuration;
+    return {
+        valid,
+        required_steps: uniqueRequired.size,
+        completed_steps: completedIds.length,
+        unique_completed_steps: requiredCompletedCount,
+        duration_seconds: duration,
+        timeline_order_valid: timelineOrderValid,
+    };
+}
 function buildReviewReasons(input) {
+    const trace = evaluateClientTrace(input.script, input.clientMeta, Number(input.tamper?.details?.duration ?? 0));
     const reasons = [];
     if (input.tamper.cut_spike) {
         reasons.push({ code: 'TAMPER_CUT_SPIKE', message: 'Abrupt scene changes detected.' });
@@ -65,19 +116,36 @@ function buildReviewReasons(input) {
     if (!input.result.observed_views || input.result.observed_views <= 0) {
         reasons.push({ code: 'VIEWS_MISSING', message: 'View count could not be verified.' });
     }
-    if (input.script && Array.isArray(input.script)) {
-        const requiredSteps = input.script.filter((s) => s?.required !== false).length;
-        const completedSteps = input.clientMeta?.steps?.length ?? 0;
-        if (completedSteps < requiredSteps) {
-            reasons.push({
-                code: 'STEPS_INCOMPLETE',
-                message: 'Required verification gestures were not completed.',
-            });
-        }
+    if (trace.required_steps > 0 && trace.unique_completed_steps < trace.required_steps) {
+        reasons.push({
+            code: 'STEPS_INCOMPLETE',
+            message: 'Required verification gestures were not completed.',
+        });
+    }
+    if (!trace.timeline_order_valid) {
+        reasons.push({
+            code: 'STEP_TIMELINE_INVALID',
+            message: 'Verification step timeline is inconsistent.',
+        });
+    }
+    if (trace.duration_seconds < 58 || trace.duration_seconds > 75) {
+        reasons.push({
+            code: 'RECORDING_DURATION_INVALID',
+            message: 'Recording duration is outside the required 60-second window.',
+        });
     }
     return reasons;
 }
 async function preparePayoutRequest(client, proof, campaign) {
+    const contractRes = await client.query(`SELECT id
+     FROM contracts
+     WHERE campaign_id=$1
+       AND distributor_id=$2
+       AND status='ACTIVE'
+     LIMIT 1`, [campaign.id, proof.user_id]);
+    if (!contractRes.rows[0]) {
+        throw new Error('active_contract_required');
+    }
     const trustRow = await client.query('SELECT score FROM trust_scores WHERE user_id=$1', [proof.user_id]);
     const trustScore = trustRow.rows[0]?.score ?? 50;
     const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1', [campaign.id]);
@@ -197,15 +265,19 @@ async function processVerificationJob(job) {
             throw new Error('campaign_not_found');
         const adapter = platformAdapters[campaign.platform];
         const videoUrl = proof.video_url;
-        if (videoUrl.startsWith('http')) {
-            tempPath = await downloadToTemp(videoUrl);
-        }
-        else if (videoUrl.startsWith('/uploads/files/')) {
+        if (videoUrl.startsWith('/uploads/files/') || videoUrl.startsWith('/api/uploads/files/')) {
             const base = process.env.API_BASE_URL ?? 'http://localhost:3000';
             tempPath = await downloadToTemp(`${base}${videoUrl}`);
         }
+        else if (videoUrl.startsWith('http')) {
+            const parsed = new URL(videoUrl);
+            if (!parsed.pathname.includes('/uploads/files/')) {
+                throw new Error('disallowed_proof_video_url');
+            }
+            tempPath = await downloadToTemp(videoUrl);
+        }
         else {
-            tempPath = videoUrl;
+            throw new Error('invalid_proof_video_url');
         }
         if (!tempPath)
             throw new Error('temp_path_missing');
@@ -215,10 +287,20 @@ async function processVerificationJob(job) {
             challenge_phrase: session.challenge_phrase,
             expires_at: session.expires_at,
         });
+        const trace = evaluateClientTrace(session.script, proof.meta, Number(tamper?.details?.duration ?? 0));
         const reasons = buildReviewReasons({ tamper, result, script: session.script, clientMeta: proof.meta });
-        const finalDecision = result.decision === 'VERIFIED' && reasons.length === 0
-            ? 'VERIFIED'
-            : 'MANUAL_REVIEW';
+        const finalDecision = 'MANUAL_REVIEW';
+        const verificationReport = {
+            generated_at: new Date().toISOString(),
+            verifier_provider: verifierProvider,
+            ai_decision: result.decision,
+            ai_confidence: result.confidence,
+            challenge_seen: Boolean(result.challenge_seen),
+            observed_views: Number(result.observed_views ?? 0),
+            tamper,
+            trace,
+            strict_mode: true,
+        };
         await withTransaction(async (client) => {
             await client.query(`UPDATE proofs
          SET decision=$2,
@@ -227,6 +309,7 @@ async function processVerificationJob(job) {
              challenge_seen=$5,
              confidence=$6,
              review_reasons=$7::jsonb,
+             meta = COALESCE(meta, '{}'::jsonb) || $8::jsonb,
              status=$2
          WHERE id=$1`, [
                 proofId,
@@ -236,10 +319,11 @@ async function processVerificationJob(job) {
                 result.challenge_seen,
                 result.confidence,
                 JSON.stringify(reasons),
+                JSON.stringify({ verification_report: verificationReport }),
             ]);
             const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
             if (!isAdvertiserProof) {
-                const delta = finalDecision === 'VERIFIED' ? 2 : -1;
+                const delta = 0;
                 await client.query('INSERT INTO trust_events (user_id, event_type, delta) VALUES ($1,$2,$3)', [proof.user_id, finalDecision, delta]);
                 await client.query(`INSERT INTO trust_scores (user_id, score)
            VALUES ($1, 50)
@@ -249,17 +333,8 @@ async function processVerificationJob(job) {
                updated_at = now()
            WHERE user_id=$1`, [proof.user_id, delta]);
             }
-            if (finalDecision === 'VERIFIED' && !isAdvertiserProof) {
-                const existingPayoutJob = await client.query(`SELECT id
-           FROM job_queue
-           WHERE job_type='PAYOUT_PROOF'
-             AND payload->>'proof_id'=$1
-             AND status IN ('QUEUED','PROCESSING','RETRY')
-           LIMIT 1`, [proof.id]);
-                if (!existingPayoutJob.rows[0]) {
-                    await client.query('INSERT INTO job_queue (job_type, payload) VALUES ($1,$2)', ['PAYOUT_PROOF', { proof_id: proof.id }]);
-                }
-            }
+            // Strict admin-gated verification mode:
+            // payout jobs are only enqueued after explicit admin approval on /admin/proofs/:id.
         });
         await pool.query("UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1", [job.id]);
     }

@@ -1,15 +1,34 @@
-﻿import fs from 'fs';
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fetch } from 'undici';
 
 export async function downloadToTemp(url: string): Promise<string> {
+  const maxBytes = 250 * 1024 * 1024;
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gm-video-'));
   const filePath = path.join(tmpDir, 'video.mp4');
-  const res = await fetch(url);
+  const timeoutSignal = AbortSignal.timeout(120_000);
+  const res = await fetch(url, {
+    signal: timeoutSignal,
+  });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  await fs.promises.writeFile(filePath, buffer);
+  const sizeHeader = Number(res.headers.get('content-length') ?? 0);
+  if (Number.isFinite(sizeHeader) && sizeHeader > maxBytes) {
+    throw new Error('download_too_large');
+  }
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+    const buf = Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      throw new Error('download_too_large');
+    }
+    chunks.push(buf);
+  }
+
+  await fs.promises.writeFile(filePath, Buffer.concat(chunks));
   return filePath;
 }
 

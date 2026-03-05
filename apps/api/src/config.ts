@@ -1,8 +1,9 @@
 export const config = {
-    port: Number(process.env.PORT ?? 3000),
+  port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   jwtSecret: process.env.JWT_SECRET ?? 'dev-secret',
   corsOrigin: process.env.CORS_ORIGIN ?? '*',
+  apiBaseUrl: process.env.API_BASE_URL ?? '',
   uploadDir: process.env.UPLOAD_DIR ?? './uploads',
   uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
   fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',

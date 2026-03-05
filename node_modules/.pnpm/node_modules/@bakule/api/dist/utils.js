@@ -26,7 +26,11 @@ export function signUpload(payload) {
 }
 export function verifyUpload(payload, signature) {
     const sig = signUpload(payload);
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(signature));
+    const a = Buffer.from(sig, 'utf8');
+    const b = Buffer.from(signature, 'utf8');
+    if (a.length !== b.length)
+        return false;
+    return crypto.timingSafeEqual(a, b);
 }
 export function nowIso() {
     return new Date().toISOString();

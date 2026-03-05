@@ -51,6 +51,10 @@ export async function uploadRoutes(app) {
             reply.code(400);
             return { error: 'invalid_mime' };
         }
+        if (data.mimetype !== mime) {
+            reply.code(400);
+            return { error: 'mime_mismatch' };
+        }
         const uploadDir = path.resolve(config.uploadDir);
         await fs.promises.mkdir(uploadDir, { recursive: true });
         const targetPath = path.join(uploadDir, `${id}-${data.filename}`);
@@ -75,7 +79,15 @@ export async function uploadRoutes(app) {
     app.get('/uploads/files/:file', async (request, reply) => {
         const file = request.params.file;
         const uploadDir = path.resolve(config.uploadDir);
-        const filePath = path.join(uploadDir, file);
+        if (!/^[a-zA-Z0-9._-]+$/.test(file)) {
+            reply.code(400);
+            return { error: 'invalid_file' };
+        }
+        const filePath = path.resolve(uploadDir, file);
+        if (!filePath.startsWith(uploadDir + path.sep)) {
+            reply.code(400);
+            return { error: 'invalid_file' };
+        }
         if (!fs.existsSync(filePath)) {
             reply.code(404);
             return { error: 'not_found' };

@@ -58,6 +58,10 @@ export async function uploadRoutes(app: FastifyInstance) {
       reply.code(400);
       return { error: 'invalid_mime' };
     }
+    if (data.mimetype !== mime) {
+      reply.code(400);
+      return { error: 'mime_mismatch' };
+    }
 
     const uploadDir = path.resolve(config.uploadDir);
     await fs.promises.mkdir(uploadDir, { recursive: true });
@@ -78,17 +82,25 @@ export async function uploadRoutes(app: FastifyInstance) {
       data.file.on('error', (err: any) => reject(err));
     });
 
-      return {
-        file_url: `/uploads/files/${path.basename(targetPath)}?mime=${encodeURIComponent(
-          data.mimetype ?? 'application/octet-stream'
-        )}`
-      };
+    return {
+      file_url: `/uploads/files/${path.basename(targetPath)}?mime=${encodeURIComponent(
+        data.mimetype ?? 'application/octet-stream'
+      )}`
+    };
   });
 
   app.get('/uploads/files/:file', async (request, reply) => {
     const file = (request.params as any).file as string;
     const uploadDir = path.resolve(config.uploadDir);
-    const filePath = path.join(uploadDir, file);
+    if (!/^[a-zA-Z0-9._-]+$/.test(file)) {
+      reply.code(400);
+      return { error: 'invalid_file' };
+    }
+    const filePath = path.resolve(uploadDir, file);
+    if (!filePath.startsWith(uploadDir + path.sep)) {
+      reply.code(400);
+      return { error: 'invalid_file' };
+    }
     if (!fs.existsSync(filePath)) {
       reply.code(404);
       return { error: 'not_found' };
