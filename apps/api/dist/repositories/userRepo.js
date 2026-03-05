@@ -10,7 +10,7 @@ export class UserRepo {
         preferred_currency
       )
       VALUES ($1,$2,$3,$4,$5,$6)
-      RETURNING id, email, role, phone, country, preferred_currency
+      RETURNING id, email, role, phone, country, preferred_currency, can_multi_contract
       `, [email, phone, passwordHash, role, country, currency]);
         return res.rows[0];
     }

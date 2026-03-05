@@ -123,4 +123,39 @@ export async function accountRoutes(app: FastifyInstance) {
     }
     return { proof };
   });
+
+  app.get('/contracts/me', { preHandler: [app.authenticate] }, async (request) => {
+    const userId = (request.user as any).sub as string;
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    const status = (query?.status ?? '').toString().toUpperCase();
+    return withTransaction(async (client) => {
+      const params: any[] = [userId];
+      let where = 'WHERE ctr.distributor_id=$1';
+      if (status) {
+        params.push(status);
+        where += ` AND ctr.status=$${params.length}`;
+      }
+      params.push(limit, offset);
+      const res = await client.query(
+        `SELECT ctr.*,
+                c.title AS campaign_title,
+                c.platform,
+                c.media_type,
+                c.media_text,
+                c.media_url,
+                c.payout_amount,
+                c.terms_keep_hours,
+                c.terms_min_views,
+                c.terms_requirement
+         FROM contracts ctr
+         JOIN campaigns c ON c.id = ctr.campaign_id
+         ${where}
+         ORDER BY ctr.accepted_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params
+      );
+      return { contracts: res.rows };
+    });
+  });
 }

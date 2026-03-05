@@ -13,6 +13,7 @@ const verifier = verifierProvider === 'gemini'
     : verifierProvider === 'deterministic'
         ? new DeterministicVerifier()
         : new MockVerifier();
+let lastContractExpirySweepAt = 0;
 async function fetchNextJob() {
     const client = await pool.connect();
     try {
@@ -343,8 +344,28 @@ async function processPayoutJob(job) {
        WHERE id=$1`, [job.id, nextStatus, attempts, err?.message ?? 'error', delay]);
     }
 }
+async function expireOverdueContractsIfDue() {
+    const now = Date.now();
+    if (now - lastContractExpirySweepAt < 30_000)
+        return;
+    lastContractExpirySweepAt = now;
+    await withTransaction(async (client) => {
+        await client.query(`UPDATE contracts
+       SET status='CANCELLED',
+           cancelled_at=COALESCE(cancelled_at, now())
+       WHERE status='ACTIVE'
+         AND contract_deadline_at IS NOT NULL
+         AND contract_deadline_at < now()`);
+    });
+}
 async function loop() {
     while (true) {
+        try {
+            await expireOverdueContractsIfDue();
+        }
+        catch (err) {
+            console.error('contract_expiry_sweep_failed', err);
+        }
         const job = await fetchNextJob();
         if (!job) {
             await new Promise((r) => setTimeout(r, 2000));

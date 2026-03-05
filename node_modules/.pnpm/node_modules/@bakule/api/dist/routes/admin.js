@@ -11,6 +11,9 @@ const UpdateUserRoleSchema = z.object({
 const UpdateUserStatusSchema = z.object({
     status: z.enum(['ACTIVE', 'SUSPENDED', 'BANNED'])
 });
+const UpdateUserContractPrivilegeSchema = z.object({
+    can_multi_contract: z.boolean()
+});
 const ResetPasswordSchema = z.object({
     password: z.string().min(8)
 });
@@ -34,6 +37,9 @@ const UpdateCampaignSchema = z.object({
     media_type: z.enum(['TEXT', 'IMAGE', 'VIDEO']).optional(),
     media_text: z.string().trim().max(2000).nullable().optional(),
     media_url: z.string().url().nullable().optional(),
+    terms_keep_hours: z.number().int().positive().max(168).optional(),
+    terms_min_views: z.number().int().positive().nullable().optional(),
+    terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional(),
     status: z.enum(['ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED']).optional()
 });
 const UpdateContractSchema = z.object({
@@ -447,6 +453,22 @@ export async function adminRoutes(app) {
         }
         return { user: result };
     });
+    app.patch('/admin/users/:id/contract-privilege', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const body = UpdateUserContractPrivilegeSchema.parse(request.body);
+        const result = await withTransaction(async (client) => {
+            const res = await client.query('UPDATE users SET can_multi_contract=$2 WHERE id=$1 RETURNING *', [params.id, body.can_multi_contract]);
+            if (res.rows[0]) {
+                await logAudit(client, request.user.sub, 'UPDATE_USER_CONTRACT_PRIVILEGE', 'user', params.id, { can_multi_contract: body.can_multi_contract });
+            }
+            return res.rows[0];
+        });
+        if (!result) {
+            reply.code(404);
+            return { error: 'user_not_found' };
+        }
+        return { user: result };
+    });
     app.get('/admin/campaigns', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
@@ -509,7 +531,10 @@ export async function adminRoutes(app) {
           media_url=COALESCE($8, media_url),
           status=COALESCE($9, status),
           start_date=COALESCE($10, start_date),
-          end_date=COALESCE($11, end_date)
+          end_date=COALESCE($11, end_date),
+          terms_keep_hours=COALESCE($12, terms_keep_hours),
+          terms_min_views=COALESCE($13, terms_min_views),
+          terms_requirement=COALESCE($14, terms_requirement)
          WHERE id=$1
          RETURNING *`, [
                 params.id,
@@ -522,7 +547,10 @@ export async function adminRoutes(app) {
                 body.media_url ?? null,
                 body.status ?? null,
                 body.start_date ?? null,
-                body.end_date ?? null
+                body.end_date ?? null,
+                body.terms_keep_hours ?? null,
+                body.terms_min_views ?? null,
+                body.terms_requirement ?? null
             ]);
             if (updated.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_CAMPAIGN', 'campaign', params.id, body);

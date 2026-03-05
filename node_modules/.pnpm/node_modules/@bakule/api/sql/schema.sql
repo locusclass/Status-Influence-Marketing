@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS users (
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
   country TEXT NOT NULL DEFAULT 'UG',
   preferred_currency TEXT NOT NULL DEFAULT 'UGX',
+  can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -62,6 +63,14 @@ DO $$ BEGIN
     ALTER TABLE users
       ADD COLUMN preferred_currency TEXT NOT NULL DEFAULT 'UGX';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'can_multi_contract'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -74,6 +83,9 @@ CREATE TABLE IF NOT EXISTS campaigns (
   media_type TEXT NOT NULL CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO')),
   media_text TEXT,
   media_url TEXT,
+  terms_keep_hours INTEGER NOT NULL DEFAULT 12,
+  terms_min_views INTEGER,
+  terms_requirement TEXT NOT NULL DEFAULT 'DURATION' CHECK (terms_requirement IN ('DURATION', 'VIEWS', 'BOTH')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED')),
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
@@ -114,6 +126,31 @@ DO $$ BEGIN
       ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'
       CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED'));
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'terms_keep_hours'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN terms_keep_hours INTEGER NOT NULL DEFAULT 12;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'terms_min_views'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN terms_min_views INTEGER;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'terms_requirement'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN terms_requirement TEXT NOT NULL DEFAULT 'DURATION'
+      CHECK (terms_requirement IN ('DURATION', 'VIEWS', 'BOTH'));
+  END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -121,8 +158,56 @@ CREATE TABLE IF NOT EXISTS contracts (
   campaign_id UUID NOT NULL REFERENCES campaigns(id),
   distributor_id UUID NOT NULL REFERENCES users(id),
   status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
+  accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  post_deadline_at TIMESTAMPTZ,
+  contract_deadline_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'contracts' AND column_name = 'accepted_at'
+  ) THEN
+    ALTER TABLE contracts
+      ADD COLUMN accepted_at TIMESTAMPTZ NOT NULL DEFAULT now();
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'contracts' AND column_name = 'post_deadline_at'
+  ) THEN
+    ALTER TABLE contracts
+      ADD COLUMN post_deadline_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'contracts' AND column_name = 'contract_deadline_at'
+  ) THEN
+    ALTER TABLE contracts
+      ADD COLUMN contract_deadline_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'contracts' AND column_name = 'completed_at'
+  ) THEN
+    ALTER TABLE contracts
+      ADD COLUMN completed_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'contracts' AND column_name = 'cancelled_at'
+  ) THEN
+    ALTER TABLE contracts
+      ADD COLUMN cancelled_at TIMESTAMPTZ;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS verification_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -351,6 +436,7 @@ CREATE INDEX IF NOT EXISTS idx_escrows_created_at ON escrow_ledger(created_at);
 CREATE INDEX IF NOT EXISTS idx_escrows_status ON escrow_ledger(status);
 CREATE INDEX IF NOT EXISTS idx_contracts_created_at ON contracts(created_at);
 CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_contract_per_campaign ON contracts(campaign_id) WHERE status='ACTIVE';
 CREATE INDEX IF NOT EXISTS idx_wallets_created_at ON wallets(created_at);
 CREATE INDEX IF NOT EXISTS idx_pesapal_created_at ON pesapal_transactions(created_at);
 CREATE INDEX IF NOT EXISTS idx_pesapal_status ON pesapal_transactions(status);

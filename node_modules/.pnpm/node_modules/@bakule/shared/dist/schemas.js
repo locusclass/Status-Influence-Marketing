@@ -22,7 +22,10 @@ export const CreateCampaignSchema = z
     end_date: z.string(),
     media_type: MediaTypeSchema,
     media_text: z.string().trim().max(2000).optional(),
-    media_url: z.string().url().optional()
+    media_url: z.string().url().optional(),
+    terms_keep_hours: z.number().int().min(1).max(168).optional(),
+    terms_min_views: z.number().int().min(1).optional().nullable(),
+    terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional()
 })
     .superRefine((value, ctx) => {
     if (value.media_type === 'TEXT' && !value.media_text) {

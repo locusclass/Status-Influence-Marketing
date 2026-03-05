@@ -56,6 +56,7 @@ export async function authRoutes(app) {
                 phone: user.phone,
                 country: user.country,
                 currency: user.currency ?? user.preferred_currency ?? 'UGX',
+                can_multi_contract: user.can_multi_contract ?? false,
                 dialCode: countryData.dialCode
             }
         };
@@ -84,7 +85,8 @@ export async function authRoutes(app) {
                 role: user.role,
                 phone: user.phone,
                 country: user.country,
-                currency: user.currency ?? user.preferred_currency ?? 'UGX'
+                currency: user.currency ?? user.preferred_currency ?? 'UGX',
+                can_multi_contract: user.can_multi_contract ?? false
             }
         };
     });

@@ -40,6 +40,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     media_type: z.ZodEnum<["TEXT", "IMAGE", "VIDEO"]>;
     media_text: z.ZodOptional<z.ZodString>;
     media_url: z.ZodOptional<z.ZodString>;
+    terms_keep_hours: z.ZodOptional<z.ZodNumber>;
+    terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
+    terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
 }, "strip", z.ZodTypeAny, {
     platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
     title: string;
@@ -50,6 +53,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     media_type: "TEXT" | "IMAGE" | "VIDEO";
     media_text?: string | undefined;
     media_url?: string | undefined;
+    terms_keep_hours?: number | undefined;
+    terms_min_views?: number | null | undefined;
+    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }, {
     platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
     title: string;
@@ -60,6 +66,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     media_type: "TEXT" | "IMAGE" | "VIDEO";
     media_text?: string | undefined;
     media_url?: string | undefined;
+    terms_keep_hours?: number | undefined;
+    terms_min_views?: number | null | undefined;
+    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }>, {
     platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
     title: string;
@@ -70,6 +79,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     media_type: "TEXT" | "IMAGE" | "VIDEO";
     media_text?: string | undefined;
     media_url?: string | undefined;
+    terms_keep_hours?: number | undefined;
+    terms_min_views?: number | null | undefined;
+    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }, {
     platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
     title: string;
@@ -80,6 +92,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     media_type: "TEXT" | "IMAGE" | "VIDEO";
     media_text?: string | undefined;
     media_url?: string | undefined;
+    terms_keep_hours?: number | undefined;
+    terms_min_views?: number | null | undefined;
+    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }>;
 export declare const FundCampaignSchema: z.ZodObject<{
     campaign_id: z.ZodString;
