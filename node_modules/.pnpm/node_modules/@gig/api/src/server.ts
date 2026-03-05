@@ -22,8 +22,13 @@ import {
 export function buildServer() {
   const app = Fastify({ logger: true });
 
+  const corsOrigin =
+    config.corsOrigin === '*'
+      ? true
+      : config.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
+
   app.register(cors, {
-    origin: true,
+    origin: corsOrigin,
     credentials: true,
   });
 

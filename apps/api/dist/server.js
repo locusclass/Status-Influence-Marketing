@@ -10,8 +10,11 @@ import { config } from './config.js';
 import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
 export function buildServer() {
     const app = Fastify({ logger: true });
+    const corsOrigin = config.corsOrigin === '*'
+        ? true
+        : config.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
     app.register(cors, {
-        origin: true,
+        origin: corsOrigin,
         credentials: true,
     });
     app.register(rateLimit, {
