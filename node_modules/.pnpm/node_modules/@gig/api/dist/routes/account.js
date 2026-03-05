@@ -127,7 +127,7 @@ export async function accountRoutes(app) {
          FROM contracts ctr
          JOIN campaigns c ON c.id = ctr.campaign_id
          ${where}
-         ORDER BY ctr.accepted_at DESC
+         ORDER BY ctr.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`, params);
             return { contracts: res.rows };
         });

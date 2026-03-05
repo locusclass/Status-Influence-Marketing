@@ -67,7 +67,7 @@ export async function campaignRoutes(app) {
          FROM contracts
          WHERE campaign_id=$1
            AND status='ACTIVE'
-         ORDER BY accepted_at DESC`, [params.id]);
+         ORDER BY created_at DESC`, [params.id]);
             const activeContractRow = activeContract.rows[0] ?? null;
             return {
                 ...found,
@@ -309,7 +309,6 @@ export async function campaignRoutes(app) {
           campaign_id,
           distributor_id,
           status,
-          accepted_at,
           post_deadline_at,
           contract_deadline_at
         )
@@ -317,7 +316,6 @@ export async function campaignRoutes(app) {
           $1,
           $2,
           'ACTIVE',
-          now(),
           now() + interval '2 minutes',
           now() + (($3::int * 60 + 2)::text || ' minutes')::interval
         WHERE NOT EXISTS (

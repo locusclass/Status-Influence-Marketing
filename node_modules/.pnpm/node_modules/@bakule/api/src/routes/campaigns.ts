@@ -84,7 +84,7 @@ export async function campaignRoutes(app: FastifyInstance) {
          FROM contracts
          WHERE campaign_id=$1
            AND status='ACTIVE'
-         ORDER BY accepted_at DESC`,
+         ORDER BY created_at DESC`,
         [params.id]
       );
       const activeContractRow = activeContract.rows[0] ?? null;
@@ -368,7 +368,6 @@ export async function campaignRoutes(app: FastifyInstance) {
           campaign_id,
           distributor_id,
           status,
-          accepted_at,
           post_deadline_at,
           contract_deadline_at
         )
@@ -376,7 +375,6 @@ export async function campaignRoutes(app: FastifyInstance) {
           $1,
           $2,
           'ACTIVE',
-          now(),
           now() + interval '2 minutes',
           now() + (($3::int * 60 + 2)::text || ' minutes')::interval
         WHERE NOT EXISTS (
