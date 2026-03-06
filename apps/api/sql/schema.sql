@@ -20,6 +20,7 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  full_name TEXT NOT NULL DEFAULT '',
   email TEXT UNIQUE NOT NULL,
   phone TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
@@ -38,6 +39,14 @@ DO $$ BEGIN
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
   ALTER TABLE users
     ADD CONSTRAINT users_status_check CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'full_name'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN full_name TEXT NOT NULL DEFAULT '';
+  END IF;
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns

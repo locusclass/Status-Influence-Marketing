@@ -22,6 +22,7 @@
     "currency-codes": "^2.2.0",
     "dotenv": "^17.3.1",
     "fastify": "^4.28.1",
+    "google-auth-library": "^9.15.1",
     "i18n-iso-countries": "^7.14.0",
     "libphonenumber-js": "^1.12.37",
     "pg": "^8.12.0",

@@ -4,6 +4,7 @@ export class UserRepo {
 
   async createUser(
     client: PoolClient,
+    fullName: string,
     email: string,
     phone: string,
     passwordHash: string,
@@ -14,6 +15,7 @@ export class UserRepo {
     const res = await client.query(
       `
       INSERT INTO users (
+        full_name,
         email,
         phone,
         password_hash,
@@ -21,10 +23,10 @@ export class UserRepo {
         country,
         preferred_currency
       )
-      VALUES ($1,$2,$3,$4,$5,$6)
-      RETURNING id, email, role, phone, country, preferred_currency, can_multi_contract
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING id, full_name, email, role, phone, country, preferred_currency, can_multi_contract
       `,
-      [email, phone, passwordHash, role, country, currency]
+      [fullName, email, phone, passwordHash, role, country, currency]
     );
 
     return res.rows[0];
