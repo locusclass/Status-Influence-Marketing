@@ -22,13 +22,45 @@ import {
 export function buildServer() {
   const app = Fastify({ logger: true });
 
-  const corsOrigin =
+  const allowedOrigins =
     config.corsOrigin === '*'
-      ? true
+      ? ['*']
       : config.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
 
+  const isOriginAllowed = (origin?: string) => {
+    if (!origin) return true;
+    if (allowedOrigins.includes('*')) return true;
+
+    const wildcardMatch = (value: string, mask: string) => {
+      if (!mask.includes('*')) return value === mask;
+      const segments = mask.split('*');
+      let cursor = 0;
+
+      for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index] ?? '';
+        if (!segment) continue;
+        const foundAt = value.indexOf(segment, cursor);
+        if (foundAt < 0) return false;
+        if (index === 0 && !mask.startsWith('*') && foundAt !== 0) return false;
+        cursor = foundAt + segment.length;
+      }
+
+      const last = segments[segments.length - 1] ?? '';
+      if (!mask.endsWith('*') && !value.endsWith(last)) return false;
+      return true;
+    };
+
+    for (const allowed of allowedOrigins) {
+      if (!allowed) continue;
+      if (wildcardMatch(origin, allowed)) return true;
+    }
+    return false;
+  };
+
   app.register(cors, {
-    origin: corsOrigin,
+    origin: (origin, cb) => {
+      cb(null, isOriginAllowed(origin));
+    },
     credentials: true,
   });
 

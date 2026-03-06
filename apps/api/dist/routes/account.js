@@ -201,16 +201,63 @@ export async function accountRoutes(app) {
         const userId = request.user.sub;
         return withTransaction(async (client) => {
             await ensureUserProfilesTable(client);
-            await client.query('DELETE FROM user_profiles WHERE user_id=$1', [userId]);
+            const campaignRes = await client.query('SELECT id FROM campaigns WHERE advertiser_id=$1', [userId]);
+            const campaignIds = campaignRes.rows.map((row) => row.id);
+            const sessionRes = await client.query(`
+        SELECT id
+        FROM verification_sessions
+        WHERE user_id=$1 OR campaign_id = ANY($2::uuid[])
+        `, [userId, campaignIds]);
+            const sessionIds = sessionRes.rows.map((row) => row.id);
+            const proofRes = await client.query(`
+        SELECT id
+        FROM proofs
+        WHERE user_id=$1 OR session_id = ANY($2::uuid[])
+        `, [userId, sessionIds]);
+            const proofIds = proofRes.rows.map((row) => row.id);
+            const walletRes = await client.query('SELECT id FROM wallets WHERE user_id=$1', [userId]);
+            const walletIds = walletRes.rows.map((row) => row.id);
             await client.query(`
-        UPDATE users
-        SET
-          email = CONCAT('deleted+', id::text, '@deleted.local'),
-          phone = CONCAT('deleted-', LEFT(id::text, 8)),
-          password_hash = $2
-        WHERE id=$1
-        `, [userId, hashPassword(`deleted-${userId}-${Date.now()}`)]);
-            return { ok: true };
+        DELETE FROM payout_requests
+        WHERE user_id=$1 OR proof_id = ANY($2::uuid[])
+        `, [userId, proofIds]);
+            await client.query(`
+        DELETE FROM pesapal_transactions
+        WHERE escrow_id IN (
+          SELECT id FROM escrow_ledger WHERE campaign_id = ANY($1::uuid[])
+        )
+        `, [campaignIds]);
+            await client.query(`
+        DELETE FROM escrow_ledger
+        WHERE campaign_id = ANY($1::uuid[])
+        `, [campaignIds]);
+            await client.query(`
+        DELETE FROM wallet_txns
+        WHERE wallet_id = ANY($1::uuid[])
+        `, [walletIds]);
+            await client.query(`
+        DELETE FROM proofs
+        WHERE id = ANY($1::uuid[]) OR user_id=$2 OR session_id = ANY($3::uuid[])
+        `, [proofIds, userId, sessionIds]);
+            await client.query(`
+        DELETE FROM verification_sessions
+        WHERE id = ANY($1::uuid[]) OR user_id=$2 OR campaign_id = ANY($3::uuid[])
+        `, [sessionIds, userId, campaignIds]);
+            await client.query(`
+        DELETE FROM contracts
+        WHERE distributor_id=$1 OR campaign_id = ANY($2::uuid[])
+        `, [userId, campaignIds]);
+            await client.query(`
+        DELETE FROM campaigns
+        WHERE advertiser_id=$1
+        `, [userId]);
+            await client.query('DELETE FROM trust_events WHERE user_id=$1', [userId]);
+            await client.query('DELETE FROM trust_scores WHERE user_id=$1', [userId]);
+            await client.query('DELETE FROM device_fingerprints WHERE user_id=$1', [userId]);
+            await client.query('DELETE FROM user_profiles WHERE user_id=$1', [userId]);
+            await client.query('DELETE FROM wallets WHERE user_id=$1', [userId]);
+            await client.query('DELETE FROM users WHERE id=$1', [userId]);
+            return { ok: true, deleted: true };
         });
     });
     app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
