@@ -1,7 +1,8 @@
 export class UserRepo {
-    async createUser(client, email, phone, passwordHash, role, country, currency) {
+    async createUser(client, fullName, email, phone, passwordHash, role, country, currency) {
         const res = await client.query(`
       INSERT INTO users (
+        full_name,
         email,
         phone,
         password_hash,
@@ -9,9 +10,9 @@ export class UserRepo {
         country,
         preferred_currency
       )
-      VALUES ($1,$2,$3,$4,$5,$6)
-      RETURNING id, email, role, phone, country, preferred_currency, can_multi_contract
-      `, [email, phone, passwordHash, role, country, currency]);
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING id, full_name, email, role, phone, country, preferred_currency, can_multi_contract
+      `, [fullName, email, phone, passwordHash, role, country, currency]);
         return res.rows[0];
     }
     async findByEmail(client, email) {
