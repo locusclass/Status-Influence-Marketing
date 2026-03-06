@@ -320,6 +320,9 @@ export async function campaignRoutes(app: FastifyInstance) {
       const campaign = await campaignRepo.getCampaign(client, body.campaign_id);
       if (!campaign) return { error: 'campaign_not_found' } as any;
       if (campaign.status !== 'ACTIVE') return { error: 'campaign_not_active' } as any;
+      if (campaign.advertiser_id === authUser) {
+        return { error: 'self_contract_forbidden' } as any;
+      }
 
       const escrowRes = await client.query(
         'SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1',
@@ -394,7 +397,12 @@ export async function campaignRoutes(app: FastifyInstance) {
 
     if ((result as any).error) {
       const error = (result as any).error as string;
-      const code = error === 'campaign_not_found' ? 404 : error === 'forbidden' ? 403 : 409;
+      const code =
+        error === 'campaign_not_found'
+          ? 404
+          : error === 'forbidden' || error === 'self_contract_forbidden'
+              ? 403
+              : 409;
       reply.code(code);
       return { error };
     }

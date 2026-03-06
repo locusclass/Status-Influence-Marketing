@@ -278,6 +278,9 @@ export async function campaignRoutes(app) {
                 return { error: 'campaign_not_found' };
             if (campaign.status !== 'ACTIVE')
                 return { error: 'campaign_not_active' };
+            if (campaign.advertiser_id === authUser) {
+                return { error: 'self_contract_forbidden' };
+            }
             const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1', [body.campaign_id]);
             const escrow = escrowRes.rows[0];
             if (!escrow || (escrow.status !== 'FUNDED' && escrow.status !== 'PARTIALLY_DISBURSED')) {
@@ -332,7 +335,11 @@ export async function campaignRoutes(app) {
         });
         if (result.error) {
             const error = result.error;
-            const code = error === 'campaign_not_found' ? 404 : error === 'forbidden' ? 403 : 409;
+            const code = error === 'campaign_not_found'
+                ? 404
+                : error === 'forbidden' || error === 'self_contract_forbidden'
+                    ? 403
+                    : 409;
             reply.code(code);
             return { error };
         }

@@ -17,6 +17,10 @@ const accountAvatarSchema = z.object({
   avatar_url: z.string().url().max(1024),
 });
 
+const accountRoleSchema = z.object({
+  role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+});
+
 async function ensureUserProfilesTable(client: any) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -177,6 +181,76 @@ export async function accountRoutes(app: FastifyInstance) {
           hashPassword(body.new_password),
         ]);
         return { ok: true };
+      });
+    }
+  );
+
+  app.patch(
+    '/account/role',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const parsed = accountRoleSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+      const body = parsed.data;
+
+      return withTransaction(async (client) => {
+        await client.query('UPDATE users SET role=$2 WHERE id=$1', [
+          userId,
+          body.role,
+        ]);
+
+        const hasCanMultiContract = await usersHasColumn(
+          client,
+          'can_multi_contract'
+        );
+        const canMultiSelect = hasCanMultiContract
+          ? 'can_multi_contract'
+          : 'false::boolean AS can_multi_contract';
+
+        const res = await client.query(
+          `
+          SELECT
+            id,
+            email,
+            role,
+            phone,
+            country,
+            preferred_currency AS currency,
+            ${canMultiSelect}
+          FROM users
+          WHERE id=$1
+          LIMIT 1
+          `,
+          [userId]
+        );
+        const user = res.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+
+        const token = app.jwt.sign({
+          sub: user.id,
+          role: user.role,
+        });
+
+        return {
+          ok: true,
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            phone: user.phone,
+            country: user.country,
+            currency: user.currency ?? 'UGX',
+            can_multi_contract: user.can_multi_contract ?? false,
+          },
+        };
       });
     }
   );
