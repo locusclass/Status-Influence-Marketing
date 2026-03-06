@@ -28,6 +28,60 @@ const googleAuthSchema = z.object({
   full_name: z.string().min(2).max(120).optional(),
 });
 
+async function ensureUserProfilesTable(client: any) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      full_name TEXT NOT NULL DEFAULT '',
+      avatar_url TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function usersHasColumn(client: any, columnName: string) {
+  const res = await client.query(
+    `
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema='public'
+      AND table_name='users'
+      AND column_name=$1
+    LIMIT 1
+    `,
+    [columnName]
+  );
+  return Boolean(res.rowCount);
+}
+
+async function upsertGoogleProfile(
+  client: any,
+  userId: string,
+  fullName: string,
+  photoUrl: string
+) {
+  await ensureUserProfilesTable(client);
+  await client.query(
+    `
+    INSERT INTO user_profiles (user_id, full_name, avatar_url, updated_at)
+    VALUES ($1, $2, NULLIF($3, ''), NOW())
+    ON CONFLICT (user_id)
+    DO UPDATE SET
+      full_name = EXCLUDED.full_name,
+      avatar_url = COALESCE(EXCLUDED.avatar_url, user_profiles.avatar_url),
+      updated_at = NOW()
+    `,
+    [userId, fullName, photoUrl]
+  );
+
+  if (await usersHasColumn(client, 'full_name')) {
+    await client.query('UPDATE users SET full_name=$2 WHERE id=$1', [
+      userId,
+      fullName,
+    ]);
+  }
+}
+
 function buildSyntheticPhone(sub: string) {
   const hash = crypto.createHash('sha256').update(sub).digest('hex');
   const digits = hash
@@ -192,10 +246,12 @@ export async function authRoutes(app: FastifyInstance) {
     const fullName =
       (body.full_name?.trim() || String(payload?.name ?? '').trim() || email.split('@')[0] || 'Prime Status User')
         .slice(0, 120);
+    const photoUrl = String(payload?.picture ?? '').trim().slice(0, 1024);
 
     const user = await withTransaction(async (client) => {
       const existing = await userRepo.findByEmail(client, email);
       if (existing) {
+        await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
         return existing;
       }
 
@@ -212,6 +268,7 @@ export async function authRoutes(app: FastifyInstance) {
         countryData.currency
       );
       await userRepo.ensureWallet(client, created.id, countryData.currency);
+      await upsertGoogleProfile(client, created.id, fullName, photoUrl);
       return created;
     });
 
@@ -231,6 +288,7 @@ export async function authRoutes(app: FastifyInstance) {
         country: user.country,
         currency: user.currency ?? user.preferred_currency ?? 'UGX',
         can_multi_contract: user.can_multi_contract ?? false,
+        avatar_url: photoUrl || null,
         dialCode: countryData.dialCode,
       },
     };
