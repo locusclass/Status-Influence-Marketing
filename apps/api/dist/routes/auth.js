@@ -22,6 +22,7 @@ const googleAuthSchema = z.object({
     role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
     country: z.string().min(2),
     full_name: z.string().min(2).max(120).optional(),
+    avatar_url: z.string().url().max(1024).optional(),
 });
 async function ensureUserProfilesTable(client) {
     await client.query(`
@@ -194,7 +195,9 @@ export async function authRoutes(app) {
         }
         const fullName = (body.full_name?.trim() || String(payload?.name ?? '').trim() || email.split('@')[0] || 'Prime Status User')
             .slice(0, 120);
-        const photoUrl = String(payload?.picture ?? '').trim().slice(0, 1024);
+        const photoUrl = String(body.avatar_url?.trim() || payload?.picture || '')
+            .trim()
+            .slice(0, 1024);
         const user = await withTransaction(async (client) => {
             const existing = await userRepo.findByEmail(client, email);
             if (existing) {
