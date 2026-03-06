@@ -1,14 +1,205 @@
-﻿import { FastifyInstance } from 'fastify';
+import { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { withTransaction } from '../db.js';
+import { hashPassword, verifyPassword } from '../services/auth.js';
+
+const accountProfileSchema = z.object({
+  full_name: z.string().trim().min(2).max(120),
+  country: z.string().trim().min(2).max(3).optional(),
+});
+
+const accountPasswordSchema = z.object({
+  current_password: z.string().min(8),
+  new_password: z.string().min(8),
+});
+
+const accountAvatarSchema = z.object({
+  avatar_url: z.string().url().max(1024),
+});
+
+async function ensureUserProfilesTable(client: any) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      full_name TEXT NOT NULL DEFAULT '',
+      avatar_url TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function usersHasColumn(client: any, columnName: string) {
+  const res = await client.query(
+    `
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema='public'
+      AND table_name='users'
+      AND column_name=$1
+    LIMIT 1
+    `,
+    [columnName]
+  );
+  return Boolean(res.rowCount);
+}
 
 export async function accountRoutes(app: FastifyInstance) {
   const parsePaging = (query: any) => {
     const limitRaw = Number(query?.limit ?? 50);
     const offsetRaw = Number(query?.offset ?? 0);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(Math.max(limitRaw, 1), 200)
+      : 50;
     const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
     return { limit, offset };
   };
+
+  app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
+    const userId = (request.user as any).sub as string;
+    return withTransaction(async (client) => {
+      await ensureUserProfilesTable(client);
+      const hasFullName = await usersHasColumn(client, 'full_name');
+      const fullNameSelect = hasFullName
+        ? 'COALESCE(NULLIF(u.full_name, \'\'), p.full_name, \'\')'
+        : 'COALESCE(p.full_name, \'\')';
+      const res = await client.query(
+        `
+        SELECT
+          u.id,
+          u.email,
+          u.role,
+          u.phone,
+          u.country,
+          u.preferred_currency AS currency,
+          ${fullNameSelect} AS full_name,
+          p.avatar_url,
+          p.updated_at
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        WHERE u.id = $1
+        LIMIT 1
+        `,
+        [userId]
+      );
+      return { profile: res.rows[0] ?? null };
+    });
+  });
+
+  app.patch(
+    '/account/me',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const parsed = accountProfileSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+      const body = parsed.data;
+      return withTransaction(async (client) => {
+        await ensureUserProfilesTable(client);
+        await client.query(
+          `
+          INSERT INTO user_profiles (user_id, full_name, updated_at)
+          VALUES ($1, $2, NOW())
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            full_name = EXCLUDED.full_name,
+            updated_at = NOW()
+          `,
+          [userId, body.full_name]
+        );
+
+        if (body.country && body.country.trim().length > 0) {
+          await client.query('UPDATE users SET country=$2 WHERE id=$1', [
+            userId,
+            body.country.trim().toUpperCase(),
+          ]);
+        }
+
+        return { ok: true };
+      });
+    }
+  );
+
+  app.patch(
+    '/account/avatar',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const parsed = accountAvatarSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+      const body = parsed.data;
+      return withTransaction(async (client) => {
+        await ensureUserProfilesTable(client);
+        await client.query(
+          `
+          INSERT INTO user_profiles (user_id, avatar_url, updated_at)
+          VALUES ($1, $2, NOW())
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            avatar_url = EXCLUDED.avatar_url,
+            updated_at = NOW()
+          `,
+          [userId, body.avatar_url]
+        );
+        return { ok: true };
+      });
+    }
+  );
+
+  app.patch(
+    '/account/password',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const parsed = accountPasswordSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+      const body = parsed.data;
+      return withTransaction(async (client) => {
+        const userRes = await client.query(
+          `SELECT id, password_hash FROM users WHERE id=$1 LIMIT 1`,
+          [userId]
+        );
+        const user = userRes.rows[0];
+        if (!user || !verifyPassword(body.current_password, user.password_hash)) {
+          reply.code(401);
+          return { error: 'invalid_credentials' };
+        }
+        await client.query('UPDATE users SET password_hash=$2 WHERE id=$1', [
+          userId,
+          hashPassword(body.new_password),
+        ]);
+        return { ok: true };
+      });
+    }
+  );
+
+  app.delete('/account/me', { preHandler: [app.authenticate] }, async (request) => {
+    const userId = (request.user as any).sub as string;
+    return withTransaction(async (client) => {
+      await ensureUserProfilesTable(client);
+      await client.query('DELETE FROM user_profiles WHERE user_id=$1', [userId]);
+      await client.query(
+        `
+        UPDATE users
+        SET
+          email = CONCAT('deleted+', id::text, '@deleted.local'),
+          phone = CONCAT('deleted-', LEFT(id::text, 8)),
+          password_hash = $2
+        WHERE id=$1
+        `,
+        [userId, hashPassword(`deleted-${userId}-${Date.now()}`)]
+      );
+      return { ok: true };
+    });
+  });
 
   app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
