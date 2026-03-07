@@ -9,7 +9,11 @@ import multipart from '@fastify/multipart';
 import { config } from './config.js';
 import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
 export function buildServer() {
-    const app = Fastify({ logger: true });
+    const app = Fastify({
+        logger: {
+            level: process.env.LOG_LEVEL ?? 'info'
+        }
+    });
     const allowedOrigins = config.corsOrigin === '*'
         ? ['*']
         : config.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
@@ -61,6 +65,46 @@ export function buildServer() {
         secret: config.jwtSecret,
     });
     app.register(multipart);
+    app.addHook('onRequest', async (request) => {
+        request.log.info({
+            reqId: request.id,
+            method: request.method,
+            url: request.url,
+            ip: request.ip,
+            userAgent: request.headers['user-agent']
+        }, `request:start ${request.method} ${request.url}`);
+    });
+    app.addHook('onResponse', async (request, reply) => {
+        request.log.info({
+            reqId: request.id,
+            method: request.method,
+            url: request.url,
+            statusCode: reply.statusCode,
+            responseTimeMs: Number(reply.elapsedTime.toFixed(1))
+        }, `request:done ${request.method} ${request.url} -> ${reply.statusCode}`);
+    });
+    app.addHook('onError', async (request, reply, error) => {
+        request.log.error({
+            reqId: request.id,
+            method: request.method,
+            url: request.url,
+            statusCode: reply.statusCode,
+            err: error
+        }, `request:error ${request.method} ${request.url}`);
+    });
+    app.setErrorHandler((error, request, reply) => {
+        request.log.error({
+            reqId: request.id,
+            method: request.method,
+            url: request.url,
+            err: error
+        }, `unhandled:error ${request.method} ${request.url}`);
+        if (reply.sent)
+            return;
+        reply.status(error.statusCode ?? 500).send({
+            error: error.statusCode && error.statusCode < 500 ? error.message : 'internal_server_error'
+        });
+    });
     app.decorate('authenticate', async (request, reply) => {
         try {
             await request.jwtVerify();
