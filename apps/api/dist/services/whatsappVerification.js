@@ -109,14 +109,24 @@ class BaileysWhatsAppVerifier {
             console.warn('[whatsapp] Pairing is enabled but WHATSAPP_PAIRING_NUMBER or requestPairingCode is missing.');
             return;
         }
-        try {
-            const code = await sock.requestPairingCode(this.pairingPhone);
-            console.info(`[whatsapp] Pairing code generated for ${this.pairingPhone}: ${code}`);
-            console.info('[whatsapp] Open WhatsApp > Linked devices > Link with phone number and enter this code.');
-        }
-        catch (error) {
-            const detail = error instanceof Error ? error.message : 'unknown_pairing_error';
-            console.error(`[whatsapp] Failed to generate pairing code: ${detail}`);
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        for (let attempt = 1; attempt <= 4; attempt += 1) {
+            try {
+                // Baileys pairing code often fails if requested immediately on socket creation.
+                await wait(2000 * attempt);
+                const code = await sock.requestPairingCode(this.pairingPhone);
+                console.info(`[whatsapp] Pairing code generated for ${this.pairingPhone}: ${code}`);
+                console.info('[whatsapp] Open WhatsApp > Linked devices > Link with phone number and enter this code.');
+                return;
+            }
+            catch (error) {
+                const detail = error instanceof Error ? error.message : 'unknown_pairing_error';
+                if (attempt === 4) {
+                    console.error(`[whatsapp] Failed to generate pairing code: ${detail}`);
+                    return;
+                }
+                console.warn(`[whatsapp] Pairing code attempt ${attempt} failed (${detail}). Retrying...`);
+            }
         }
     }
     async waitForSocketConnection(sock) {
