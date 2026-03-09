@@ -4,7 +4,8 @@ import { webcrypto } from 'node:crypto';
 type VerifyFailureReason =
   | 'invalid_phone'
   | 'not_on_whatsapp'
-  | 'provider_unavailable';
+  | 'provider_unavailable'
+  | 'pairing_required';
 
 export type WhatsAppVerificationResult =
   | {
@@ -19,6 +20,8 @@ export type WhatsAppVerificationResult =
       reason: VerifyFailureReason;
       detail: string;
       provider: 'mock' | 'baileys';
+      pairingCode?: string | null;
+      pairingPhone?: string | null;
     };
 
 type VerifyPayload = {
@@ -119,6 +122,9 @@ class BaileysWhatsAppVerifier {
   private readonly connectTimeoutMs: number;
   private readonly pairingEnabled: boolean;
   private readonly pairingPhone: string;
+  private lastPairingCode: string | null = null;
+  private pairingRequestedAt: number | null = null;
+  private lastProviderError: string | null = null;
 
   constructor() {
     this.authStateDir =
@@ -131,8 +137,7 @@ class BaileysWhatsAppVerifier {
       .replace(/\D/g, '')
       .trim();
     this.connectTimeoutMs = Number(
-      process.env.WHATSAPP_BAILEYS_CONNECT_TIMEOUT_MS ??
-        (this.pairingEnabled ? 120000 : 20000)
+      process.env.WHATSAPP_BAILEYS_CONNECT_TIMEOUT_MS ?? 12000
     );
   }
 
@@ -154,7 +159,8 @@ class BaileysWhatsAppVerifier {
     }) as SockLike;
 
     sock.ev.on('creds.update', auth.saveCreds);
-    await this.maybeEmitPairingCode(sock, Boolean(auth.state.creds?.registered));
+    const alreadyRegistered = Boolean(auth.state.creds?.registered);
+    await this.maybeEmitPairingCode(sock, alreadyRegistered);
     await this.waitForSocketConnection(sock);
     return sock;
   }
@@ -176,6 +182,8 @@ class BaileysWhatsAppVerifier {
         // Baileys pairing code often fails if requested immediately on socket creation.
         await wait(2000 * attempt);
         const code = await sock.requestPairingCode(this.pairingPhone);
+        this.lastPairingCode = code;
+        this.pairingRequestedAt = Date.now();
         console.info(
           `[whatsapp] Pairing code generated for ${this.pairingPhone}: ${code}`
         );
@@ -186,6 +194,7 @@ class BaileysWhatsAppVerifier {
       } catch (error) {
         const detail =
           error instanceof Error ? error.message : 'unknown_pairing_error';
+        this.lastProviderError = detail;
         if (attempt === 4) {
           console.error(`[whatsapp] Failed to generate pairing code: ${detail}`);
           return;
@@ -256,15 +265,49 @@ class BaileysWhatsAppVerifier {
       };
     } catch (error) {
       this.socketPromise = null;
+      const detail =
+        error instanceof Error ? error.message : 'Baileys verification failed.';
+      if (
+        this.pairingEnabled &&
+        (detail.includes('timeout') ||
+          detail.includes('closed') ||
+          detail.includes('Connection Closed') ||
+          detail.includes('baileys_connect_timeout'))
+      ) {
+        return {
+          ok: false,
+          normalizedPhone: normalized,
+          reason: 'pairing_required',
+          detail: 'WhatsApp needs to be linked first using pairing code.',
+          provider: 'baileys',
+          pairingCode: this.lastPairingCode,
+          pairingPhone: this.pairingPhone || null,
+        };
+      }
       return {
         ok: false,
         normalizedPhone: normalized,
         reason: 'provider_unavailable',
-        detail:
-          error instanceof Error ? error.message : 'Baileys verification failed.',
+        detail,
         provider: 'baileys',
       };
     }
+  }
+
+  getStatus() {
+    const pairingAgeSeconds =
+      this.pairingRequestedAt == null
+        ? null
+        : Math.max(0, Math.floor((Date.now() - this.pairingRequestedAt) / 1000));
+
+    return {
+      provider: 'baileys' as const,
+      pairingEnabled: this.pairingEnabled,
+      pairingPhone: this.pairingPhone || null,
+      pairingCode: this.lastPairingCode,
+      pairingAgeSeconds,
+      lastProviderError: this.lastProviderError,
+    };
   }
 }
 
@@ -285,6 +328,20 @@ class WhatsAppVerificationService {
 
   async verifyPhone(phone: string) {
     return this.impl.verify(phone);
+  }
+
+  getStatus() {
+    if ('getStatus' in this.impl && typeof this.impl.getStatus === 'function') {
+      return this.impl.getStatus();
+    }
+    return {
+      provider: 'mock' as const,
+      pairingEnabled: false,
+      pairingPhone: null,
+      pairingCode: null,
+      pairingAgeSeconds: null,
+      lastProviderError: null,
+    };
   }
 }
 

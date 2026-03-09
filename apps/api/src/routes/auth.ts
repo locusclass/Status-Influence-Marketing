@@ -31,6 +31,10 @@ const googleAuthSchema = z.object({
   avatar_url: z.string().url().max(1024).optional(),
 });
 
+const googleWhatsappStatusSchema = z.object({
+  phone: z.string().min(7).max(20).optional(),
+});
+
 async function ensureUserProfilesTable(client: any) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -178,6 +182,15 @@ export async function authRoutes(app: FastifyInstance) {
         reply.code(400);
         return { error: 'invalid_phone_number' };
       }
+      if (verification.reason === 'pairing_required') {
+        reply.code(202);
+        return {
+          status: 'pending_whatsapp_link',
+          pairing_code: verification.pairingCode ?? null,
+          pairing_phone: verification.pairingPhone ?? null,
+          detail: verification.detail,
+        };
+      }
       if (verification.reason === 'provider_unavailable') {
         reply.code(503);
         return { error: 'whatsapp_verification_unavailable' };
@@ -279,6 +292,15 @@ export async function authRoutes(app: FastifyInstance) {
         reply.code(400);
         return { error: 'invalid_phone_number' };
       }
+      if (whatsapp.reason === 'pairing_required') {
+        reply.code(202);
+        return {
+          status: 'pending_whatsapp_link',
+          pairing_code: whatsapp.pairingCode ?? null,
+          pairing_phone: whatsapp.pairingPhone ?? null,
+          detail: whatsapp.detail,
+        };
+      }
       if (whatsapp.reason === 'provider_unavailable') {
         reply.code(503);
         return { error: 'whatsapp_verification_unavailable' };
@@ -327,6 +349,15 @@ export async function authRoutes(app: FastifyInstance) {
       if (verification.reason === 'invalid_phone') {
         reply.code(400);
         return { error: 'invalid_phone_number' };
+      }
+      if (verification.reason === 'pairing_required') {
+        reply.code(202);
+        return {
+          status: 'pending_whatsapp_link',
+          pairing_code: verification.pairingCode ?? null,
+          pairing_phone: verification.pairingPhone ?? null,
+          detail: verification.detail,
+        };
       }
       if (verification.reason === 'provider_unavailable') {
         reply.code(503);
@@ -417,6 +448,15 @@ export async function authRoutes(app: FastifyInstance) {
         reply.code(400);
         return { error: 'invalid_phone_number' };
       }
+      if (failure.reason === 'pairing_required') {
+        reply.code(202);
+        return {
+          status: 'pending_whatsapp_link',
+          pairing_code: failure.pairingCode ?? null,
+          pairing_phone: failure.pairingPhone ?? null,
+          detail: failure.detail,
+        };
+      }
       if (failure.reason === 'provider_unavailable') {
         reply.code(503);
         return { error: 'whatsapp_verification_unavailable' };
@@ -456,6 +496,68 @@ export async function authRoutes(app: FastifyInstance) {
         dialCode: countryData.dialCode,
         whatsapp_verified: true,
       },
+    };
+  });
+
+  app.get('/auth/google/whatsapp-status', async (request, reply) => {
+    const parsed = googleWhatsappStatusSchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+
+    const phone = parsed.data.phone?.trim();
+    const baseStatus = whatsappVerificationService.getStatus();
+    if (!phone) {
+      return {
+        status: 'pending_whatsapp_link',
+        ...baseStatus,
+      };
+    }
+
+    const verification = await whatsappVerificationService.verifyPhone(phone);
+    if (verification.ok) {
+      return {
+        status: 'verified',
+        normalized_phone: verification.normalizedPhone,
+        jid: verification.jid,
+        provider: verification.provider,
+      };
+    }
+
+    if (verification.reason === 'invalid_phone') {
+      reply.code(400);
+      return { error: 'invalid_phone_number' };
+    }
+
+    if (verification.reason === 'pairing_required') {
+      reply.code(202);
+      return {
+        status: 'pending_whatsapp_link',
+        pairing_code: verification.pairingCode ?? null,
+        pairing_phone: verification.pairingPhone ?? null,
+        detail: verification.detail,
+        ...baseStatus,
+      };
+    }
+
+    if (verification.reason === 'provider_unavailable') {
+      reply.code(503);
+      return {
+        status: 'provider_unavailable',
+        error: 'whatsapp_verification_unavailable',
+        detail: verification.detail,
+        ...baseStatus,
+      };
+    }
+
+    reply.code(404);
+    return {
+      status: 'not_registered',
+      error: 'whatsapp_number_not_registered',
+      detail: verification.detail,
+      normalized_phone: verification.normalizedPhone,
+      provider: verification.provider,
     };
   });
 }

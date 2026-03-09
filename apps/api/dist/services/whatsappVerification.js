@@ -69,6 +69,9 @@ class BaileysWhatsAppVerifier {
     connectTimeoutMs;
     pairingEnabled;
     pairingPhone;
+    lastPairingCode = null;
+    pairingRequestedAt = null;
+    lastProviderError = null;
     constructor() {
         this.authStateDir =
             process.env.WHATSAPP_BAILEYS_AUTH_DIR ?? '.baileys_auth_state';
@@ -79,8 +82,7 @@ class BaileysWhatsAppVerifier {
         this.pairingPhone = String(process.env.WHATSAPP_PAIRING_NUMBER ?? '')
             .replace(/\D/g, '')
             .trim();
-        this.connectTimeoutMs = Number(process.env.WHATSAPP_BAILEYS_CONNECT_TIMEOUT_MS ??
-            (this.pairingEnabled ? 120000 : 20000));
+        this.connectTimeoutMs = Number(process.env.WHATSAPP_BAILEYS_CONNECT_TIMEOUT_MS ?? 12000);
     }
     async getSocket() {
         if (!this.socketPromise) {
@@ -98,7 +100,8 @@ class BaileysWhatsAppVerifier {
             logger: pino({ level: 'silent' }),
         });
         sock.ev.on('creds.update', auth.saveCreds);
-        await this.maybeEmitPairingCode(sock, Boolean(auth.state.creds?.registered));
+        const alreadyRegistered = Boolean(auth.state.creds?.registered);
+        await this.maybeEmitPairingCode(sock, alreadyRegistered);
         await this.waitForSocketConnection(sock);
         return sock;
     }
@@ -115,12 +118,15 @@ class BaileysWhatsAppVerifier {
                 // Baileys pairing code often fails if requested immediately on socket creation.
                 await wait(2000 * attempt);
                 const code = await sock.requestPairingCode(this.pairingPhone);
+                this.lastPairingCode = code;
+                this.pairingRequestedAt = Date.now();
                 console.info(`[whatsapp] Pairing code generated for ${this.pairingPhone}: ${code}`);
                 console.info('[whatsapp] Open WhatsApp > Linked devices > Link with phone number and enter this code.');
                 return;
             }
             catch (error) {
                 const detail = error instanceof Error ? error.message : 'unknown_pairing_error';
+                this.lastProviderError = detail;
                 if (attempt === 4) {
                     console.error(`[whatsapp] Failed to generate pairing code: ${detail}`);
                     return;
@@ -180,14 +186,43 @@ class BaileysWhatsAppVerifier {
         }
         catch (error) {
             this.socketPromise = null;
+            const detail = error instanceof Error ? error.message : 'Baileys verification failed.';
+            if (this.pairingEnabled &&
+                (detail.includes('timeout') ||
+                    detail.includes('closed') ||
+                    detail.includes('Connection Closed') ||
+                    detail.includes('baileys_connect_timeout'))) {
+                return {
+                    ok: false,
+                    normalizedPhone: normalized,
+                    reason: 'pairing_required',
+                    detail: 'WhatsApp needs to be linked first using pairing code.',
+                    provider: 'baileys',
+                    pairingCode: this.lastPairingCode,
+                    pairingPhone: this.pairingPhone || null,
+                };
+            }
             return {
                 ok: false,
                 normalizedPhone: normalized,
                 reason: 'provider_unavailable',
-                detail: error instanceof Error ? error.message : 'Baileys verification failed.',
+                detail,
                 provider: 'baileys',
             };
         }
+    }
+    getStatus() {
+        const pairingAgeSeconds = this.pairingRequestedAt == null
+            ? null
+            : Math.max(0, Math.floor((Date.now() - this.pairingRequestedAt) / 1000));
+        return {
+            provider: 'baileys',
+            pairingEnabled: this.pairingEnabled,
+            pairingPhone: this.pairingPhone || null,
+            pairingCode: this.lastPairingCode,
+            pairingAgeSeconds,
+            lastProviderError: this.lastProviderError,
+        };
     }
 }
 function resolveMode() {
@@ -206,6 +241,19 @@ class WhatsAppVerificationService {
         : new MockWhatsAppVerifier();
     async verifyPhone(phone) {
         return this.impl.verify(phone);
+    }
+    getStatus() {
+        if ('getStatus' in this.impl && typeof this.impl.getStatus === 'function') {
+            return this.impl.getStatus();
+        }
+        return {
+            provider: 'mock',
+            pairingEnabled: false,
+            pairingPhone: null,
+            pairingCode: null,
+            pairingAgeSeconds: null,
+            lastProviderError: null,
+        };
     }
 }
 export const whatsappVerificationService = new WhatsAppVerificationService();
