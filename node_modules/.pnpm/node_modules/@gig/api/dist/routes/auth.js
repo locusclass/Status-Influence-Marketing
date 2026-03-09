@@ -199,18 +199,28 @@ export async function authRoutes(app) {
             .slice(0, 1024);
         const user = await withTransaction(async (client) => {
             const existing = await userRepo.findByEmail(client, email);
+            const typedPhone = body.phone.trim();
             if (existing) {
+                if (typedPhone && typedPhone !== String(existing.phone ?? '').trim()) {
+                    const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [typedPhone]);
+                    const ownerId = String(phoneOwner.rows[0]?.id ?? '');
+                    if (ownerId && ownerId !== String(existing.id)) {
+                        reply.code(400);
+                        return { error: 'phone_taken' };
+                    }
+                    await client.query(`UPDATE users SET phone=$2 WHERE id=$1`, [existing.id, typedPhone]);
+                }
                 await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
                 const refreshed = await userRepo.findByEmail(client, email);
                 return refreshed ?? existing;
             }
-            const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [body.phone]);
+            const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [typedPhone]);
             if (phoneOwner.rows[0]) {
                 reply.code(400);
                 return { error: 'phone_taken' };
             }
             const syntheticPassword = buildSyntheticPassword(sub, email);
-            const created = await userRepo.createUser(client, fullName, email, body.phone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
+            const created = await userRepo.createUser(client, fullName, email, typedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             await upsertGoogleProfile(client, created.id, fullName, photoUrl);
             return created;

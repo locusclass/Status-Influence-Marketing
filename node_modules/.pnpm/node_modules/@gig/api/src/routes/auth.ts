@@ -255,7 +255,25 @@ export async function authRoutes(app: FastifyInstance) {
 
     const user = await withTransaction(async (client) => {
       const existing = await userRepo.findByEmail(client, email);
+      const typedPhone = body.phone.trim();
       if (existing) {
+        if (typedPhone && typedPhone !== String(existing.phone ?? '').trim()) {
+          const phoneOwner = await client.query(
+            `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
+            [typedPhone]
+          );
+          const ownerId = String(phoneOwner.rows[0]?.id ?? '');
+          if (ownerId && ownerId !== String(existing.id)) {
+            reply.code(400);
+            return { error: 'phone_taken' } as any;
+          }
+
+          await client.query(
+            `UPDATE users SET phone=$2 WHERE id=$1`,
+            [existing.id, typedPhone]
+          );
+        }
+
         await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
         const refreshed = await userRepo.findByEmail(client, email);
         return refreshed ?? existing;
@@ -263,7 +281,7 @@ export async function authRoutes(app: FastifyInstance) {
 
       const phoneOwner = await client.query(
         `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
-        [body.phone]
+        [typedPhone]
       );
       if (phoneOwner.rows[0]) {
         reply.code(400);
@@ -275,7 +293,7 @@ export async function authRoutes(app: FastifyInstance) {
         client,
         fullName,
         email,
-        body.phone,
+        typedPhone,
         hashPassword(syntheticPassword),
         body.role,
         countryData.iso2,

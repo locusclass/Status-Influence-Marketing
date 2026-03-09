@@ -44,6 +44,16 @@ export async function campaignRoutes(app: FastifyInstance) {
         params.push(query.status);
         idx++;
       }
+
+      conditions.push(
+        `EXISTS (
+           SELECT 1
+           FROM escrow_ledger e
+           WHERE e.campaign_id = campaigns.id
+             AND e.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+         )`
+      );
+
       if (role !== 'ADMIN') {
         conditions.push(`(advertiser_id = $${idx} OR status = 'ACTIVE')`);
         params.push(authUser ?? '');
