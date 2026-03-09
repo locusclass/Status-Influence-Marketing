@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { resolveCountry } from '../countryResolver.js';
 const registerSchema = z.object({
     full_name: z.string().min(2).max(120),
@@ -25,9 +24,6 @@ const googleAuthSchema = z.object({
     country: z.string().min(2),
     full_name: z.string().min(2).max(120).optional(),
     avatar_url: z.string().url().max(1024).optional(),
-});
-const googleWhatsappStatusSchema = z.object({
-    phone: z.string().min(7).max(20).optional(),
 });
 async function ensureUserProfilesTable(client) {
     await client.query(`
@@ -75,46 +71,6 @@ function buildSyntheticPassword(sub, email) {
         .digest('hex');
     return `Gp!${seed.substring(0, 18)}a9`;
 }
-async function ensureWhatsappColumns(client) {
-    await client.query(`
-    ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS whatsapp_verified BOOLEAN NOT NULL DEFAULT FALSE;
-  `);
-    await client.query(`
-    ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS whatsapp_verified_at TIMESTAMPTZ;
-  `);
-    await client.query(`
-    ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS whatsapp_jid TEXT;
-  `);
-}
-async function verifyAndPersistWhatsapp(client, userId, phone) {
-    const verification = await whatsappVerificationService.verifyPhone(phone);
-    if (!verification.ok)
-        return verification;
-    const owner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [verification.normalizedPhone]);
-    const ownerId = String(owner.rows[0]?.id ?? '');
-    if (ownerId && ownerId !== userId) {
-        return {
-            ok: false,
-            normalizedPhone: verification.normalizedPhone,
-            reason: 'not_on_whatsapp',
-            detail: 'Phone number is already linked to another account.',
-            provider: verification.provider,
-        };
-    }
-    await client.query(`
-    UPDATE users
-    SET
-      phone = $2,
-      whatsapp_verified = TRUE,
-      whatsapp_verified_at = NOW(),
-      whatsapp_jid = $3
-    WHERE id = $1
-    `, [userId, verification.normalizedPhone, verification.jid]);
-    return verification;
-}
 export async function authRoutes(app) {
     const userRepo = new UserRepo();
     const googleClient = new OAuth2Client();
@@ -137,49 +93,18 @@ export async function authRoutes(app) {
         }
         const body = parsed.data;
         const countryData = resolveCountry(body.country);
-        const verification = await whatsappVerificationService.verifyPhone(body.phone);
-        if (!verification.ok) {
-            if (verification.reason === 'invalid_phone') {
-                reply.code(400);
-                return { error: 'invalid_phone_number' };
-            }
-            if (verification.reason === 'pairing_required') {
-                reply.code(202);
-                return {
-                    status: 'pending_whatsapp_link',
-                    pairing_code: verification.pairingCode ?? null,
-                    pairing_phone: verification.pairingPhone ?? null,
-                    detail: verification.detail,
-                };
-            }
-            if (verification.reason === 'provider_unavailable') {
-                reply.code(503);
-                return { error: 'whatsapp_verification_unavailable' };
-            }
-            reply.code(403);
-            return { error: 'whatsapp_number_not_registered' };
-        }
         const user = await withTransaction(async (client) => {
-            await ensureWhatsappColumns(client);
             const existing = await userRepo.findByEmail(client, body.email);
             if (existing) {
                 reply.code(400);
                 return { error: 'email_taken' };
             }
-            const existingByPhone = await client.query('SELECT id FROM users WHERE phone=$1 LIMIT 1', [verification.normalizedPhone]);
+            const existingByPhone = await client.query('SELECT id FROM users WHERE phone=$1 LIMIT 1', [body.phone]);
             if (existingByPhone.rows[0]) {
                 reply.code(400);
                 return { error: 'phone_taken' };
             }
-            const created = await userRepo.createUser(client, body.full_name, body.email, verification.normalizedPhone, hashPassword(body.password), body.role, countryData.iso2, countryData.currency);
-            await client.query(`
-        UPDATE users
-        SET
-          whatsapp_verified = TRUE,
-          whatsapp_verified_at = NOW(),
-          whatsapp_jid = $2
-        WHERE id = $1
-        `, [created.id, verification.jid]);
+            const created = await userRepo.createUser(client, body.full_name, body.email, body.phone, hashPassword(body.password), body.role, countryData.iso2, countryData.currency);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             return created;
         });
@@ -201,7 +126,7 @@ export async function authRoutes(app) {
                 currency: user.currency ?? user.preferred_currency ?? 'UGX',
                 can_multi_contract: user.can_multi_contract ?? false,
                 dialCode: countryData.dialCode,
-                whatsapp_verified: true,
+                whatsapp_verified: false,
             },
         };
     });
@@ -217,31 +142,6 @@ export async function authRoutes(app) {
             reply.code(401);
             return { error: 'invalid_credentials' };
         }
-        const whatsapp = await withTransaction(async (client) => {
-            await ensureWhatsappColumns(client);
-            return verifyAndPersistWhatsapp(client, user.id, user.phone);
-        });
-        if (!whatsapp.ok) {
-            if (whatsapp.reason === 'invalid_phone') {
-                reply.code(400);
-                return { error: 'invalid_phone_number' };
-            }
-            if (whatsapp.reason === 'pairing_required') {
-                reply.code(202);
-                return {
-                    status: 'pending_whatsapp_link',
-                    pairing_code: whatsapp.pairingCode ?? null,
-                    pairing_phone: whatsapp.pairingPhone ?? null,
-                    detail: whatsapp.detail,
-                };
-            }
-            if (whatsapp.reason === 'provider_unavailable') {
-                reply.code(503);
-                return { error: 'whatsapp_verification_unavailable' };
-            }
-            reply.code(403);
-            return { error: 'whatsapp_number_not_registered' };
-        }
         const token = app.jwt.sign({
             sub: user.id,
             role: user.role,
@@ -253,11 +153,11 @@ export async function authRoutes(app) {
                 full_name: user.full_name ?? '',
                 email: user.email,
                 role: user.role,
-                phone: whatsapp.normalizedPhone,
+                phone: user.phone,
                 country: user.country,
                 currency: user.currency ?? user.preferred_currency ?? 'UGX',
                 can_multi_contract: user.can_multi_contract ?? false,
-                whatsapp_verified: true,
+                whatsapp_verified: user.whatsapp_verified ?? false,
             },
         };
     });
@@ -273,28 +173,6 @@ export async function authRoutes(app) {
         }
         const body = parsed.data;
         const countryData = resolveCountry(body.country);
-        const verification = await whatsappVerificationService.verifyPhone(body.phone);
-        if (!verification.ok) {
-            if (verification.reason === 'invalid_phone') {
-                reply.code(400);
-                return { error: 'invalid_phone_number' };
-            }
-            if (verification.reason === 'pairing_required') {
-                reply.code(202);
-                return {
-                    status: 'pending_whatsapp_link',
-                    pairing_code: verification.pairingCode ?? null,
-                    pairing_phone: verification.pairingPhone ?? null,
-                    detail: verification.detail,
-                };
-            }
-            if (verification.reason === 'provider_unavailable') {
-                reply.code(503);
-                return { error: 'whatsapp_verification_unavailable' };
-            }
-            reply.code(403);
-            return { error: 'whatsapp_number_not_registered' };
-        }
         let payload;
         try {
             const ticket = await googleClient.verifyIdToken({
@@ -320,52 +198,23 @@ export async function authRoutes(app) {
             .trim()
             .slice(0, 1024);
         const user = await withTransaction(async (client) => {
-            await ensureWhatsappColumns(client);
             const existing = await userRepo.findByEmail(client, email);
             if (existing) {
-                const verified = await verifyAndPersistWhatsapp(client, existing.id, verification.normalizedPhone);
-                if (!verified.ok)
-                    return verified;
                 await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
                 const refreshed = await userRepo.findByEmail(client, email);
                 return refreshed ?? existing;
             }
-            const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [verification.normalizedPhone]);
+            const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [body.phone]);
             if (phoneOwner.rows[0]) {
                 reply.code(400);
                 return { error: 'phone_taken' };
             }
             const syntheticPassword = buildSyntheticPassword(sub, email);
-            const created = await userRepo.createUser(client, fullName, email, verification.normalizedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
-            const verified = await verifyAndPersistWhatsapp(client, created.id, verification.normalizedPhone);
-            if (!verified.ok)
-                return verified;
+            const created = await userRepo.createUser(client, fullName, email, body.phone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             await upsertGoogleProfile(client, created.id, fullName, photoUrl);
             return created;
         });
-        if (user?.ok === false) {
-            const failure = user;
-            if (failure.reason === 'invalid_phone') {
-                reply.code(400);
-                return { error: 'invalid_phone_number' };
-            }
-            if (failure.reason === 'pairing_required') {
-                reply.code(202);
-                return {
-                    status: 'pending_whatsapp_link',
-                    pairing_code: failure.pairingCode ?? null,
-                    pairing_phone: failure.pairingPhone ?? null,
-                    detail: failure.detail,
-                };
-            }
-            if (failure.reason === 'provider_unavailable') {
-                reply.code(503);
-                return { error: 'whatsapp_verification_unavailable' };
-            }
-            reply.code(403);
-            return { error: 'whatsapp_number_not_registered' };
-        }
         if (user?.error) {
             return user;
         }
@@ -389,63 +238,8 @@ export async function authRoutes(app) {
                 can_multi_contract: (refreshedUser ?? user).can_multi_contract ?? false,
                 avatar_url: photoUrl || null,
                 dialCode: countryData.dialCode,
-                whatsapp_verified: true,
+                whatsapp_verified: (refreshedUser ?? user).whatsapp_verified ?? false,
             },
-        };
-    });
-    app.get('/auth/google/whatsapp-status', async (request, reply) => {
-        const parsed = googleWhatsappStatusSchema.safeParse(request.query ?? {});
-        if (!parsed.success) {
-            reply.code(400);
-            return { error: 'validation_failed', issues: parsed.error.issues };
-        }
-        const phone = parsed.data.phone?.trim();
-        const baseStatus = whatsappVerificationService.getStatus();
-        if (!phone) {
-            return {
-                status: 'pending_whatsapp_link',
-                ...baseStatus,
-            };
-        }
-        const verification = await whatsappVerificationService.verifyPhone(phone);
-        if (verification.ok) {
-            return {
-                status: 'verified',
-                normalized_phone: verification.normalizedPhone,
-                jid: verification.jid,
-                provider: verification.provider,
-            };
-        }
-        if (verification.reason === 'invalid_phone') {
-            reply.code(400);
-            return { error: 'invalid_phone_number' };
-        }
-        if (verification.reason === 'pairing_required') {
-            reply.code(202);
-            return {
-                status: 'pending_whatsapp_link',
-                pairing_code: verification.pairingCode ?? null,
-                pairing_phone: verification.pairingPhone ?? null,
-                detail: verification.detail,
-                ...baseStatus,
-            };
-        }
-        if (verification.reason === 'provider_unavailable') {
-            reply.code(503);
-            return {
-                status: 'provider_unavailable',
-                error: 'whatsapp_verification_unavailable',
-                detail: verification.detail,
-                ...baseStatus,
-            };
-        }
-        reply.code(404);
-        return {
-            status: 'not_registered',
-            error: 'whatsapp_number_not_registered',
-            detail: verification.detail,
-            normalized_phone: verification.normalizedPhone,
-            provider: verification.provider,
         };
     });
 }

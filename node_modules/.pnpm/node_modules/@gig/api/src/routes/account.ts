@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
+import { whatsappVerificationService } from '../services/whatsappVerification.js';
 
 const accountProfileSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -19,6 +20,10 @@ const accountAvatarSchema = z.object({
 
 const accountRoleSchema = z.object({
   role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+});
+
+const accountWhatsappVerifySchema = z.object({
+  phone: z.string().trim().min(7).max(20).optional(),
 });
 
 async function ensureUserProfilesTable(client: any) {
@@ -51,6 +56,14 @@ async function ensureWhatsappColumns(client: any) {
   await client.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS whatsapp_verified BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS whatsapp_verified_at TIMESTAMPTZ;
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS whatsapp_jid TEXT;
   `);
 }
 
@@ -160,6 +173,103 @@ export async function accountRoutes(app: FastifyInstance) {
           [userId, body.avatar_url]
         );
         return { ok: true };
+      });
+    }
+  );
+
+  app.patch(
+    '/account/whatsapp/verify',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const parsed = accountWhatsappVerifySchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+
+      return withTransaction(async (client) => {
+        await ensureWhatsappColumns(client);
+        const userRes = await client.query(
+          `SELECT id, phone FROM users WHERE id=$1 LIMIT 1`,
+          [userId]
+        );
+        const user = userRes.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+
+        const incomingPhone = parsed.data.phone?.trim() ?? '';
+        const candidatePhone =
+          incomingPhone.length > 0 ? incomingPhone : String(user.phone ?? '').trim();
+
+        if (candidatePhone.length === 0) {
+          reply.code(400);
+          return { error: 'invalid_phone_number' };
+        }
+
+        const verification =
+          await whatsappVerificationService.verifyPhone(candidatePhone);
+
+        if (!verification.ok) {
+          if (verification.reason === 'invalid_phone') {
+            reply.code(400);
+            return { error: 'invalid_phone_number' };
+          }
+          if (verification.reason === 'pairing_required') {
+            reply.code(202);
+            return {
+              status: 'pending_whatsapp_link',
+              pairing_code: verification.pairingCode ?? null,
+              pairing_phone: verification.pairingPhone ?? null,
+              detail: verification.detail,
+            };
+          }
+          if (verification.reason === 'provider_unavailable') {
+            reply.code(503);
+            return {
+              error: 'whatsapp_verification_unavailable',
+              detail: verification.detail,
+            };
+          }
+
+          reply.code(404);
+          return {
+            error: 'whatsapp_number_not_registered',
+            detail: verification.detail,
+          };
+        }
+
+        const owner = await client.query(
+          `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
+          [verification.normalizedPhone]
+        );
+        const ownerId = String(owner.rows[0]?.id ?? '');
+        if (ownerId && ownerId != userId) {
+          reply.code(400);
+          return { error: 'phone_taken' };
+        }
+
+        await client.query(
+          `
+          UPDATE users
+          SET
+            phone = $2,
+            whatsapp_verified = TRUE,
+            whatsapp_verified_at = NOW(),
+            whatsapp_jid = $3
+          WHERE id = $1
+          `,
+          [userId, verification.normalizedPhone, verification.jid]
+        );
+
+        return {
+          ok: true,
+          whatsapp_verified: true,
+          phone: verification.normalizedPhone,
+          jid: verification.jid,
+        };
       });
     }
   );
