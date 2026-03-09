@@ -31,6 +31,7 @@ type SockLike = {
     off: (event: string, handler: (update: any) => void) => void;
   };
   onWhatsApp: (...jids: string[]) => Promise<VerifyPayload[]>;
+  requestPairingCode?: (phoneNumber: string) => Promise<string>;
 };
 
 const E164_MIN = 8;
@@ -106,12 +107,22 @@ class BaileysWhatsAppVerifier {
   private socketPromise: Promise<SockLike> | null = null;
   private readonly authStateDir: string;
   private readonly connectTimeoutMs: number;
+  private readonly pairingEnabled: boolean;
+  private readonly pairingPhone: string;
 
   constructor() {
     this.authStateDir =
       process.env.WHATSAPP_BAILEYS_AUTH_DIR ?? '.baileys_auth_state';
+    this.pairingEnabled =
+      String(process.env.WHATSAPP_ENABLE_PAIRING ?? '')
+        .trim()
+        .toLowerCase() === 'true';
+    this.pairingPhone = String(process.env.WHATSAPP_PAIRING_NUMBER ?? '')
+      .replace(/\D/g, '')
+      .trim();
     this.connectTimeoutMs = Number(
-      process.env.WHATSAPP_BAILEYS_CONNECT_TIMEOUT_MS ?? 20000
+      process.env.WHATSAPP_BAILEYS_CONNECT_TIMEOUT_MS ??
+        (this.pairingEnabled ? 120000 : 20000)
     );
   }
 
@@ -127,13 +138,38 @@ class BaileysWhatsAppVerifier {
     const auth = await baileys.useMultiFileAuthState(this.authStateDir);
     const sock = baileys.makeWASocket({
       auth: auth.state,
-      printQRInTerminal: true,
+      printQRInTerminal: !this.pairingEnabled,
       logger: pino({ level: 'silent' }),
     }) as SockLike;
 
     sock.ev.on('creds.update', auth.saveCreds);
+    await this.maybeEmitPairingCode(sock, Boolean(auth.state.creds?.registered));
     await this.waitForSocketConnection(sock);
     return sock;
+  }
+
+  private async maybeEmitPairingCode(sock: SockLike, alreadyRegistered: boolean) {
+    if (!this.pairingEnabled || alreadyRegistered) return;
+    if (!this.pairingPhone || typeof sock.requestPairingCode !== 'function') {
+      console.warn(
+        '[whatsapp] Pairing is enabled but WHATSAPP_PAIRING_NUMBER or requestPairingCode is missing.'
+      );
+      return;
+    }
+
+    try {
+      const code = await sock.requestPairingCode(this.pairingPhone);
+      console.info(
+        `[whatsapp] Pairing code generated for ${this.pairingPhone}: ${code}`
+      );
+      console.info(
+        '[whatsapp] Open WhatsApp > Linked devices > Link with phone number and enter this code.'
+      );
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : 'unknown_pairing_error';
+      console.error(`[whatsapp] Failed to generate pairing code: ${detail}`);
+    }
   }
 
   private async waitForSocketConnection(sock: SockLike) {
