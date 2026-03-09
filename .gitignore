@@ -1,0 +1,4 @@
+node_modules/
+.pnpm-store/
+apps/*/node_modules/
+**/.vite/

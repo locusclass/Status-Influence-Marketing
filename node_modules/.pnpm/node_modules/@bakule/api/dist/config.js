@@ -21,5 +21,10 @@ export const config = {
         payoutWebhookSecret: process.env.PESAPAL_PAYOUT_WEBHOOK_SECRET ?? '',
         ipnWebhookSecret: process.env.PESAPAL_IPN_WEBHOOK_SECRET ?? ''
     },
-    adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? ''
+    adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? '',
+    whatsappVerification: {
+        mode: process.env.WHATSAPP_VERIFICATION_MODE ?? (process.env.NODE_ENV === 'test' ? 'mock' : 'baileys'),
+        baileysAuthDir: process.env.WHATSAPP_BAILEYS_AUTH_DIR ?? '.baileys_auth_state',
+        mockAllowedPrefixes: process.env.WHATSAPP_MOCK_ALLOWED_PREFIXES ?? '+',
+    }
 };

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
+import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { resolveCountry } from '../countryResolver.js';
 const registerSchema = z.object({
     full_name: z.string().min(2).max(120),
@@ -20,6 +21,7 @@ const loginSchema = z.object({
 const googleAuthSchema = z.object({
     id_token: z.string().min(20),
     role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+    phone: z.string().min(7).max(20),
     country: z.string().min(2),
     full_name: z.string().min(2).max(120).optional(),
     avatar_url: z.string().url().max(1024).optional(),
@@ -63,21 +65,52 @@ async function upsertGoogleProfile(client, userId, fullName, photoUrl) {
         ]);
     }
 }
-function buildSyntheticPhone(sub) {
-    const hash = crypto.createHash('sha256').update(sub).digest('hex');
-    const digits = hash
-        .split('')
-        .map((ch) => (ch.charCodeAt(0) % 10).toString())
-        .join('')
-        .slice(0, 9);
-    return `+999${digits}`;
-}
 function buildSyntheticPassword(sub, email) {
     const seed = crypto
         .createHash('sha256')
         .update(`prime_status_google::${sub}::${email}`)
         .digest('hex');
     return `Gp!${seed.substring(0, 18)}a9`;
+}
+async function ensureWhatsappColumns(client) {
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS whatsapp_verified BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS whatsapp_verified_at TIMESTAMPTZ;
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS whatsapp_jid TEXT;
+  `);
+}
+async function verifyAndPersistWhatsapp(client, userId, phone) {
+    const verification = await whatsappVerificationService.verifyPhone(phone);
+    if (!verification.ok)
+        return verification;
+    const owner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [verification.normalizedPhone]);
+    const ownerId = String(owner.rows[0]?.id ?? '');
+    if (ownerId && ownerId !== userId) {
+        return {
+            ok: false,
+            normalizedPhone: verification.normalizedPhone,
+            reason: 'not_on_whatsapp',
+            detail: 'Phone number is already linked to another account.',
+            provider: verification.provider,
+        };
+    }
+    await client.query(`
+    UPDATE users
+    SET
+      phone = $2,
+      whatsapp_verified = TRUE,
+      whatsapp_verified_at = NOW(),
+      whatsapp_jid = $3
+    WHERE id = $1
+    `, [userId, verification.normalizedPhone, verification.jid]);
+    return verification;
 }
 export async function authRoutes(app) {
     const userRepo = new UserRepo();
@@ -101,13 +134,40 @@ export async function authRoutes(app) {
         }
         const body = parsed.data;
         const countryData = resolveCountry(body.country);
+        const verification = await whatsappVerificationService.verifyPhone(body.phone);
+        if (!verification.ok) {
+            if (verification.reason === 'invalid_phone') {
+                reply.code(400);
+                return { error: 'invalid_phone_number' };
+            }
+            if (verification.reason === 'provider_unavailable') {
+                reply.code(503);
+                return { error: 'whatsapp_verification_unavailable' };
+            }
+            reply.code(403);
+            return { error: 'whatsapp_number_not_registered' };
+        }
         const user = await withTransaction(async (client) => {
+            await ensureWhatsappColumns(client);
             const existing = await userRepo.findByEmail(client, body.email);
             if (existing) {
                 reply.code(400);
                 return { error: 'email_taken' };
             }
-            const created = await userRepo.createUser(client, body.full_name, body.email, body.phone, hashPassword(body.password), body.role, countryData.iso2, countryData.currency);
+            const existingByPhone = await client.query('SELECT id FROM users WHERE phone=$1 LIMIT 1', [verification.normalizedPhone]);
+            if (existingByPhone.rows[0]) {
+                reply.code(400);
+                return { error: 'phone_taken' };
+            }
+            const created = await userRepo.createUser(client, body.full_name, body.email, verification.normalizedPhone, hashPassword(body.password), body.role, countryData.iso2, countryData.currency);
+            await client.query(`
+        UPDATE users
+        SET
+          whatsapp_verified = TRUE,
+          whatsapp_verified_at = NOW(),
+          whatsapp_jid = $2
+        WHERE id = $1
+        `, [created.id, verification.jid]);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             return created;
         });
@@ -129,6 +189,7 @@ export async function authRoutes(app) {
                 currency: user.currency ?? user.preferred_currency ?? 'UGX',
                 can_multi_contract: user.can_multi_contract ?? false,
                 dialCode: countryData.dialCode,
+                whatsapp_verified: true,
             },
         };
     });
@@ -144,6 +205,22 @@ export async function authRoutes(app) {
             reply.code(401);
             return { error: 'invalid_credentials' };
         }
+        const whatsapp = await withTransaction(async (client) => {
+            await ensureWhatsappColumns(client);
+            return verifyAndPersistWhatsapp(client, user.id, user.phone);
+        });
+        if (!whatsapp.ok) {
+            if (whatsapp.reason === 'invalid_phone') {
+                reply.code(400);
+                return { error: 'invalid_phone_number' };
+            }
+            if (whatsapp.reason === 'provider_unavailable') {
+                reply.code(503);
+                return { error: 'whatsapp_verification_unavailable' };
+            }
+            reply.code(403);
+            return { error: 'whatsapp_number_not_registered' };
+        }
         const token = app.jwt.sign({
             sub: user.id,
             role: user.role,
@@ -155,10 +232,11 @@ export async function authRoutes(app) {
                 full_name: user.full_name ?? '',
                 email: user.email,
                 role: user.role,
-                phone: user.phone,
+                phone: whatsapp.normalizedPhone,
                 country: user.country,
                 currency: user.currency ?? user.preferred_currency ?? 'UGX',
                 can_multi_contract: user.can_multi_contract ?? false,
+                whatsapp_verified: true,
             },
         };
     });
@@ -174,6 +252,19 @@ export async function authRoutes(app) {
         }
         const body = parsed.data;
         const countryData = resolveCountry(body.country);
+        const verification = await whatsappVerificationService.verifyPhone(body.phone);
+        if (!verification.ok) {
+            if (verification.reason === 'invalid_phone') {
+                reply.code(400);
+                return { error: 'invalid_phone_number' };
+            }
+            if (verification.reason === 'provider_unavailable') {
+                reply.code(503);
+                return { error: 'whatsapp_verification_unavailable' };
+            }
+            reply.code(403);
+            return { error: 'whatsapp_number_not_registered' };
+        }
         let payload;
         try {
             const ticket = await googleClient.verifyIdToken({
@@ -199,35 +290,67 @@ export async function authRoutes(app) {
             .trim()
             .slice(0, 1024);
         const user = await withTransaction(async (client) => {
+            await ensureWhatsappColumns(client);
             const existing = await userRepo.findByEmail(client, email);
             if (existing) {
+                const verified = await verifyAndPersistWhatsapp(client, existing.id, verification.normalizedPhone);
+                if (!verified.ok)
+                    return verified;
                 await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
-                return existing;
+                const refreshed = await userRepo.findByEmail(client, email);
+                return refreshed ?? existing;
             }
-            const syntheticPhone = buildSyntheticPhone(sub);
+            const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [verification.normalizedPhone]);
+            if (phoneOwner.rows[0]) {
+                reply.code(400);
+                return { error: 'phone_taken' };
+            }
             const syntheticPassword = buildSyntheticPassword(sub, email);
-            const created = await userRepo.createUser(client, fullName, email, syntheticPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
+            const created = await userRepo.createUser(client, fullName, email, verification.normalizedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
+            const verified = await verifyAndPersistWhatsapp(client, created.id, verification.normalizedPhone);
+            if (!verified.ok)
+                return verified;
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             await upsertGoogleProfile(client, created.id, fullName, photoUrl);
             return created;
         });
+        if (user?.ok === false) {
+            const failure = user;
+            if (failure.reason === 'invalid_phone') {
+                reply.code(400);
+                return { error: 'invalid_phone_number' };
+            }
+            if (failure.reason === 'provider_unavailable') {
+                reply.code(503);
+                return { error: 'whatsapp_verification_unavailable' };
+            }
+            reply.code(403);
+            return { error: 'whatsapp_number_not_registered' };
+        }
+        if (user?.error) {
+            return user;
+        }
+        const refreshedUser = await withTransaction(async (client) => userRepo.findByEmail(client, email));
         const token = app.jwt.sign({
-            sub: user.id,
-            role: user.role,
+            sub: (refreshedUser ?? user).id,
+            role: (refreshedUser ?? user).role,
         });
         return {
             token,
             user: {
-                id: user.id,
-                full_name: user.full_name ?? fullName,
-                email: user.email,
-                role: user.role,
-                phone: user.phone,
-                country: user.country,
-                currency: user.currency ?? user.preferred_currency ?? 'UGX',
-                can_multi_contract: user.can_multi_contract ?? false,
+                id: (refreshedUser ?? user).id,
+                full_name: (refreshedUser ?? user).full_name ?? fullName,
+                email: (refreshedUser ?? user).email,
+                role: (refreshedUser ?? user).role,
+                phone: (refreshedUser ?? user).phone,
+                country: (refreshedUser ?? user).country,
+                currency: (refreshedUser ?? user).currency ??
+                    (refreshedUser ?? user).preferred_currency ??
+                    'UGX',
+                can_multi_contract: (refreshedUser ?? user).can_multi_contract ?? false,
                 avatar_url: photoUrl || null,
                 dialCode: countryData.dialCode,
+                whatsapp_verified: true,
             },
         };
     });

@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS users (
   full_name TEXT NOT NULL DEFAULT '',
   email TEXT UNIQUE NOT NULL,
   phone TEXT UNIQUE NOT NULL,
+  whatsapp_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  whatsapp_verified_at TIMESTAMPTZ,
+  whatsapp_jid TEXT,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
@@ -79,6 +82,30 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE users
       ADD COLUMN can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'whatsapp_verified'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN whatsapp_verified BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'whatsapp_verified_at'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN whatsapp_verified_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'whatsapp_jid'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN whatsapp_jid TEXT;
   END IF;
 END $$;
 

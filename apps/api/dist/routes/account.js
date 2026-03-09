@@ -36,6 +36,12 @@ async function usersHasColumn(client, columnName) {
     `, [columnName]);
     return Boolean(res.rowCount);
 }
+async function ensureWhatsappColumns(client) {
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS whatsapp_verified BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+}
 export async function accountRoutes(app) {
     const parsePaging = (query) => {
         const limitRaw = Number(query?.limit ?? 50);
@@ -49,6 +55,7 @@ export async function accountRoutes(app) {
     app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
         return withTransaction(async (client) => {
+            await ensureWhatsappColumns(client);
             await ensureUserProfilesTable(client);
             const hasFullName = await usersHasColumn(client, 'full_name');
             const fullNameSelect = hasFullName
@@ -60,6 +67,7 @@ export async function accountRoutes(app) {
           u.email,
           u.role,
           u.phone,
+          COALESCE(u.whatsapp_verified, FALSE) AS whatsapp_verified,
           u.country,
           u.preferred_currency AS currency,
           ${fullNameSelect} AS full_name,
@@ -152,6 +160,7 @@ export async function accountRoutes(app) {
         }
         const body = parsed.data;
         return withTransaction(async (client) => {
+            await ensureWhatsappColumns(client);
             await client.query('UPDATE users SET role=$2 WHERE id=$1', [
                 userId,
                 body.role,
@@ -190,6 +199,7 @@ export async function accountRoutes(app) {
                     email: user.email,
                     role: user.role,
                     phone: user.phone,
+                    whatsapp_verified: user.whatsapp_verified ?? false,
                     country: user.country,
                     currency: user.currency ?? 'UGX',
                     can_multi_contract: user.can_multi_contract ?? false,
