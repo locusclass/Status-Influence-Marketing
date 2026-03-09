@@ -65,10 +65,13 @@ class MockWhatsAppVerifier {
 }
 class BaileysWhatsAppVerifier {
     socketPromise = null;
+    pairingBootstrapPromise = null;
     authStateDir;
     connectTimeoutMs;
     pairingEnabled;
     pairingPhone;
+    socketOpen = false;
+    credsRegistered = false;
     lastPairingCode = null;
     pairingRequestedAt = null;
     lastProviderError = null;
@@ -94,16 +97,50 @@ class BaileysWhatsAppVerifier {
         ensureWebCryptoGlobal();
         const baileys = await import('@whiskeysockets/baileys');
         const auth = await baileys.useMultiFileAuthState(this.authStateDir);
+        this.credsRegistered = Boolean(auth.state.creds?.registered);
         const sock = baileys.makeWASocket({
             auth: auth.state,
             printQRInTerminal: !this.pairingEnabled,
             logger: pino({ level: 'silent' }),
         });
-        sock.ev.on('creds.update', auth.saveCreds);
+        sock.ev.on('creds.update', (creds) => {
+            auth.saveCreds();
+            this.credsRegistered = Boolean(creds?.registered) || this.credsRegistered;
+        });
+        sock.ev.on('connection.update', (update) => {
+            if (update?.connection === 'open') {
+                this.socketOpen = true;
+                this.lastProviderError = null;
+            }
+            if (update?.connection === 'close') {
+                this.socketOpen = false;
+                const detail = update?.lastDisconnect?.error?.message ??
+                    update?.lastDisconnect?.error?.toString?.() ??
+                    'Connection Closed';
+                this.lastProviderError = String(detail);
+            }
+        });
         const alreadyRegistered = Boolean(auth.state.creds?.registered);
-        await this.maybeEmitPairingCode(sock, alreadyRegistered);
+        if (this.pairingEnabled && !alreadyRegistered) {
+            this.pairingBootstrapPromise ??= this.bootstrapPairing(sock).finally(() => {
+                this.pairingBootstrapPromise = null;
+            });
+            return sock;
+        }
         await this.waitForSocketConnection(sock);
+        this.socketOpen = true;
         return sock;
+    }
+    async bootstrapPairing(sock) {
+        await this.maybeEmitPairingCode(sock, false);
+        try {
+            await this.waitForSocketConnection(sock);
+            this.socketOpen = true;
+        }
+        catch (error) {
+            const detail = error instanceof Error ? error.message : 'pairing_socket_not_open';
+            this.lastProviderError = detail;
+        }
     }
     async maybeEmitPairingCode(sock, alreadyRegistered) {
         if (!this.pairingEnabled || alreadyRegistered)
@@ -162,6 +199,24 @@ class BaileysWhatsAppVerifier {
                 provider: 'baileys',
             };
         }
+        if (this.pairingEnabled && !this.credsRegistered && !this.socketOpen) {
+            this.getSocket().catch((error) => {
+                this.socketPromise = null;
+                this.lastProviderError =
+                    error instanceof Error ? error.message : 'pairing_bootstrap_failed';
+            });
+            return {
+                ok: false,
+                normalizedPhone: normalized,
+                reason: 'pairing_required',
+                detail: (this.lastProviderError?.trim().length ?? 0) > 0
+                    ? `WhatsApp needs linking first (${this.lastProviderError}).`
+                    : 'WhatsApp needs to be linked first using pairing code.',
+                provider: 'baileys',
+                pairingCode: this.lastPairingCode,
+                pairingPhone: this.pairingPhone || null,
+            };
+        }
         try {
             const sock = await this.getSocket();
             const jid = `${normalized.slice(1)}@s.whatsapp.net`;
@@ -218,6 +273,8 @@ class BaileysWhatsAppVerifier {
         return {
             provider: 'baileys',
             pairingEnabled: this.pairingEnabled,
+            socketOpen: this.socketOpen,
+            credsRegistered: this.credsRegistered,
             pairingPhone: this.pairingPhone || null,
             pairingCode: this.lastPairingCode,
             pairingAgeSeconds,

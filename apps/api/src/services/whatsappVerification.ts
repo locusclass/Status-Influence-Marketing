@@ -118,10 +118,13 @@ class MockWhatsAppVerifier {
 
 class BaileysWhatsAppVerifier {
   private socketPromise: Promise<SockLike> | null = null;
+  private pairingBootstrapPromise: Promise<void> | null = null;
   private readonly authStateDir: string;
   private readonly connectTimeoutMs: number;
   private readonly pairingEnabled: boolean;
   private readonly pairingPhone: string;
+  private socketOpen = false;
+  private credsRegistered = false;
   private lastPairingCode: string | null = null;
   private pairingRequestedAt: number | null = null;
   private lastProviderError: string | null = null;
@@ -152,17 +155,55 @@ class BaileysWhatsAppVerifier {
     ensureWebCryptoGlobal();
     const baileys = await import('@whiskeysockets/baileys');
     const auth = await baileys.useMultiFileAuthState(this.authStateDir);
+    this.credsRegistered = Boolean(auth.state.creds?.registered);
     const sock = baileys.makeWASocket({
       auth: auth.state,
       printQRInTerminal: !this.pairingEnabled,
       logger: pino({ level: 'silent' }),
     }) as SockLike;
 
-    sock.ev.on('creds.update', auth.saveCreds);
+    sock.ev.on('creds.update', (creds: any) => {
+      auth.saveCreds();
+      this.credsRegistered = Boolean(creds?.registered) || this.credsRegistered;
+    });
+    sock.ev.on('connection.update', (update: any) => {
+      if (update?.connection === 'open') {
+        this.socketOpen = true;
+        this.lastProviderError = null;
+      }
+      if (update?.connection === 'close') {
+        this.socketOpen = false;
+        const detail =
+          update?.lastDisconnect?.error?.message ??
+          update?.lastDisconnect?.error?.toString?.() ??
+          'Connection Closed';
+        this.lastProviderError = String(detail);
+      }
+    });
+
     const alreadyRegistered = Boolean(auth.state.creds?.registered);
-    await this.maybeEmitPairingCode(sock, alreadyRegistered);
+    if (this.pairingEnabled && !alreadyRegistered) {
+      this.pairingBootstrapPromise ??= this.bootstrapPairing(sock).finally(() => {
+        this.pairingBootstrapPromise = null;
+      });
+      return sock;
+    }
+
     await this.waitForSocketConnection(sock);
+    this.socketOpen = true;
     return sock;
+  }
+
+  private async bootstrapPairing(sock: SockLike) {
+    await this.maybeEmitPairingCode(sock, false);
+    try {
+      await this.waitForSocketConnection(sock);
+      this.socketOpen = true;
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : 'pairing_socket_not_open';
+      this.lastProviderError = detail;
+    }
   }
 
   private async maybeEmitPairingCode(sock: SockLike, alreadyRegistered: boolean) {
@@ -237,6 +278,26 @@ class BaileysWhatsAppVerifier {
       };
     }
 
+    if (this.pairingEnabled && !this.credsRegistered && !this.socketOpen) {
+      this.getSocket().catch((error) => {
+        this.socketPromise = null;
+        this.lastProviderError =
+          error instanceof Error ? error.message : 'pairing_bootstrap_failed';
+      });
+      return {
+        ok: false,
+        normalizedPhone: normalized,
+        reason: 'pairing_required',
+        detail:
+          (this.lastProviderError?.trim().length ?? 0) > 0
+            ? `WhatsApp needs linking first (${this.lastProviderError}).`
+            : 'WhatsApp needs to be linked first using pairing code.',
+        provider: 'baileys',
+        pairingCode: this.lastPairingCode,
+        pairingPhone: this.pairingPhone || null,
+      };
+    }
+
     try {
       const sock = await this.getSocket();
       const jid = `${normalized.slice(1)}@s.whatsapp.net`;
@@ -303,6 +364,8 @@ class BaileysWhatsAppVerifier {
     return {
       provider: 'baileys' as const,
       pairingEnabled: this.pairingEnabled,
+      socketOpen: this.socketOpen,
+      credsRegistered: this.credsRegistered,
       pairingPhone: this.pairingPhone || null,
       pairingCode: this.lastPairingCode,
       pairingAgeSeconds,
