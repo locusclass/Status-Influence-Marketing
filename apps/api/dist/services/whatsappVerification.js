@@ -1,4 +1,11 @@
 import pino from 'pino';
+import { webcrypto } from 'node:crypto';
+function ensureWebCryptoGlobal() {
+    const globalWithCrypto = globalThis;
+    if (!globalWithCrypto.crypto) {
+        globalWithCrypto.crypto = webcrypto;
+    }
+}
 const E164_MIN = 8;
 const E164_MAX = 15;
 function normalizePhone(phone) {
@@ -82,6 +89,7 @@ class BaileysWhatsAppVerifier {
         return this.socketPromise;
     }
     async createSocket() {
+        ensureWebCryptoGlobal();
         const baileys = await import('@whiskeysockets/baileys');
         const auth = await baileys.useMultiFileAuthState(this.authStateDir);
         const sock = baileys.makeWASocket({
