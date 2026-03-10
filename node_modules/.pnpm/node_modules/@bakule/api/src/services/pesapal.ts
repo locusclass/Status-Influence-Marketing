@@ -6,10 +6,20 @@ import { config } from '../config.js';
 
 interface TokenResponse {
   token: string;
-  expires_in: number;
+  expires_in?: number | string;
+  expiryDate?: number | string;
 }
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
+
+function parseTokenLifetimeSeconds(data: TokenResponse): number {
+  const raw = data.expires_in ?? data.expiryDate;
+  const parsed = typeof raw === 'string' ? Number(raw) : raw;
+  if (Number.isFinite(parsed) && parsed! > 0) {
+    return Number(parsed);
+  }
+  return 300;
+}
 
 async function getToken(): Promise<string> {
   if (cachedToken && Date.now() < cachedToken.expiresAt - 30_000) {
@@ -33,13 +43,17 @@ async function getToken(): Promise<string> {
   }
 
   const data = (await res.json()) as TokenResponse;
+  const lifetimeSeconds = parseTokenLifetimeSeconds(data);
 
   cachedToken = {
     token: data.token,
-    expiresAt: Date.now() + data.expires_in * 1000
+    expiresAt: Date.now() + lifetimeSeconds * 1000
   };
 
-  console.info('[pesapal] OAuth token acquired', { expiresIn: data.expires_in });
+  console.info('[pesapal] OAuth token acquired', {
+    expiresIn: data.expires_in,
+    effectiveExpiresIn: lifetimeSeconds
+  });
 
   return data.token;
 }
