@@ -183,6 +183,7 @@ export async function campaignRoutes(app) {
     app.post('/campaigns/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
         const body = FundCampaignSchema.parse({ campaign_id: params.id, ...request.body });
+        const pesapalCurrency = 'UGX';
         const { order, pesapalTxn } = await withTransaction(async (client) => {
             if (!config.pesapal.ipnId) {
                 reply.code(503);
@@ -191,11 +192,9 @@ export async function campaignRoutes(app) {
             const authUser = request.user?.sub;
             const role = request.user?.role;
             const userEmailRes = authUser
-                ? await client.query('SELECT email, preferred_currency AS currency FROM users WHERE id=$1', [authUser])
+                ? await client.query('SELECT email FROM users WHERE id=$1', [authUser])
                 : null;
             const userEmail = userEmailRes?.rows?.[0]?.email;
-            const rawCurrency = userEmailRes?.rows?.[0]?.currency ?? 'UGX';
-            const userCurrency = rawCurrency.toUpperCase().length == 3 ? rawCurrency.toUpperCase() : 'UGX';
             if (!userEmail) {
                 reply.code(400);
                 return { error: 'user_email_missing' };
@@ -243,7 +242,7 @@ export async function campaignRoutes(app) {
                 firstName,
                 lastName: 'User',
                 email: userEmail,
-                currency: userCurrency,
+                currency: pesapalCurrency,
                 callback_url: body.return_url,
                 cancellation_url: body.cancel_url
             });
@@ -253,7 +252,12 @@ export async function campaignRoutes(app) {
         const pesapalError = orderAny?.error ?? orderAny?.errro;
         const status = orderAny?.status;
         if (pesapalError || (status && status !== '200' && status !== 200)) {
-            app.log.error({ order }, 'pesapal_submit_order_failed');
+            app.log.error({
+                order,
+                campaignId: params.id,
+                amount: body.amount,
+                currency: pesapalCurrency
+            }, 'pesapal_submit_order_failed');
             reply.code(502);
             return { error: 'pesapal_submit_failed', pesapal_response: order };
         }

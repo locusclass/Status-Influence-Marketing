@@ -3,6 +3,14 @@ import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config } from '../config.js';
 let cachedToken = null;
+function parseTokenLifetimeSeconds(data) {
+    const raw = data.expires_in ?? data.expiryDate;
+    const parsed = typeof raw === 'string' ? Number(raw) : raw;
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Number(parsed);
+    }
+    return 300;
+}
 async function getToken() {
     if (cachedToken && Date.now() < cachedToken.expiresAt - 30_000) {
         return cachedToken.token;
@@ -22,11 +30,15 @@ async function getToken() {
         throw new Error(`PesaPal token error: ${res.status} ${res.statusText} ${errorText}`);
     }
     const data = (await res.json());
+    const lifetimeSeconds = parseTokenLifetimeSeconds(data);
     cachedToken = {
         token: data.token,
-        expiresAt: Date.now() + data.expires_in * 1000
+        expiresAt: Date.now() + lifetimeSeconds * 1000
     };
-    console.info('[pesapal] OAuth token acquired', { expiresIn: data.expires_in });
+    console.info('[pesapal] OAuth token acquired', {
+        expiresIn: data.expires_in,
+        effectiveExpiresIn: lifetimeSeconds
+    });
     return data.token;
 }
 export async function registerIpnUrl() {
