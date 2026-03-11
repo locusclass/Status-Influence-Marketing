@@ -368,6 +368,21 @@ CREATE TABLE IF NOT EXISTS wallet_txns (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS wallet_withdrawals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  wallet_id UUID NOT NULL REFERENCES wallets(id),
+  user_id UUID NOT NULL REFERENCES users(id),
+  amount INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'UGX',
+  receiver_phone TEXT NOT NULL,
+  status payout_status NOT NULL DEFAULT 'PROCESSING',
+  pesapal_reference TEXT UNIQUE,
+  failure_reason TEXT,
+  paid_at TIMESTAMPTZ,
+  failed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS escrow_ledger (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   campaign_id UUID NOT NULL REFERENCES campaigns(id),

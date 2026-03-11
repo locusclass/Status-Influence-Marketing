@@ -5,9 +5,7 @@ import { GeminiVerifier } from './verification/geminiVerifier.js';
 import { DeterministicVerifier } from './verification/deterministicVerifier.js';
 import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
-import { requestPayout } from './services/pesapal.js';
 import { downloadToTemp, removeTemp } from './utils.js';
-import { v4 as uuid } from 'uuid';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
@@ -196,21 +194,7 @@ async function preparePayoutRequest(client, proof, campaign) {
         return null;
     }
     if (payoutRow.status === 'PROCESSING' && payoutRow.pesapal_reference) {
-        const userRes = await client.query('SELECT email, phone, preferred_currency FROM users WHERE id=$1', [proof.user_id]);
-        const user = userRes.rows[0];
-        if (!user?.phone) {
-            throw new Error('missing_payout_phone');
-        }
-        return {
-            payoutId: payoutRow.id,
-            escrowId: escrow.id,
-            amount: campaign.payout_amount,
-            reference: payoutRow.pesapal_reference,
-            receiverName: user.email?.split('@')[0] ?? 'Distributor',
-            receiverPhone: user.phone,
-            currency: (user.preferred_currency ?? 'UGX').toString().toUpperCase(),
-            narration: `Payout for proof ${proof.id}`,
-        };
+        return null;
     }
     if (payoutRow.status === 'FAILED') {
         const resetRes = await client.query("UPDATE payout_requests SET status='REQUESTED' WHERE id=$1 RETURNING *", [payoutRow.id]);
@@ -228,23 +212,33 @@ async function preparePayoutRequest(client, proof, campaign) {
     if (!updatedEscrow.rows[0]) {
         throw new Error('insufficient_escrow');
     }
-    const userRes = await client.query('SELECT email, phone, preferred_currency FROM users WHERE id=$1', [proof.user_id]);
+    const userRes = await client.query('SELECT email, preferred_currency FROM users WHERE id=$1', [proof.user_id]);
     const user = userRes.rows[0];
-    if (!user?.phone) {
-        throw new Error('missing_payout_phone');
+    const walletRes = await client.query('SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE', [proof.user_id]);
+    let wallet = walletRes.rows[0];
+    if (!wallet) {
+        const createdWallet = await client.query(`
+      INSERT INTO wallets (user_id, currency, balance_available, balance_escrow, balance)
+      VALUES ($1,$2,0,0,0)
+      RETURNING *
+      `, [
+            proof.user_id,
+            (user?.preferred_currency ?? 'UGX').toString().toUpperCase(),
+        ]);
+        wallet = createdWallet.rows[0];
     }
-    const payoutReference = uuid();
-    await client.query("UPDATE payout_requests SET status='PROCESSING', pesapal_reference=$2 WHERE id=$1", [payoutRow.id, payoutReference]);
-    return {
-        payoutId: payoutRow.id,
-        escrowId: escrow.id,
-        amount: campaign.payout_amount,
-        reference: payoutReference,
-        receiverName: user.email?.split('@')[0] ?? 'Distributor',
-        receiverPhone: user.phone,
-        currency: (user.preferred_currency ?? 'UGX').toString().toUpperCase(),
-        narration: `Payout for proof ${proof.id}`,
-    };
+    await client.query(`
+    UPDATE wallets
+    SET balance_available = balance_available + $2,
+        balance = balance + $2
+    WHERE id=$1
+    `, [wallet.id, campaign.payout_amount]);
+    await client.query(`
+    INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+    VALUES ($1,$2,'CREDIT',$3)
+    `, [wallet.id, campaign.payout_amount, `PROOF_PAYOUT:${proof.id}`]);
+    await client.query("UPDATE payout_requests SET status='PAID', pesapal_reference=$2 WHERE id=$1", [payoutRow.id, `WALLET_CREDIT:${proof.id}`]);
+    return null;
 }
 async function compensatePayoutFailure(proofId, campaignId) {
     await withTransaction(async (client) => {
@@ -261,16 +255,6 @@ async function compensatePayoutFailure(proofId, campaignId) {
              ELSE 'PARTIALLY_DISBURSED'
            END
        WHERE campaign_id=$1`, [campaignId, payout.amount]);
-    });
-}
-async function submitPayout(input) {
-    await requestPayout({
-        amount: input.amount,
-        currency: input.currency,
-        narration: input.narration,
-        reference: input.reference,
-        receiverName: input.receiverName,
-        receiverPhone: input.receiverPhone,
     });
 }
 async function processVerificationJob(job) {
@@ -408,14 +392,7 @@ async function processPayoutJob(job) {
             return null;
         });
         if (payoutRequest) {
-            await submitPayout({
-                amount: payoutRequest.amount,
-                currency: payoutRequest.currency,
-                narration: payoutRequest.narration,
-                reference: payoutRequest.reference,
-                receiverName: payoutRequest.receiverName,
-                receiverPhone: payoutRequest.receiverPhone,
-            });
+            // Wallet crediting is completed inside the transaction.
         }
         await pool.query("UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1", [job.id]);
     }

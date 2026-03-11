@@ -2,6 +2,50 @@ import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { getTransactionStatus, verifyWebhookSignature } from '../services/pesapal.js';
 import { config } from '../config.js';
+async function ensureWalletWithdrawalsTable(client) {
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS wallet_withdrawals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      amount INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'UGX',
+      receiver_phone TEXT NOT NULL,
+      status payout_status NOT NULL DEFAULT 'PROCESSING',
+      pesapal_reference TEXT UNIQUE,
+      failure_reason TEXT,
+      paid_at TIMESTAMPTZ,
+      failed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+async function refundWalletWithdrawal(client, withdrawal, reason) {
+    if (!withdrawal || withdrawal.status === 'FAILED') {
+        return;
+    }
+    await client.query(`
+    UPDATE wallets
+    SET balance_available = balance_available + $2,
+        balance = balance + $2
+    WHERE id=$1
+    `, [withdrawal.wallet_id, withdrawal.amount]);
+    await client.query(`
+    INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+    VALUES ($1,$2,'CREDIT',$3)
+    `, [
+        withdrawal.wallet_id,
+        withdrawal.amount,
+        `${withdrawal.pesapal_reference ?? withdrawal.id}:REFUND`,
+    ]);
+    await client.query(`
+    UPDATE wallet_withdrawals
+    SET status='FAILED',
+        failure_reason=$2,
+        failed_at=NOW()
+    WHERE id=$1
+    `, [withdrawal.id, reason]);
+}
 export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
     const deepLinkReturn = 'bakule://payment/return';
@@ -104,15 +148,33 @@ export async function paymentRoutes(app) {
                 return { ok: true, duplicate: true };
             const payoutRows = await client.query('SELECT * FROM payout_requests WHERE pesapal_reference=$1', [reference]);
             const payout = payoutRows.rows[0];
-            if (!payout)
+            if (payout) {
+                if (status.includes('PAID') || status.includes('COMPLETED') || status.includes('SUCCESS')) {
+                    await paymentRepo.updatePayoutStatus(client, payout.id, 'PAID', reference);
+                }
+                else if (status.includes('FAILED')) {
+                    await paymentRepo.updatePayoutStatus(client, payout.id, 'FAILED', reference);
+                }
+                return { ok: true, type: 'proof_payout' };
+            }
+            await ensureWalletWithdrawalsTable(client);
+            const withdrawalRows = await client.query('SELECT * FROM wallet_withdrawals WHERE pesapal_reference=$1', [reference]);
+            const withdrawal = withdrawalRows.rows[0];
+            if (!withdrawal)
                 return { ok: false, error: 'payout_not_found' };
             if (status.includes('PAID') || status.includes('COMPLETED') || status.includes('SUCCESS')) {
-                await paymentRepo.updatePayoutStatus(client, payout.id, 'PAID', reference);
+                await client.query(`
+          UPDATE wallet_withdrawals
+          SET status='PAID',
+              paid_at=NOW(),
+              failure_reason=NULL
+          WHERE id=$1
+          `, [withdrawal.id]);
             }
             else if (status.includes('FAILED')) {
-                await paymentRepo.updatePayoutStatus(client, payout.id, 'FAILED', reference);
+                await refundWalletWithdrawal(client, withdrawal, 'provider_failed');
             }
-            return { ok: true };
+            return { ok: true, type: 'wallet_withdrawal' };
         });
         if (!result.ok) {
             reply.code(400);

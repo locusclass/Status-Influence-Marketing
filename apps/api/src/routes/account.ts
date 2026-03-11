@@ -1,7 +1,9 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
+import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 
 const accountProfileSchema = z.object({
@@ -25,6 +27,19 @@ const accountRoleSchema = z.object({
 const accountWhatsappVerifySchema = z.object({
   phone: z.string().trim().min(7).max(20).optional(),
 });
+
+const walletWithdrawSchema = z.object({
+  amount: z.number().int().positive(),
+  phone: z.string().trim().min(7).max(20).optional(),
+});
+
+type WalletPayoutPayload = {
+  amount: number;
+  currency: string;
+  reference: string;
+  receiverName: string;
+  receiverPhone: string;
+};
 
 async function ensureUserProfilesTable(client: any) {
   await client.query(`
@@ -65,6 +80,142 @@ async function ensureWhatsappColumns(client: any) {
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS whatsapp_jid TEXT;
   `);
+}
+
+async function ensureWalletTables(client: any) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS wallets (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      currency TEXT NOT NULL DEFAULT 'UGX',
+      balance_available INTEGER NOT NULL DEFAULT 0,
+      balance_escrow INTEGER NOT NULL DEFAULT 0,
+      balance INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await client.query(`
+    ALTER TABLE wallets
+      ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'UGX'
+  `);
+  await client.query(`
+    ALTER TABLE wallets
+      ADD COLUMN IF NOT EXISTS balance_available INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE wallets
+      ADD COLUMN IF NOT EXISTS balance_escrow INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE wallets
+      ADD COLUMN IF NOT EXISTS balance INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    UPDATE wallets
+    SET balance_available = COALESCE(balance_available, balance, 0),
+        balance = COALESCE(balance, balance_available, 0)
+    WHERE balance_available <> COALESCE(balance, balance_available, 0)
+       OR balance <> COALESCE(balance_available, balance, 0)
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS wallet_txns (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+      amount INTEGER NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('CREDIT', 'DEBIT')),
+      reference TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS wallet_withdrawals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      amount INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'UGX',
+      receiver_phone TEXT NOT NULL,
+      status payout_status NOT NULL DEFAULT 'PROCESSING',
+      pesapal_reference TEXT UNIQUE,
+      failure_reason TEXT,
+      paid_at TIMESTAMPTZ,
+      failed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function ensureWalletForUser(client: any, userId: string) {
+  await ensureWalletTables(client);
+  const existing = await client.query(
+    `SELECT * FROM wallets WHERE user_id=$1 LIMIT 1`,
+    [userId]
+  );
+  if (existing.rows[0]) {
+    return existing.rows[0];
+  }
+
+  const userRes = await client.query(
+    `SELECT preferred_currency FROM users WHERE id=$1 LIMIT 1`,
+    [userId]
+  );
+  const currency = (userRes.rows[0]?.preferred_currency ?? 'UGX')
+    .toString()
+    .trim()
+    .toUpperCase();
+
+  const created = await client.query(
+    `
+    INSERT INTO wallets (user_id, currency, balance_available, balance_escrow, balance)
+    VALUES ($1,$2,0,0,0)
+    RETURNING *
+    `,
+    [userId, currency]
+  );
+  return created.rows[0];
+}
+
+async function refundWalletWithdrawal(
+  client: any,
+  withdrawal: any,
+  reason: string
+) {
+  if (!withdrawal || withdrawal.status === 'FAILED') {
+    return withdrawal;
+  }
+
+  await client.query(
+    `
+    UPDATE wallets
+    SET balance_available = balance_available + $2,
+        balance = balance + $2
+    WHERE id=$1
+    `,
+    [withdrawal.wallet_id, withdrawal.amount]
+  );
+  await client.query(
+    `
+    INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+    VALUES ($1,$2,'CREDIT',$3)
+    `,
+    [
+      withdrawal.wallet_id,
+      withdrawal.amount,
+      `${withdrawal.pesapal_reference ?? withdrawal.id}:REFUND`,
+    ]
+  );
+  const updated = await client.query(
+    `
+    UPDATE wallet_withdrawals
+    SET status='FAILED',
+        failure_reason=$2,
+        failed_at=NOW()
+    WHERE id=$1
+    RETURNING *
+    `,
+    [withdrawal.id, reason]
+  );
+  return updated.rows[0] ?? withdrawal;
 }
 
 export async function accountRoutes(app: FastifyInstance) {
@@ -484,6 +635,7 @@ export async function accountRoutes(app: FastifyInstance) {
   app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
     const data = await withTransaction(async (client) => {
+      await ensureWalletForUser(client, userId);
       const walletRes = await client.query('SELECT * FROM wallets WHERE user_id=$1', [userId]);
       const wallet = walletRes.rows[0];
       const txnsRes = await client.query(
@@ -493,6 +645,149 @@ export async function accountRoutes(app: FastifyInstance) {
       return { wallet, txns: txnsRes.rows };
     });
     return data;
+  });
+
+  app.post('/wallet/withdraw', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const parsed = walletWithdrawSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+
+    let payoutPayload: WalletPayoutPayload | null = null;
+
+    const result = await withTransaction(async (client) => {
+      await ensureWhatsappColumns(client);
+      const wallet = await ensureWalletForUser(client, userId);
+      const userRes = await client.query(
+        `SELECT email, phone, preferred_currency FROM users WHERE id=$1 LIMIT 1`,
+        [userId]
+      );
+      const user = userRes.rows[0];
+      if (!user) {
+        reply.code(404);
+        return { error: 'user_not_found' };
+      }
+
+      const receiverPhone = (
+        parsed.data.phone?.trim() || String(user.phone ?? '').trim()
+      );
+      if (!receiverPhone) {
+        reply.code(400);
+        return { error: 'missing_payout_phone' };
+      }
+
+      const amount = parsed.data.amount;
+      const lockedWalletRes = await client.query(
+        `SELECT * FROM wallets WHERE id=$1 FOR UPDATE`,
+        [wallet.id]
+      );
+      const lockedWallet = lockedWalletRes.rows[0];
+      const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);
+      if (!lockedWallet || balanceAvailable < amount) {
+        reply.code(400);
+        return { error: 'insufficient_wallet_balance' };
+      }
+
+      const currency = (user.preferred_currency ?? lockedWallet.currency ?? 'UGX')
+        .toString()
+        .trim()
+        .toUpperCase();
+      const reference = `WD-${uuid()}`;
+      const updatedWalletRes = await client.query(
+        `
+        UPDATE wallets
+        SET balance_available = balance_available - $2,
+            balance = GREATEST(balance - $2, 0)
+        WHERE id=$1 AND balance_available >= $2
+        RETURNING *
+        `,
+        [wallet.id, amount]
+      );
+      if (!updatedWalletRes.rows[0]) {
+        reply.code(400);
+        return { error: 'insufficient_wallet_balance' };
+      }
+
+      await client.query(
+        `
+        INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+        VALUES ($1,$2,'DEBIT',$3)
+        `,
+        [wallet.id, amount, reference]
+      );
+
+      const withdrawalRes = await client.query(
+        `
+        INSERT INTO wallet_withdrawals (
+          wallet_id,
+          user_id,
+          amount,
+          currency,
+          receiver_phone,
+          status,
+          pesapal_reference
+        )
+        VALUES ($1,$2,$3,$4,$5,'PROCESSING',$6)
+        RETURNING *
+        `,
+        [wallet.id, userId, amount, currency, receiverPhone, reference]
+      );
+
+      payoutPayload = {
+        amount,
+        currency,
+        reference,
+        receiverName: user.email?.split('@')[0] ?? 'User',
+        receiverPhone,
+      };
+
+      return {
+        ok: true,
+        withdrawal: withdrawalRes.rows[0],
+        wallet: updatedWalletRes.rows[0],
+      };
+    });
+
+    if (!(result as any)?.ok || !payoutPayload) {
+      return result;
+    }
+
+    const payout = payoutPayload as WalletPayoutPayload;
+
+    try {
+      await requestPayout({
+        amount: payout.amount,
+        currency: payout.currency,
+        narration: `Wallet withdrawal ${payout.reference}`,
+        reference: payout.reference,
+        receiverName: payout.receiverName,
+        receiverPhone: payout.receiverPhone,
+      });
+    } catch (error: any) {
+      await withTransaction(async (client) => {
+        await ensureWalletTables(client);
+        const withdrawalRes = await client.query(
+          `SELECT * FROM wallet_withdrawals WHERE pesapal_reference=$1 LIMIT 1`,
+          [payout.reference]
+        );
+        const withdrawal = withdrawalRes.rows[0];
+        if (!withdrawal) return;
+        await refundWalletWithdrawal(
+          client,
+          withdrawal,
+          error?.message ?? 'withdrawal_request_failed'
+        );
+      });
+      reply.code(502);
+      return {
+        error: 'withdrawal_request_failed',
+        detail: error?.message ?? 'Withdrawal provider rejected the request.',
+      };
+    }
+
+    return result;
   });
 
   app.get('/proofs', { preHandler: [app.authenticate] }, async (request) => {
