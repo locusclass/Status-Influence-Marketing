@@ -153,6 +153,20 @@ export async function uploadRoutes(app: FastifyInstance) {
         reply.code(503);
         return { error: 'firebase_access_token_unavailable' };
       }
+      if (message.includes('firebase_access_token_failed')) {
+        reply.code(503);
+        return {
+          error: 'firebase_access_token_failed',
+          detail: message,
+        };
+      }
+      if (message.includes('firebase_client_init_failed')) {
+        reply.code(503);
+        return {
+          error: 'firebase_client_init_failed',
+          detail: message,
+        };
+      }
       if (message.includes('firebase_storage_upload_failed')) {
         reply.code(502);
         return {

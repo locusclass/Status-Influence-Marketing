@@ -2,6 +2,17 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 
+function stripWrappingQuotes(value: string) {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
 function resolveUploadDir() {
   const explicit = process.env.UPLOAD_DIR?.trim();
   if (explicit) {
@@ -61,7 +72,7 @@ export const config = {
   firebase: {
     projectId: process.env.FIREBASE_PROJECT_ID ?? '',
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL ?? '',
-    privateKey: (process.env.FIREBASE_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),
+    privateKey: stripWrappingQuotes(process.env.FIREBASE_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET ?? '',
   }
 };

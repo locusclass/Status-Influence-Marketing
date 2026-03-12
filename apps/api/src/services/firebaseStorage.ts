@@ -17,20 +17,37 @@ function ensureFirebaseStorageConfigured() {
 
 function createClient() {
   ensureFirebaseStorageConfigured();
-  return new JWT({
-    email: config.firebase.clientEmail,
-    key: config.firebase.privateKey,
-    scopes: [STORAGE_SCOPE],
-  });
+  try {
+    return new JWT({
+      email: config.firebase.clientEmail,
+      key: config.firebase.privateKey,
+      scopes: [STORAGE_SCOPE],
+    });
+  } catch (error: any) {
+    throw new Error(
+      `firebase_client_init_failed:${String(error?.message ?? 'unknown')}`
+    );
+  }
 }
 
 async function getAccessToken() {
-  const client = createClient();
-  const token = await client.getAccessToken();
-  if (!token?.token) {
-    throw new Error('firebase_access_token_unavailable');
+  try {
+    const client = createClient();
+    const token = await client.getAccessToken();
+    if (!token?.token) {
+      throw new Error('firebase_access_token_unavailable');
+    }
+    return token.token;
+  } catch (error: any) {
+    const message = String(error?.message ?? '');
+    if (
+      message.includes('firebase_storage_not_configured') ||
+      message.includes('firebase_access_token_unavailable')
+    ) {
+      throw error;
+    }
+    throw new Error(`firebase_access_token_failed:${message || 'unknown'}`);
   }
-  return token.token;
 }
 
 function getBucketCandidates() {
@@ -76,33 +93,46 @@ export async function uploadToFirebaseStorage(input: {
   mimeType: string;
   body: Readable;
 }) {
-  const accessToken = await getAccessToken();
-  const buckets = getBucketCandidates();
-  let lastError = '';
+  try {
+    const accessToken = await getAccessToken();
+    const buckets = getBucketCandidates();
+    let lastError = '';
 
-  for (const bucketName of buckets) {
-    const response = await fetch(objectUploadUrl(bucketName, input.objectName), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': input.mimeType,
-      },
-      body: input.body as any,
-      duplex: 'half',
-    } as any);
+    for (const bucketName of buckets) {
+      const response = await fetch(objectUploadUrl(bucketName, input.objectName), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': input.mimeType,
+        },
+        body: input.body as any,
+        duplex: 'half',
+      } as any);
 
-    if (response.ok) {
-      return;
+      if (response.ok) {
+        return;
+      }
+
+      const detail = await response.text();
+      lastError = `firebase_storage_upload_failed:${response.status}:${bucketName}:${detail}`;
+      if (!isMissingBucket(response.status, detail)) {
+        break;
+      }
     }
 
-    const detail = await response.text();
-    lastError = `firebase_storage_upload_failed:${response.status}:${bucketName}:${detail}`;
-    if (!isMissingBucket(response.status, detail)) {
-      break;
+    throw new Error(lastError || 'firebase_storage_upload_failed:unknown');
+  } catch (error: any) {
+    const message = String(error?.message ?? '');
+    if (
+      message.includes('firebase_storage_not_configured') ||
+      message.includes('firebase_access_token_') ||
+      message.includes('firebase_client_init_failed') ||
+      message.includes('firebase_storage_upload_failed')
+    ) {
+      throw error;
     }
+    throw new Error(`firebase_storage_upload_failed:runtime:${message || 'unknown'}`);
   }
-
-  throw new Error(lastError || 'firebase_storage_upload_failed:unknown');
 }
 
 export async function downloadFromFirebaseStorage(input: {
