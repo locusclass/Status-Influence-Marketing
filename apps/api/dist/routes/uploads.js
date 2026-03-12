@@ -1,6 +1,6 @@
-import fs from 'fs';
 import path from 'path';
-import { config } from '../config.js';
+import { PassThrough } from 'stream';
+import { uploadToFirebaseStorage, downloadFromFirebaseStorage } from '../services/firebaseStorage.js';
 import { signUpload, verifyUpload } from '../utils.js';
 export async function uploadRoutes(app) {
     app.post('/uploads/sign', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -55,69 +55,70 @@ export async function uploadRoutes(app) {
             reply.code(400);
             return { error: 'mime_mismatch' };
         }
-        const uploadDir = path.resolve(config.uploadDir);
-        await fs.promises.mkdir(uploadDir, { recursive: true });
-        const targetPath = path.join(uploadDir, `${id}-${data.filename}`);
+        const safeName = path.basename(data.filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+        const objectName = `${id}-${safeName}`;
         const sizeLimit = 200 * 1024 * 1024;
         let total = 0;
-        await new Promise((resolve, reject) => {
-            const stream = fs.createWriteStream(targetPath);
-            data.file.on('data', (chunk) => {
-                total += chunk.length;
-                if (total > sizeLimit) {
-                    data.file.destroy(new Error('file_too_large'));
-                }
-            });
-            data.file.pipe(stream);
-            data.file.on('end', () => resolve());
-            data.file.on('error', (err) => reject(err));
+        const passthrough = new PassThrough();
+        data.file.on('data', (chunk) => {
+            total += chunk.length;
+            if (total > sizeLimit) {
+                data.file.destroy(new Error('file_too_large'));
+            }
         });
+        const uploadPromise = uploadToFirebaseStorage({
+            objectName,
+            mimeType: data.mimetype ?? 'application/octet-stream',
+            body: passthrough,
+        });
+        data.file.on('error', (error) => {
+            passthrough.destroy(error);
+        });
+        data.file.pipe(passthrough);
+        try {
+            await uploadPromise;
+        }
+        catch (error) {
+            if (error?.message === 'file_too_large') {
+                reply.code(413);
+                return { error: 'file_too_large' };
+            }
+            if (String(error?.message ?? '').includes('firebase_storage_not_configured')) {
+                reply.code(503);
+                return { error: 'firebase_storage_not_configured' };
+            }
+            throw error;
+        }
         return {
-            file_url: `/uploads/files/${path.basename(targetPath)}?mime=${encodeURIComponent(data.mimetype ?? 'application/octet-stream')}`
+            file_url: `/uploads/files/${encodeURIComponent(objectName)}?mime=${encodeURIComponent(data.mimetype ?? 'application/octet-stream')}`
         };
     });
     app.get('/uploads/files/:file', async (request, reply) => {
-        const file = request.params.file;
-        const uploadDir = path.resolve(config.uploadDir);
+        const file = decodeURIComponent(request.params.file);
         if (!/^[a-zA-Z0-9._-]+$/.test(file)) {
             reply.code(400);
             return { error: 'invalid_file' };
         }
-        const filePath = path.resolve(uploadDir, file);
-        if (!filePath.startsWith(uploadDir + path.sep)) {
-            reply.code(400);
-            return { error: 'invalid_file' };
-        }
-        if (!fs.existsSync(filePath)) {
+        const downloaded = await downloadFromFirebaseStorage({
+            objectName: file,
+            range: request.headers.range,
+        });
+        if (!downloaded) {
             reply.code(404);
             return { error: 'not_found' };
         }
         const mime = String(request.query.mime ?? '');
-        const stat = await fs.promises.stat(filePath);
-        const fileSize = stat.size;
-        const range = request.headers.range;
         reply.header('Accept-Ranges', 'bytes');
-        reply.type(mime || 'application/octet-stream');
-        if (range) {
-            const match = /bytes=(\d+)-(\d*)/.exec(range);
-            if (!match) {
-                reply.code(416);
-                return { error: 'invalid_range' };
-            }
-            const start = parseInt(match[1] ?? '0', 10);
-            const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-            if (start >= fileSize || end >= fileSize) {
-                reply.code(416);
-                return { error: 'range_not_satisfiable' };
-            }
-            const chunkSize = end - start + 1;
-            reply
-                .code(206)
-                .header('Content-Range', `bytes ${start}-${end}/${fileSize}`)
-                .header('Content-Length', chunkSize);
-            return fs.createReadStream(filePath, { start, end });
+        reply.type(mime || downloaded.contentType || 'application/octet-stream');
+        if (downloaded.status === 206) {
+            reply.code(206);
         }
-        reply.header('Content-Length', fileSize);
-        return fs.createReadStream(filePath);
+        if (downloaded.contentLength) {
+            reply.header('Content-Length', downloaded.contentLength);
+        }
+        if (downloaded.contentRange) {
+            reply.header('Content-Range', downloaded.contentRange);
+        }
+        return downloaded.stream;
     });
 }

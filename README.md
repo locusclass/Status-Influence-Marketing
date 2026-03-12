@@ -51,8 +51,11 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 - `JWT_SECRET`
 - `CORS_ORIGIN`
   - Comma-separated origins. Wildcards are supported (example: `http://localhost:*`).
-- `UPLOAD_DIR`
 - `UPLOAD_SIGNING_SECRET`
+- `FIREBASE_PROJECT_ID`
+- `FIREBASE_CLIENT_EMAIL`
+- `FIREBASE_PRIVATE_KEY`
+- `FIREBASE_STORAGE_BUCKET`
 - `FINGERPRINT_PEPPER`
 - `PESAPAL_ENV` (`sandbox|production`)
 - `PESAPAL_BASE_URL`
