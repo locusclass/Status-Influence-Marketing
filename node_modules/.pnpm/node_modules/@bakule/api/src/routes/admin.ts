@@ -6,7 +6,11 @@ import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
-import { ensurePublicIdColumns } from '../services/publicId.js';
+import {
+  ensurePublicIdColumns,
+  resolveCampaignId,
+  resolveUserId,
+} from '../services/publicId.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR'])
@@ -476,9 +480,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateUserRoleSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
+      const resolvedUserId = await resolveUserId(client, params.id);
+      if (!resolvedUserId) {
+        return null;
+      }
       const res = await client.query(
         'UPDATE users SET role=$2 WHERE id=$1 RETURNING *',
-        [params.id, body.role]
+        [resolvedUserId, body.role]
       );
       if (res.rows[0]) {
         await logAudit(
@@ -486,7 +495,7 @@ export async function adminRoutes(app: FastifyInstance) {
           (request.user as any).sub,
           'UPDATE_USER_ROLE',
           'user',
-          params.id,
+          resolvedUserId,
           { role: body.role }
         );
       }
@@ -503,9 +512,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateUserStatusSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
+      const resolvedUserId = await resolveUserId(client, params.id);
+      if (!resolvedUserId) {
+        return null;
+      }
       const res = await client.query(
         'UPDATE users SET status=$2 WHERE id=$1 RETURNING *',
-        [params.id, body.status]
+        [resolvedUserId, body.status]
       );
       if (res.rows[0]) {
         await logAudit(
@@ -513,7 +527,7 @@ export async function adminRoutes(app: FastifyInstance) {
           (request.user as any).sub,
           'UPDATE_USER_STATUS',
           'user',
-          params.id,
+          resolvedUserId,
           { status: body.status }
         );
       }
@@ -530,9 +544,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = ResetPasswordSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
+      const resolvedUserId = await resolveUserId(client, params.id);
+      if (!resolvedUserId) {
+        return null;
+      }
       const res = await client.query(
         'UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id, email, role',
-        [params.id, hashPassword(body.password)]
+        [resolvedUserId, hashPassword(body.password)]
       );
       if (res.rows[0]) {
         await logAudit(
@@ -540,7 +559,7 @@ export async function adminRoutes(app: FastifyInstance) {
           (request.user as any).sub,
           'RESET_USER_PASSWORD',
           'user',
-          params.id,
+          resolvedUserId,
           {}
         );
       }
@@ -557,9 +576,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateUserContractPrivilegeSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
+      const resolvedUserId = await resolveUserId(client, params.id);
+      if (!resolvedUserId) {
+        return null;
+      }
       const res = await client.query(
         'UPDATE users SET can_multi_contract=$2 WHERE id=$1 RETURNING *',
-        [params.id, body.can_multi_contract]
+        [resolvedUserId, body.can_multi_contract]
       );
       if (res.rows[0]) {
         await logAudit(
@@ -567,7 +591,7 @@ export async function adminRoutes(app: FastifyInstance) {
           (request.user as any).sub,
           'UPDATE_USER_CONTRACT_PRIVILEGE',
           'user',
-          params.id,
+          resolvedUserId,
           { can_multi_contract: body.can_multi_contract }
         );
       }
@@ -639,6 +663,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateCampaignSchema.parse(request.body);
     const res = await withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
+      const resolvedCampaignId = await resolveCampaignId(client, params.id);
+      if (!resolvedCampaignId) {
+        return null;
+      }
       const updated = await client.query(
         `UPDATE campaigns SET
           title=COALESCE($2, title),
@@ -657,7 +686,7 @@ export async function adminRoutes(app: FastifyInstance) {
          WHERE id=$1
          RETURNING *`,
         [
-          params.id,
+          resolvedCampaignId,
           body.title ?? null,
           body.platform ?? null,
           body.payout_amount ?? null,
@@ -679,7 +708,7 @@ export async function adminRoutes(app: FastifyInstance) {
           (request.user as any).sub,
           'UPDATE_CAMPAIGN',
           'campaign',
-          params.id,
+          resolvedCampaignId,
           body
         );
       }

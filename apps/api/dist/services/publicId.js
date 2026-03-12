@@ -82,3 +82,16 @@ export async function resolveUserId(client, identifier) {
     `, [value]);
     return res.rows[0]?.id ?? null;
 }
+export async function resolveCampaignId(client, identifier) {
+    const value = String(identifier ?? '').trim();
+    if (!value) {
+        return null;
+    }
+    const res = await client.query(`
+    SELECT id
+    FROM campaigns
+    WHERE id::text = $1 OR public_id = $1
+    LIMIT 1
+    `, [value]);
+    return res.rows[0]?.id ?? null;
+}

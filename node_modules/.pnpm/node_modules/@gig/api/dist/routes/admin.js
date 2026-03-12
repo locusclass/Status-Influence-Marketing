@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
-import { ensurePublicIdColumns } from '../services/publicId.js';
+import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 const UpdateUserRoleSchema = z.object({
     role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR'])
 });
@@ -411,9 +411,14 @@ export async function adminRoutes(app) {
         const params = request.params;
         const body = UpdateUserRoleSchema.parse(request.body);
         const result = await withTransaction(async (client) => {
-            const res = await client.query('UPDATE users SET role=$2 WHERE id=$1 RETURNING *', [params.id, body.role]);
+            await ensurePublicIdColumns(client);
+            const resolvedUserId = await resolveUserId(client, params.id);
+            if (!resolvedUserId) {
+                return null;
+            }
+            const res = await client.query('UPDATE users SET role=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.role]);
             if (res.rows[0]) {
-                await logAudit(client, request.user.sub, 'UPDATE_USER_ROLE', 'user', params.id, { role: body.role });
+                await logAudit(client, request.user.sub, 'UPDATE_USER_ROLE', 'user', resolvedUserId, { role: body.role });
             }
             return res.rows[0];
         });
@@ -427,9 +432,14 @@ export async function adminRoutes(app) {
         const params = request.params;
         const body = UpdateUserStatusSchema.parse(request.body);
         const result = await withTransaction(async (client) => {
-            const res = await client.query('UPDATE users SET status=$2 WHERE id=$1 RETURNING *', [params.id, body.status]);
+            await ensurePublicIdColumns(client);
+            const resolvedUserId = await resolveUserId(client, params.id);
+            if (!resolvedUserId) {
+                return null;
+            }
+            const res = await client.query('UPDATE users SET status=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.status]);
             if (res.rows[0]) {
-                await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', params.id, { status: body.status });
+                await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', resolvedUserId, { status: body.status });
             }
             return res.rows[0];
         });
@@ -443,9 +453,14 @@ export async function adminRoutes(app) {
         const params = request.params;
         const body = ResetPasswordSchema.parse(request.body);
         const result = await withTransaction(async (client) => {
-            const res = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id, email, role', [params.id, hashPassword(body.password)]);
+            await ensurePublicIdColumns(client);
+            const resolvedUserId = await resolveUserId(client, params.id);
+            if (!resolvedUserId) {
+                return null;
+            }
+            const res = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id, email, role', [resolvedUserId, hashPassword(body.password)]);
             if (res.rows[0]) {
-                await logAudit(client, request.user.sub, 'RESET_USER_PASSWORD', 'user', params.id, {});
+                await logAudit(client, request.user.sub, 'RESET_USER_PASSWORD', 'user', resolvedUserId, {});
             }
             return res.rows[0];
         });
@@ -459,9 +474,14 @@ export async function adminRoutes(app) {
         const params = request.params;
         const body = UpdateUserContractPrivilegeSchema.parse(request.body);
         const result = await withTransaction(async (client) => {
-            const res = await client.query('UPDATE users SET can_multi_contract=$2 WHERE id=$1 RETURNING *', [params.id, body.can_multi_contract]);
+            await ensurePublicIdColumns(client);
+            const resolvedUserId = await resolveUserId(client, params.id);
+            if (!resolvedUserId) {
+                return null;
+            }
+            const res = await client.query('UPDATE users SET can_multi_contract=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.can_multi_contract]);
             if (res.rows[0]) {
-                await logAudit(client, request.user.sub, 'UPDATE_USER_CONTRACT_PRIVILEGE', 'user', params.id, { can_multi_contract: body.can_multi_contract });
+                await logAudit(client, request.user.sub, 'UPDATE_USER_CONTRACT_PRIVILEGE', 'user', resolvedUserId, { can_multi_contract: body.can_multi_contract });
             }
             return res.rows[0];
         });
@@ -524,6 +544,11 @@ export async function adminRoutes(app) {
         const params = request.params;
         const body = UpdateCampaignSchema.parse(request.body);
         const res = await withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const resolvedCampaignId = await resolveCampaignId(client, params.id);
+            if (!resolvedCampaignId) {
+                return null;
+            }
             const updated = await client.query(`UPDATE campaigns SET
           title=COALESCE($2, title),
           platform=COALESCE($3, platform),
@@ -540,7 +565,7 @@ export async function adminRoutes(app) {
           terms_requirement=COALESCE($14, terms_requirement)
          WHERE id=$1
          RETURNING *`, [
-                params.id,
+                resolvedCampaignId,
                 body.title ?? null,
                 body.platform ?? null,
                 body.payout_amount ?? null,
@@ -556,7 +581,7 @@ export async function adminRoutes(app) {
                 body.terms_requirement ?? null
             ]);
             if (updated.rows[0]) {
-                await logAudit(client, request.user.sub, 'UPDATE_CAMPAIGN', 'campaign', params.id, body);
+                await logAudit(client, request.user.sub, 'UPDATE_CAMPAIGN', 'campaign', resolvedCampaignId, body);
             }
             return updated.rows[0];
         });
