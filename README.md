@@ -56,6 +56,8 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 - `FIREBASE_CLIENT_EMAIL`
 - `FIREBASE_PRIVATE_KEY`
 - `FIREBASE_STORAGE_BUCKET`
+- `GOOGLE_CLIENT_ID`
+  - Google OAuth web client ID used by Firebase Auth. Comma-separate multiple IDs if needed.
 - `FINGERPRINT_PEPPER`
 - `PESAPAL_ENV` (`sandbox|production`)
 - `PESAPAL_BASE_URL`
@@ -104,3 +106,4 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 - PesaPal webhook validation tests
 - Trust score update tests
 - Worker job retry tests
+

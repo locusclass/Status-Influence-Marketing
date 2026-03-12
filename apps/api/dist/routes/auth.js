@@ -75,7 +75,7 @@ function buildSyntheticPassword(sub, email) {
 export async function authRoutes(app) {
     const userRepo = new UserRepo();
     const googleClient = new OAuth2Client();
-    const googleAudience = (process.env.GOOGLE_CLIENT_ID ?? '')
+    const googleAudience = (process.env.GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_IDS ?? '')
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
@@ -173,7 +173,10 @@ export async function authRoutes(app) {
         }
         if (googleAudience.length === 0) {
             reply.code(500);
-            return { error: 'google_auth_not_configured' };
+            return {
+                error: 'google_auth_not_configured',
+                detail: 'Set GOOGLE_CLIENT_ID on the API server to the Google OAuth web client ID used by Firebase Auth.',
+            };
         }
         const body = parsed.data;
         const countryData = resolveCountry(body.country);
@@ -187,7 +190,10 @@ export async function authRoutes(app) {
         }
         catch {
             reply.code(401);
-            return { error: 'invalid_google_token' };
+            return {
+                error: 'invalid_google_token',
+                detail: 'The Google ID token could not be verified against the configured client ID.',
+            };
         }
         const email = String(payload?.email ?? '').trim().toLowerCase();
         const sub = String(payload?.sub ?? '').trim();
