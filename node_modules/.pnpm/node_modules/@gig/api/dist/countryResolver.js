@@ -1,8 +1,11 @@
+import { readFileSync } from 'fs';
+import { createRequire } from 'module';
 import countries from 'i18n-iso-countries';
 import countryToCurrency from 'country-to-currency';
-countries.registerLocale((await import('i18n-iso-countries/langs/en.json', {
-    assert: { type: 'json' }
-})).default);
+const require = createRequire(import.meta.url);
+const localePath = require.resolve('i18n-iso-countries/langs/en.json');
+const locale = JSON.parse(readFileSync(localePath, 'utf8'));
+countries.registerLocale(locale);
 const DIAL_CODES = {
     DZ: '+213',
     AO: '+244',
