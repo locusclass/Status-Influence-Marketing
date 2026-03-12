@@ -148,8 +148,29 @@ async function ensureWalletTables(client) {
     )
   `);
 }
-async function ensureWalletForUser(client, userId) {
+async function ensureAccountSchema(client) {
+    await ensurePublicIdColumns(client);
+    await ensureWhatsappColumns(client);
+    await ensureUserProfilesTable(client);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'UG'
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS preferred_currency TEXT NOT NULL DEFAULT 'UGX'
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE
+  `);
     await ensureWalletTables(client);
+}
+async function ensureWalletForUser(client, userId) {
     const existing = await client.query(`SELECT * FROM wallets WHERE user_id=$1 LIMIT 1`, [userId]);
     if (existing.rows[0]) {
         return existing.rows[0];
@@ -195,6 +216,9 @@ async function refundWalletWithdrawal(client, withdrawal, reason) {
     return updated.rows[0] ?? withdrawal;
 }
 export async function accountRoutes(app) {
+    await withTransaction(async (client) => {
+        await ensureAccountSchema(client);
+    });
     const parsePaging = (query) => {
         const limitRaw = Number(query?.limit ?? 50);
         const offsetRaw = Number(query?.offset ?? 0);
@@ -207,9 +231,6 @@ export async function accountRoutes(app) {
     app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
         return withTransaction(async (client) => {
-            await ensurePublicIdColumns(client);
-            await ensureWhatsappColumns(client);
-            await ensureUserProfilesTable(client);
             const hasFullName = await usersHasColumn(client, 'full_name');
             const fullNameSelect = hasFullName
                 ? 'COALESCE(NULLIF(u.full_name, \'\'), p.full_name, \'\')'
@@ -244,7 +265,6 @@ export async function accountRoutes(app) {
         }
         const body = parsed.data;
         return withTransaction(async (client) => {
-            await ensureUserProfilesTable(client);
             await client.query(`
           INSERT INTO user_profiles (user_id, full_name, updated_at)
           VALUES ($1, $2, NOW())
@@ -271,7 +291,6 @@ export async function accountRoutes(app) {
         }
         const body = parsed.data;
         return withTransaction(async (client) => {
-            await ensureUserProfilesTable(client);
             await client.query(`
           INSERT INTO user_profiles (user_id, avatar_url, updated_at)
           VALUES ($1, $2, NOW())
@@ -291,7 +310,6 @@ export async function accountRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         return withTransaction(async (client) => {
-            await ensureWhatsappColumns(client);
             const userRes = await client.query(`SELECT id, phone FROM users WHERE id=$1 LIMIT 1`, [userId]);
             const user = userRes.rows[0];
             if (!user) {
@@ -386,8 +404,6 @@ export async function accountRoutes(app) {
         }
         const body = parsed.data;
         return withTransaction(async (client) => {
-            await ensureWhatsappColumns(client);
-            await ensurePublicIdColumns(client);
             await client.query('UPDATE users SET role=$2 WHERE id=$1', [
                 userId,
                 body.role,

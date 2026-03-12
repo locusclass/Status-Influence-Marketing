@@ -57,14 +57,29 @@ async function ensureCampaignColumns(client) {
       ADD COLUMN IF NOT EXISTS allocation_round INTEGER NOT NULL DEFAULT 0
   `);
 }
+async function usersHasColumn(client, columnName) {
+    const res = await client.query(`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema='public'
+      AND table_name='users'
+      AND column_name=$1
+    LIMIT 1
+    `, [columnName]);
+    return Boolean(res.rowCount);
+}
 async function findDistributorByPhone(client, rawPhone) {
     const phone = normalizePhone(rawPhone);
+    const hasFullName = await usersHasColumn(client, 'full_name');
+    const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
     const res = await client.query(`
     SELECT
       u.id,
       u.public_id,
       u.phone,
-      COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email) AS full_name,
+      ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
@@ -88,6 +103,9 @@ async function getLatestConfirmedViewers(client, distributorId) {
     return Number(res.rows[0]?.observed_views ?? 0);
 }
 export async function campaignRoutes(app) {
+    await withTransaction(async (client) => {
+        await ensureCampaignColumns(client);
+    });
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();
     const AcceptContractSchema = z.object({
@@ -108,7 +126,6 @@ export async function campaignRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         const distributor = await withTransaction(async (client) => {
-            await ensureCampaignColumns(client);
             return findDistributorByPhone(client, parsed.data.phone);
         });
         if (!distributor) {
@@ -126,7 +143,6 @@ export async function campaignRoutes(app) {
         const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
         const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
         const campaigns = await withTransaction(async (client) => {
-            await ensureCampaignColumns(client);
             const params = [];
             const filters = [];
             let idx = 1;
@@ -192,7 +208,6 @@ export async function campaignRoutes(app) {
         const params = request.params;
         const authUser = request.user?.sub;
         const campaign = await withTransaction(async (client) => {
-            await ensureCampaignColumns(client);
             const found = await campaignRepo.getCampaign(client, params.id);
             if (!found)
                 return null;
@@ -230,7 +245,6 @@ export async function campaignRoutes(app) {
             return { error: 'unauthorized' };
         }
         const proofs = await withTransaction(async (client) => {
-            await ensureCampaignColumns(client);
             const campaign = await campaignRepo.getCampaign(client, params.id);
             if (!campaign)
                 return { error: 'campaign_not_found' };
@@ -269,7 +283,6 @@ export async function campaignRoutes(app) {
             return { error: 'unauthorized' };
         }
         const summary = await withTransaction(async (client) => {
-            await ensureCampaignColumns(client);
             const campaign = await campaignRepo.getCampaign(client, params.id);
             if (!campaign)
                 return { error: 'campaign_not_found' };
@@ -321,7 +334,6 @@ export async function campaignRoutes(app) {
         let campaign;
         try {
             campaign = await withTransaction(async (client) => {
-                await ensureCampaignColumns(client);
                 const executionMode = body.execution_mode ?? 'PRIVATE_CONTRACT';
                 const beneficiaryContacts = Array.from(new Set([
                     ...(body.beneficiary_contacts ?? []),
@@ -428,7 +440,6 @@ export async function campaignRoutes(app) {
                 return { error: 'payment_redirect_urls_invalid' };
             }
             const firstName = userEmail.split('@')[0] ?? 'User';
-            await ensureCampaignColumns(client);
             const campaign = await campaignRepo.getCampaign(client, params.id);
             if (!campaign) {
                 reply.code(404);
@@ -504,7 +515,6 @@ export async function campaignRoutes(app) {
             return { error: 'forbidden' };
         }
         const result = await withTransaction(async (client) => {
-            await ensureCampaignColumns(client);
             const campaign = await campaignRepo.getCampaign(client, body.campaign_id);
             if (!campaign)
                 return { error: 'campaign_not_found' };

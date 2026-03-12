@@ -2,6 +2,9 @@ import path from 'path';
 import { PassThrough } from 'stream';
 import { uploadToFirebaseStorage, downloadFromFirebaseStorage } from '../services/firebaseStorage.js';
 import { signUpload, verifyUpload } from '../utils.js';
+function sanitizeObjectNameSegment(value) {
+    return path.basename(value).replace(/[^a-zA-Z0-9._-]/g, '_');
+}
 export async function uploadRoutes(app) {
     app.post('/uploads/sign', { preHandler: [app.authenticate] }, async (request, reply) => {
         const { file_name, mime_type } = request.body;
@@ -42,39 +45,69 @@ export async function uploadRoutes(app) {
             reply.code(400);
             return { error: 'invalid_mime' };
         }
-        const data = await request.file();
-        if (!data) {
-            reply.code(400);
-            return { error: 'missing_file' };
+        const contentType = String(request.headers['content-type'] ?? '');
+        const isMultipart = contentType.toLowerCase().includes('multipart/form-data');
+        let uploadStream;
+        let uploadMime;
+        let objectName;
+        if (isMultipart) {
+            const data = await request.file();
+            if (!data) {
+                reply.code(400);
+                return { error: 'missing_file' };
+            }
+            if (!data.mimetype.startsWith('video/') && !data.mimetype.startsWith('image/')) {
+                reply.code(400);
+                return { error: 'invalid_mime' };
+            }
+            if (data.mimetype !== mime) {
+                reply.code(400);
+                return { error: 'mime_mismatch' };
+            }
+            uploadStream = data.file;
+            uploadMime = data.mimetype ?? 'application/octet-stream';
+            objectName = `${id}-${sanitizeObjectNameSegment(data.filename || id)}`;
         }
-        if (!data.mimetype.startsWith('video/') && !data.mimetype.startsWith('image/')) {
+        else {
+            const headerMime = contentType.split(';')[0]?.trim() ?? '';
+            if (!headerMime) {
+                reply.code(400);
+                return { error: 'missing_file' };
+            }
+            if (!headerMime.startsWith('video/') && !headerMime.startsWith('image/')) {
+                reply.code(400);
+                return { error: 'invalid_mime' };
+            }
+            if (headerMime !== mime) {
+                reply.code(400);
+                return { error: 'mime_mismatch' };
+            }
+            uploadStream = request.raw;
+            uploadMime = headerMime;
+            objectName = sanitizeObjectNameSegment(id);
+        }
+        if (!uploadMime.startsWith('video/') && !uploadMime.startsWith('image/')) {
             reply.code(400);
             return { error: 'invalid_mime' };
         }
-        if (data.mimetype !== mime) {
-            reply.code(400);
-            return { error: 'mime_mismatch' };
-        }
-        const safeName = path.basename(data.filename).replace(/[^a-zA-Z0-9._-]/g, '_');
-        const objectName = `${id}-${safeName}`;
         const sizeLimit = 200 * 1024 * 1024;
         let total = 0;
         const passthrough = new PassThrough();
-        data.file.on('data', (chunk) => {
+        uploadStream.on('data', (chunk) => {
             total += chunk.length;
             if (total > sizeLimit) {
-                data.file.destroy(new Error('file_too_large'));
+                uploadStream.destroy(new Error('file_too_large'));
             }
         });
         const uploadPromise = uploadToFirebaseStorage({
             objectName,
-            mimeType: data.mimetype ?? 'application/octet-stream',
+            mimeType: uploadMime,
             body: passthrough,
         });
-        data.file.on('error', (error) => {
+        uploadStream.on('error', (error) => {
             passthrough.destroy(error);
         });
-        data.file.pipe(passthrough);
+        uploadStream.pipe(passthrough);
         try {
             await uploadPromise;
         }
@@ -109,7 +142,7 @@ export async function uploadRoutes(app) {
             throw error;
         }
         return {
-            file_url: `/uploads/files/${encodeURIComponent(objectName)}?mime=${encodeURIComponent(data.mimetype ?? 'application/octet-stream')}`
+            file_url: `/uploads/files/${encodeURIComponent(objectName)}?mime=${encodeURIComponent(uploadMime)}`
         };
     });
     app.get('/uploads/files/:file', async (request, reply) => {

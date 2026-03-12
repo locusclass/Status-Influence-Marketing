@@ -191,8 +191,30 @@ async function ensureWalletTables(client: any) {
   `);
 }
 
-async function ensureWalletForUser(client: any, userId: string) {
+async function ensureAccountSchema(client: any) {
+  await ensurePublicIdColumns(client);
+  await ensureWhatsappColumns(client);
+  await ensureUserProfilesTable(client);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'UG'
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS preferred_currency TEXT NOT NULL DEFAULT 'UGX'
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE
+  `);
   await ensureWalletTables(client);
+}
+
+async function ensureWalletForUser(client: any, userId: string) {
   const existing = await client.query(
     `SELECT * FROM wallets WHERE user_id=$1 LIMIT 1`,
     [userId]
@@ -265,6 +287,10 @@ async function refundWalletWithdrawal(
 }
 
 export async function accountRoutes(app: FastifyInstance) {
+  await withTransaction(async (client) => {
+    await ensureAccountSchema(client);
+  });
+
   const parsePaging = (query: any) => {
     const limitRaw = Number(query?.limit ?? 50);
     const offsetRaw = Number(query?.offset ?? 0);
@@ -278,9 +304,6 @@ export async function accountRoutes(app: FastifyInstance) {
   app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
     return withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
-      await ensureWhatsappColumns(client);
-      await ensureUserProfilesTable(client);
       const hasFullName = await usersHasColumn(client, 'full_name');
       const fullNameSelect = hasFullName
         ? 'COALESCE(NULLIF(u.full_name, \'\'), p.full_name, \'\')'
@@ -322,7 +345,6 @@ export async function accountRoutes(app: FastifyInstance) {
       }
       const body = parsed.data;
       return withTransaction(async (client) => {
-        await ensureUserProfilesTable(client);
         await client.query(
           `
           INSERT INTO user_profiles (user_id, full_name, updated_at)
@@ -359,7 +381,6 @@ export async function accountRoutes(app: FastifyInstance) {
       }
       const body = parsed.data;
       return withTransaction(async (client) => {
-        await ensureUserProfilesTable(client);
         await client.query(
           `
           INSERT INTO user_profiles (user_id, avatar_url, updated_at)
@@ -388,7 +409,6 @@ export async function accountRoutes(app: FastifyInstance) {
       }
 
       return withTransaction(async (client) => {
-        await ensureWhatsappColumns(client);
         const userRes = await client.query(
           `SELECT id, phone FROM users WHERE id=$1 LIMIT 1`,
           [userId]
@@ -516,9 +536,7 @@ export async function accountRoutes(app: FastifyInstance) {
       const body = parsed.data;
 
       return withTransaction(async (client) => {
-      await ensureWhatsappColumns(client);
-      await ensurePublicIdColumns(client);
-      await client.query('UPDATE users SET role=$2 WHERE id=$1', [
+        await client.query('UPDATE users SET role=$2 WHERE id=$1', [
           userId,
           body.role,
         ]);
