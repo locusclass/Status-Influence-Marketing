@@ -4,8 +4,7 @@ import { config } from './config.js';
  * Validate DATABASE_URL early so failure is explicit.
  */
 if (!config.databaseUrl) {
-    console.error('FATAL: DATABASE_URL is not defined.');
-    process.exit(1);
+    throw new Error('FATAL_STARTUP_CONFIGURATION: DATABASE_URL is not defined.');
 }
 /**
  * Railway PostgreSQL requires SSL.

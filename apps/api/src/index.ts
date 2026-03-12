@@ -1,6 +1,19 @@
-import { buildServer } from './server.js';
-import { config } from './config.js';
 import 'dotenv/config';
+import { buildServer } from './server.js';
+import { config, getStartupConfigIssues } from './config.js';
+
+const startupIssues = getStartupConfigIssues();
+
+if (startupIssues.length > 0) {
+  const fatalIssues = startupIssues.filter((issue) => !issue.includes('defaulting to 3000'));
+  console.error('STARTUP CONFIG CHECK');
+  for (const issue of startupIssues) {
+    console.error(`- ${issue}`);
+  }
+  if (fatalIssues.length > 0) {
+    process.exit(1);
+  }
+}
 
 const app = buildServer();
 

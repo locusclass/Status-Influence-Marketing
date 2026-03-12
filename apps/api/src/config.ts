@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 
@@ -64,3 +65,41 @@ export const config = {
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET ?? '',
   }
 };
+
+export function getStartupConfigIssues() {
+  const issues: string[] = [];
+
+  if (!config.databaseUrl.trim()) {
+    issues.push('DATABASE_URL is missing');
+  }
+
+  if (!process.env.PORT?.toString().trim()) {
+    issues.push('PORT is not set by the platform, defaulting to 3000');
+  }
+
+  if (!config.jwtSecret.trim() || config.jwtSecret === 'dev-secret') {
+    issues.push('JWT_SECRET is missing or using the development default');
+  }
+
+  if (
+    config.firebase.projectId ||
+    config.firebase.clientEmail ||
+    config.firebase.privateKey ||
+    config.firebase.storageBucket
+  ) {
+    if (!config.firebase.projectId.trim()) {
+      issues.push('FIREBASE_PROJECT_ID is missing');
+    }
+    if (!config.firebase.clientEmail.trim()) {
+      issues.push('FIREBASE_CLIENT_EMAIL is missing');
+    }
+    if (!config.firebase.privateKey.trim()) {
+      issues.push('FIREBASE_PRIVATE_KEY is missing');
+    }
+    if (!config.firebase.storageBucket.trim()) {
+      issues.push('FIREBASE_STORAGE_BUCKET is missing');
+    }
+  }
+
+  return issues;
+}
