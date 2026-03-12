@@ -36,6 +36,11 @@ function objectDownloadUrl(objectName) {
     const name = encodeURIComponent(objectName);
     return `https://storage.googleapis.com/storage/v1/b/${bucket}/o/${name}?alt=media`;
 }
+function objectMetadataUrl(objectName) {
+    const bucket = encodeURIComponent(config.firebase.storageBucket);
+    const name = encodeURIComponent(objectName);
+    return `https://storage.googleapis.com/storage/v1/b/${bucket}/o/${name}`;
+}
 export async function uploadToFirebaseStorage(input) {
     const accessToken = await getAccessToken();
     const response = await fetch(objectUploadUrl(input.objectName), {
@@ -75,4 +80,54 @@ export async function downloadFromFirebaseStorage(input) {
         contentType: response.headers.get('content-type'),
         contentRange: response.headers.get('content-range'),
     };
+}
+export function extractFirebaseObjectNameFromUrl(rawUrl) {
+    const value = rawUrl.trim();
+    if (!value) {
+        return null;
+    }
+    try {
+        const parsed = new URL(value);
+        const marker = '/uploads/files/';
+        const markerIndex = parsed.pathname.indexOf(marker);
+        if (markerIndex >= 0) {
+            const encodedObjectName = parsed.pathname.slice(markerIndex + marker.length);
+            const objectName = decodeURIComponent(encodedObjectName);
+            return /^[a-zA-Z0-9._-]+$/.test(objectName) ? objectName : null;
+        }
+        return null;
+    }
+    catch {
+        const marker = '/uploads/files/';
+        const markerIndex = value.indexOf(marker);
+        if (markerIndex < 0) {
+            return null;
+        }
+        const [rawObjectName = ''] = value
+            .slice(markerIndex + marker.length)
+            .split('?');
+        const encodedObjectName = rawObjectName.trim();
+        if (!encodedObjectName) {
+            return null;
+        }
+        const objectName = decodeURIComponent(encodedObjectName);
+        return /^[a-zA-Z0-9._-]+$/.test(objectName) ? objectName : null;
+    }
+}
+export async function deleteFromFirebaseStorage(objectName) {
+    const accessToken = await getAccessToken();
+    const response = await fetch(objectMetadataUrl(objectName), {
+        method: 'DELETE',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+        },
+    });
+    if (response.status === 404) {
+        return false;
+    }
+    if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`firebase_storage_delete_failed:${response.status}:${detail}`);
+    }
+    return true;
 }

@@ -4,6 +4,7 @@ import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
+import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
@@ -26,6 +27,29 @@ const walletWithdrawSchema = z.object({
     phone: z.string().trim().min(7).max(20).optional(),
 });
 const MIN_WALLET_WITHDRAW_UGX = 10_000;
+function normalizeStringList(values) {
+    return Array.from(new Set(values
+        .map((value) => String(value ?? '').trim())
+        .filter((value) => value.length > 0)));
+}
+async function deleteAccountMedia(urls) {
+    const objectNames = Array.from(new Set(urls
+        .map((url) => extractFirebaseObjectNameFromUrl(url))
+        .filter((value) => Boolean(value))));
+    let deletedCount = 0;
+    for (const objectName of objectNames) {
+        try {
+            const deleted = await deleteFromFirebaseStorage(objectName);
+            if (deleted) {
+                deletedCount += 1;
+            }
+        }
+        catch {
+            // Database deletion is authoritative; media cleanup is best-effort.
+        }
+    }
+    return deletedCount;
+}
 async function ensureUserProfilesTable(client) {
     await client.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -408,24 +432,72 @@ export async function accountRoutes(app) {
     });
     app.delete('/account/me', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
-        return withTransaction(async (client) => {
+        const deletion = await withTransaction(async (client) => {
             await ensureUserProfilesTable(client);
-            const campaignRes = await client.query('SELECT id FROM campaigns WHERE advertiser_id=$1', [userId]);
-            const campaignIds = campaignRes.rows.map((row) => row.id);
+            const rootCampaignRes = await client.query(`
+        SELECT id
+        FROM campaigns
+        WHERE advertiser_id=$1
+        `, [userId]);
+            const rootCampaignIds = normalizeStringList(rootCampaignRes.rows.map((row) => row.id));
+            let ownedCampaignIds = [...rootCampaignIds];
+            if (rootCampaignIds.length > 0) {
+                const ownedCampaignRes = await client.query(`
+          WITH RECURSIVE owned_campaign_tree AS (
+            SELECT id
+            FROM campaigns
+            WHERE id = ANY($1::uuid[])
+            UNION
+            SELECT c.id
+            FROM campaigns c
+            JOIN owned_campaign_tree t ON c.parent_campaign_id = t.id
+          )
+          SELECT id
+          FROM owned_campaign_tree
+          `, [rootCampaignIds]);
+                ownedCampaignIds = normalizeStringList(ownedCampaignRes.rows.map((row) => row.id));
+            }
+            const assignedCampaignRes = await client.query(`
+        SELECT id, parent_campaign_id
+        FROM campaigns
+        WHERE assigned_distributor_id=$1
+        `, [userId]);
+            const assignedChildCampaignIds = normalizeStringList(assignedCampaignRes.rows
+                .filter((row) => row.parent_campaign_id)
+                .map((row) => row.id));
+            const campaignIds = normalizeStringList([
+                ...ownedCampaignIds,
+                ...assignedChildCampaignIds,
+            ]);
             const sessionRes = await client.query(`
         SELECT id
         FROM verification_sessions
         WHERE user_id=$1 OR campaign_id = ANY($2::uuid[])
         `, [userId, campaignIds]);
-            const sessionIds = sessionRes.rows.map((row) => row.id);
+            const sessionIds = normalizeStringList(sessionRes.rows.map((row) => row.id));
             const proofRes = await client.query(`
-        SELECT id
+        SELECT id, video_url
         FROM proofs
         WHERE user_id=$1 OR session_id = ANY($2::uuid[])
         `, [userId, sessionIds]);
-            const proofIds = proofRes.rows.map((row) => row.id);
+            const proofIds = normalizeStringList(proofRes.rows.map((row) => row.id));
             const walletRes = await client.query('SELECT id FROM wallets WHERE user_id=$1', [userId]);
-            const walletIds = walletRes.rows.map((row) => row.id);
+            const walletIds = normalizeStringList(walletRes.rows.map((row) => row.id));
+            const profileMediaRes = await client.query(`
+        SELECT avatar_url
+        FROM user_profiles
+        WHERE user_id=$1
+        `, [userId]);
+            const campaignMediaRes = await client.query(`
+        SELECT media_url
+        FROM campaigns
+        WHERE id = ANY($1::uuid[])
+        `, [campaignIds]);
+            const mediaUrls = normalizeStringList([
+                ...proofRes.rows.map((row) => row.video_url),
+                ...profileMediaRes.rows.map((row) => row.avatar_url),
+                ...campaignMediaRes.rows.map((row) => row.media_url),
+            ]);
             await client.query(`
         DELETE FROM payout_requests
         WHERE user_id=$1 OR proof_id = ANY($2::uuid[])
@@ -440,6 +512,10 @@ export async function accountRoutes(app) {
         DELETE FROM escrow_ledger
         WHERE campaign_id = ANY($1::uuid[])
         `, [campaignIds]);
+            await client.query(`
+        DELETE FROM wallet_withdrawals
+        WHERE user_id=$1 OR wallet_id = ANY($2::uuid[])
+        `, [userId, walletIds]);
             await client.query(`
         DELETE FROM wallet_txns
         WHERE wallet_id = ANY($1::uuid[])
@@ -458,16 +534,33 @@ export async function accountRoutes(app) {
         `, [userId, campaignIds]);
             await client.query(`
         DELETE FROM campaigns
-        WHERE advertiser_id=$1
+        WHERE id = ANY($1::uuid[])
+        `, [campaignIds]);
+            await client.query(`
+        UPDATE campaigns
+        SET assigned_distributor_id = NULL,
+            assigned_phone = NULL
+        WHERE assigned_distributor_id=$1
         `, [userId]);
             await client.query('DELETE FROM trust_events WHERE user_id=$1', [userId]);
             await client.query('DELETE FROM trust_scores WHERE user_id=$1', [userId]);
             await client.query('DELETE FROM device_fingerprints WHERE user_id=$1', [userId]);
             await client.query('DELETE FROM user_profiles WHERE user_id=$1', [userId]);
             await client.query('DELETE FROM wallets WHERE user_id=$1', [userId]);
+            await client.query(`
+        DELETE FROM admin_audit_logs
+        WHERE actor_id=$1 OR target_id=$1
+        `, [userId]);
             await client.query('DELETE FROM users WHERE id=$1', [userId]);
-            return { ok: true, deleted: true };
+            return { mediaUrls };
         });
+        const deletedMediaObjects = await deleteAccountMedia(deletion.mediaUrls);
+        const response = {
+            ok: true,
+            deleted: true,
+            deleted_media_objects: deletedMediaObjects,
+        };
+        return response;
     });
     app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;

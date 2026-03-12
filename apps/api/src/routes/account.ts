@@ -5,6 +5,10 @@ import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
+import {
+  deleteFromFirebaseStorage,
+  extractFirebaseObjectNameFromUrl,
+} from '../services/firebaseStorage.js';
 
 const accountProfileSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -42,6 +46,45 @@ type WalletPayoutPayload = {
   receiverName: string;
   receiverPhone: string;
 };
+
+type DeleteAccountResult = {
+  ok: true;
+  deleted: true;
+  deleted_media_objects: number;
+};
+
+function normalizeStringList(values: unknown[]) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value ?? '').trim())
+        .filter((value) => value.length > 0)
+    )
+  );
+}
+
+async function deleteAccountMedia(urls: string[]) {
+  const objectNames = Array.from(
+    new Set(
+      urls
+        .map((url) => extractFirebaseObjectNameFromUrl(url))
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+
+  let deletedCount = 0;
+  for (const objectName of objectNames) {
+    try {
+      const deleted = await deleteFromFirebaseStorage(objectName);
+      if (deleted) {
+        deletedCount += 1;
+      }
+    } catch {
+      // Database deletion is authoritative; media cleanup is best-effort.
+    }
+  }
+  return deletedCount;
+}
 
 async function ensureUserProfilesTable(client: any) {
   await client.query(`
@@ -531,13 +574,62 @@ export async function accountRoutes(app: FastifyInstance) {
 
   app.delete('/account/me', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
-    return withTransaction(async (client) => {
+    const deletion = await withTransaction(async (client) => {
       await ensureUserProfilesTable(client);
-      const campaignRes = await client.query(
-        'SELECT id FROM campaigns WHERE advertiser_id=$1',
+
+      const rootCampaignRes = await client.query(
+        `
+        SELECT id
+        FROM campaigns
+        WHERE advertiser_id=$1
+        `,
         [userId]
       );
-      const campaignIds = campaignRes.rows.map((row: any) => row.id);
+      const rootCampaignIds = normalizeStringList(
+        rootCampaignRes.rows.map((row: any) => row.id)
+      );
+
+      let ownedCampaignIds = [...rootCampaignIds];
+      if (rootCampaignIds.length > 0) {
+        const ownedCampaignRes = await client.query(
+          `
+          WITH RECURSIVE owned_campaign_tree AS (
+            SELECT id
+            FROM campaigns
+            WHERE id = ANY($1::uuid[])
+            UNION
+            SELECT c.id
+            FROM campaigns c
+            JOIN owned_campaign_tree t ON c.parent_campaign_id = t.id
+          )
+          SELECT id
+          FROM owned_campaign_tree
+          `,
+          [rootCampaignIds]
+        );
+        ownedCampaignIds = normalizeStringList(
+          ownedCampaignRes.rows.map((row: any) => row.id)
+        );
+      }
+
+      const assignedCampaignRes = await client.query(
+        `
+        SELECT id, parent_campaign_id
+        FROM campaigns
+        WHERE assigned_distributor_id=$1
+        `,
+        [userId]
+      );
+      const assignedChildCampaignIds = normalizeStringList(
+        assignedCampaignRes.rows
+          .filter((row: any) => row.parent_campaign_id)
+          .map((row: any) => row.id)
+      );
+
+      const campaignIds = normalizeStringList([
+        ...ownedCampaignIds,
+        ...assignedChildCampaignIds,
+      ]);
 
       const sessionRes = await client.query(
         `
@@ -547,23 +639,53 @@ export async function accountRoutes(app: FastifyInstance) {
         `,
         [userId, campaignIds]
       );
-      const sessionIds = sessionRes.rows.map((row: any) => row.id);
+      const sessionIds = normalizeStringList(
+        sessionRes.rows.map((row: any) => row.id)
+      );
 
       const proofRes = await client.query(
         `
-        SELECT id
+        SELECT id, video_url
         FROM proofs
         WHERE user_id=$1 OR session_id = ANY($2::uuid[])
         `,
         [userId, sessionIds]
       );
-      const proofIds = proofRes.rows.map((row: any) => row.id);
+      const proofIds = normalizeStringList(
+        proofRes.rows.map((row: any) => row.id)
+      );
 
       const walletRes = await client.query(
         'SELECT id FROM wallets WHERE user_id=$1',
         [userId]
       );
-      const walletIds = walletRes.rows.map((row: any) => row.id);
+      const walletIds = normalizeStringList(
+        walletRes.rows.map((row: any) => row.id)
+      );
+
+      const profileMediaRes = await client.query(
+        `
+        SELECT avatar_url
+        FROM user_profiles
+        WHERE user_id=$1
+        `,
+        [userId]
+      );
+
+      const campaignMediaRes = await client.query(
+        `
+        SELECT media_url
+        FROM campaigns
+        WHERE id = ANY($1::uuid[])
+        `,
+        [campaignIds]
+      );
+
+      const mediaUrls = normalizeStringList([
+        ...proofRes.rows.map((row: any) => row.video_url),
+        ...profileMediaRes.rows.map((row: any) => row.avatar_url),
+        ...campaignMediaRes.rows.map((row: any) => row.media_url),
+      ]);
 
       await client.query(
         `
@@ -587,6 +709,13 @@ export async function accountRoutes(app: FastifyInstance) {
         WHERE campaign_id = ANY($1::uuid[])
         `,
         [campaignIds]
+      );
+      await client.query(
+        `
+        DELETE FROM wallet_withdrawals
+        WHERE user_id=$1 OR wallet_id = ANY($2::uuid[])
+        `,
+        [userId, walletIds]
       );
       await client.query(
         `
@@ -619,7 +748,16 @@ export async function accountRoutes(app: FastifyInstance) {
       await client.query(
         `
         DELETE FROM campaigns
-        WHERE advertiser_id=$1
+        WHERE id = ANY($1::uuid[])
+        `,
+        [campaignIds]
+      );
+      await client.query(
+        `
+        UPDATE campaigns
+        SET assigned_distributor_id = NULL,
+            assigned_phone = NULL
+        WHERE assigned_distributor_id=$1
         `,
         [userId]
       );
@@ -628,10 +766,25 @@ export async function accountRoutes(app: FastifyInstance) {
       await client.query('DELETE FROM device_fingerprints WHERE user_id=$1', [userId]);
       await client.query('DELETE FROM user_profiles WHERE user_id=$1', [userId]);
       await client.query('DELETE FROM wallets WHERE user_id=$1', [userId]);
+      await client.query(
+        `
+        DELETE FROM admin_audit_logs
+        WHERE actor_id=$1 OR target_id=$1
+        `,
+        [userId]
+      );
       await client.query('DELETE FROM users WHERE id=$1', [userId]);
 
-      return { ok: true, deleted: true };
+      return { mediaUrls };
     });
+
+    const deletedMediaObjects = await deleteAccountMedia(deletion.mediaUrls);
+    const response: DeleteAccountResult = {
+      ok: true,
+      deleted: true,
+      deleted_media_objects: deletedMediaObjects,
+    };
+    return response;
   });
 
   app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
