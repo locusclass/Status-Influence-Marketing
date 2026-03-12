@@ -8,11 +8,125 @@ import { submitOrder } from '../services/pesapal.js';
 import { v4 as uuid } from 'uuid';
 import { config } from '../config.js';
 
+const PRIVATE_RATE_UGX = 25;
+const OPEN_RATE_UGX = 10;
+const PRIVATE_PLATFORM_FEE_PERCENT = 15;
+const OPEN_PLATFORM_FEE_PERCENT = 25;
+
+function normalizePhone(input: string) {
+  return input.replace(/[^\d+]/g, '').trim();
+}
+
+async function ensureCampaignColumns(client: any) {
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS parent_campaign_id UUID REFERENCES campaigns(id)
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS assigned_distributor_id UUID REFERENCES users(id)
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS assigned_phone TEXT
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'PRIVATE_CONTRACT'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'PUBLIC'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS impression_target INTEGER
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS last_allocated_at TIMESTAMPTZ
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS allocation_round INTEGER NOT NULL DEFAULT 0
+  `);
+}
+
+async function findDistributorByPhone(client: any, rawPhone: string) {
+  const phone = normalizePhone(rawPhone);
+  const res = await client.query(
+    `
+    SELECT
+      u.id,
+      u.phone,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email) AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email
+    FROM users u
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9+]', '', 'g') = $1
+      AND u.role IN ('DISTRIBUTOR', 'ADMIN')
+    LIMIT 1
+    `,
+    [phone]
+  );
+  return res.rows[0] ?? null;
+}
+
+async function getLatestConfirmedViewers(client: any, distributorId: string) {
+  const res = await client.query(
+    `
+    SELECT COALESCE(p.observed_views, 0)::int AS observed_views
+    FROM proofs p
+    WHERE p.user_id=$1
+      AND p.status='VERIFIED'
+      AND p.observed_views IS NOT NULL
+    ORDER BY p.created_at DESC
+    LIMIT 1
+    `,
+    [distributorId]
+  );
+  return Number(res.rows[0]?.observed_views ?? 0);
+}
+
 export async function campaignRoutes(app: FastifyInstance) {
   const campaignRepo = new CampaignRepo();
   const paymentRepo = new PaymentRepo();
   const AcceptContractSchema = z.object({
     campaign_id: z.string().uuid(),
+  });
+  const LookupDistributorSchema = z.object({
+    phone: z.string().trim().min(7).max(20),
+  });
+
+  app.get('/campaigns/distributor-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const role = (request.user as any)?.role as string | undefined;
+    if (role !== 'ADVERTISER' && role !== 'ADMIN') {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+    const parsed = LookupDistributorSchema.safeParse(request.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    const distributor = await withTransaction(async (client) => {
+      await ensureCampaignColumns(client);
+      return findDistributorByPhone(client, parsed.data.phone);
+    });
+    if (!distributor) {
+      reply.code(404);
+      return { error: 'distributor_not_found' };
+    }
+    return { distributor };
   });
 
   app.get('/campaigns', { preHandler: [app.authenticate] }, async (request) => {
@@ -30,53 +144,71 @@ export async function campaignRoutes(app: FastifyInstance) {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
     const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
     const campaigns = await withTransaction(async (client) => {
-      const conditions: string[] = [];
+      await ensureCampaignColumns(client);
       const params: any[] = [];
+      const filters: string[] = [];
       let idx = 1;
 
       if (query.platform) {
-        conditions.push(`platform = $${idx}`);
+        filters.push(`c.platform = $${idx}`);
         params.push(query.platform);
         idx++;
       }
       if (query.status) {
-        conditions.push(`status = $${idx}`);
+        filters.push(`c.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
 
-      conditions.push(
-        `EXISTS (
-           SELECT 1
-           FROM escrow_ledger e
-           WHERE e.campaign_id = campaigns.id
-             AND e.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
-         )`
-      );
-
-      if (role !== 'ADMIN') {
-        conditions.push(`(advertiser_id = $${idx} OR status = 'ACTIVE')`);
+      if (role === 'DISTRIBUTOR') {
+        filters.push(`(
+          (c.parent_campaign_id IS NOT NULL AND c.assigned_distributor_id = $${idx})
+          OR (
+            c.parent_campaign_id IS NULL
+            AND c.execution_mode != 'OPEN_BUDGET'
+            AND c.visibility='PUBLIC'
+          )
+        )`);
+        params.push(authUser ?? '');
+        idx++;
+      } else if (role !== 'ADMIN') {
+        filters.push(`c.advertiser_id = $${idx}`);
         params.push(authUser ?? '');
         idx++;
       }
-      if (role === 'DISTRIBUTOR') {
-        const availableOnly = (query.available_only ?? 'true').toString().toLowerCase();
-        if (availableOnly !== 'false') {
-          conditions.push(
-            `NOT EXISTS (
-               SELECT 1
-               FROM contracts ctr
-               WHERE ctr.campaign_id = campaigns.id
-                 AND ctr.status = 'ACTIVE'
-             )`
-          );
-        }
+
+      const availableOnly = (query.available_only ?? 'true').toString().toLowerCase();
+      if (role === 'DISTRIBUTOR' && availableOnly !== 'false') {
+        filters.push(
+          `NOT EXISTS (
+             SELECT 1
+             FROM contracts ctr
+             WHERE ctr.campaign_id = c.id
+               AND ctr.status = 'ACTIVE'
+           )`
+        );
       }
 
-      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      filters.push(`(c.parent_campaign_id IS NOT NULL OR c.visibility='PUBLIC')`);
+      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT * FROM campaigns ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
-        [...params, limit, offset]
+        `
+        SELECT c.*
+        FROM campaigns c
+        LEFT JOIN campaigns parent ON parent.id = c.parent_campaign_id
+        WHERE c.id IN (
+          SELECT c2.id
+          FROM campaigns c2
+          LEFT JOIN escrow_ledger e
+            ON e.campaign_id = COALESCE(c2.parent_campaign_id, c2.id)
+          WHERE e.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+             OR c2.advertiser_id = $${idx}
+        )
+        ${where ? `AND ${where.replace(/^WHERE /, '')}` : ''}
+        ORDER BY c.created_at DESC
+        LIMIT $${idx + 1} OFFSET $${idx + 2}
+        `,
+        [...params, authUser ?? '', limit, offset]
       );
       return res.rows;
     });
@@ -87,8 +219,17 @@ export async function campaignRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const authUser = (request.user as any)?.sub as string | undefined;
     const campaign = await withTransaction(async (client) => {
+      await ensureCampaignColumns(client);
       const found = await campaignRepo.getCampaign(client, params.id);
       if (!found) return null;
+      if (
+        found.visibility === 'PRIVATE' &&
+        found.assigned_distributor_id &&
+        found.assigned_distributor_id !== authUser &&
+        found.advertiser_id !== authUser
+      ) {
+        return null;
+      }
       const activeContract = await client.query(
         `SELECT *
          FROM contracts
@@ -123,9 +264,15 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const proofs = await withTransaction(async (client) => {
+      await ensureCampaignColumns(client);
       const campaign = await campaignRepo.getCampaign(client, params.id);
       if (!campaign) return { error: 'campaign_not_found' } as any;
       if (campaign.advertiser_id !== authUser) return { error: 'not_campaign_advertiser' } as any;
+      const campaignIdsRes = await client.query(
+        `SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`,
+        [params.id]
+      );
+      const campaignIds = campaignIdsRes.rows.map((row: any) => row.id);
 
       const res = await client.query(
         `SELECT p.id,
@@ -141,9 +288,9 @@ export async function campaignRoutes(app: FastifyInstance) {
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN users u ON u.id = p.user_id
-         WHERE s.campaign_id=$1
+         WHERE s.campaign_id = ANY($1::uuid[])
          ORDER BY p.created_at DESC`,
-        [params.id]
+        [campaignIds]
       );
       return { proofs: res.rows };
     });
@@ -165,28 +312,46 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const summary = await withTransaction(async (client) => {
+      await ensureCampaignColumns(client);
       const campaign = await campaignRepo.getCampaign(client, params.id);
       if (!campaign) return { error: 'campaign_not_found' } as any;
       if (campaign.advertiser_id !== authUser) return { error: 'not_campaign_advertiser' } as any;
+      const campaignIdsRes = await client.query(
+        `SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`,
+        [params.id]
+      );
+      const campaignIds = campaignIdsRes.rows.map((row: any) => row.id);
 
       const totalRes = await client.query(
         `SELECT COUNT(*)::int AS total FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
-         WHERE s.campaign_id=$1`,
-        [params.id]
+         WHERE s.campaign_id = ANY($1::uuid[])`,
+        [campaignIds]
       );
       const latestRes = await client.query(
         `SELECT p.status, p.decision, p.created_at
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
-         WHERE s.campaign_id=$1
+         WHERE s.campaign_id = ANY($1::uuid[])
          ORDER BY p.created_at DESC
          LIMIT 1`,
-        [params.id]
+        [campaignIds]
+      );
+      const completedRes = await client.query(
+        `SELECT
+           COUNT(*)::int AS completed_contracts,
+           COUNT(*) FILTER (WHERE status='COMPLETED')::int AS successful_contracts
+         FROM contracts
+         WHERE campaign_id = ANY($1::uuid[])`,
+        [campaignIds]
       );
       return {
         total: totalRes.rows[0]?.total ?? 0,
         latest: latestRes.rows[0] ?? null,
+        contract_completion_notice: 'Contract completion summary generated from verified screen-recording review results.',
+        completed_contracts: completedRes.rows[0]?.completed_contracts ?? 0,
+        successful_contracts: completedRes.rows[0]?.successful_contracts ?? 0,
+        thanks_note: 'Thank you for advertising with the platform.',
       };
     });
 
@@ -210,14 +375,98 @@ export async function campaignRoutes(app: FastifyInstance) {
       reply.code(403);
       return { error: 'forbidden' };
     }
-    const campaign = await withTransaction(async (client) => {
-      const created = await campaignRepo.createCampaign(client, {
-        ...body,
-        advertiser_id: authUser
+    let campaign;
+    try {
+      campaign = await withTransaction(async (client) => {
+        await ensureCampaignColumns(client);
+        const executionMode = body.execution_mode ?? 'PRIVATE_CONTRACT';
+        const beneficiaryContacts = Array.from(
+          new Set(
+            [
+              ...(body.beneficiary_contacts ?? []),
+              ...(body.counterparty_contact ? [body.counterparty_contact] : []),
+            ]
+              .map((value) => normalizePhone(value))
+              .filter(Boolean)
+          )
+        );
+
+        if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
+          throw new Error('private_beneficiary_required');
+        }
+
+        const platformFeePercent =
+          executionMode === 'OPEN_BUDGET'
+            ? OPEN_PLATFORM_FEE_PERCENT
+            : PRIVATE_PLATFORM_FEE_PERCENT;
+        const visibility = executionMode === 'OPEN_BUDGET' ? 'PUBLIC' : 'PRIVATE';
+        const rootBudget = body.budget_total;
+        const rootPayout =
+          executionMode === 'OPEN_BUDGET' ? OPEN_RATE_UGX : body.payout_amount;
+        const distributableBudget = Math.floor(
+          rootBudget * ((100 - platformFeePercent) / 100)
+        );
+        const impressionTarget =
+          executionMode === 'OPEN_BUDGET'
+            ? Math.max(1, Math.floor(distributableBudget / OPEN_RATE_UGX))
+            : Math.max(1, Math.floor(distributableBudget / PRIVATE_RATE_UGX));
+
+        const root = await campaignRepo.createCampaign(client, {
+          ...body,
+          advertiser_id: authUser,
+          visibility,
+          execution_mode: executionMode,
+          payout_amount: rootPayout,
+          platform_fee_percent: platformFeePercent,
+          advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+          impression_target: body.impression_target ?? impressionTarget,
+        });
+        await paymentRepo.createEscrow(client, root.id, root.budget_total);
+
+        if (executionMode === 'PRIVATE_CONTRACT') {
+          const splitBudget = Math.floor(rootBudget / beneficiaryContacts.length);
+          const splitDistributable = Math.floor(distributableBudget / beneficiaryContacts.length);
+          const splitViews = Math.max(1, Math.floor(splitDistributable / PRIVATE_RATE_UGX));
+          for (const phone of beneficiaryContacts) {
+            const distributor = await findDistributorByPhone(client, phone);
+            if (!distributor) {
+              throw new Error(`beneficiary_not_found:${phone}`);
+            }
+            await campaignRepo.createCampaign(client, {
+              ...body,
+              advertiser_id: authUser,
+              parent_campaign_id: root.id,
+              assigned_distributor_id: distributor.id,
+              assigned_phone: distributor.phone,
+              visibility: 'PRIVATE',
+              execution_mode: 'PRIVATE_CONTRACT',
+              payout_amount: splitBudget,
+              budget_total: splitBudget,
+              platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
+              advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+              impression_target: splitViews,
+            });
+          }
+        }
+
+        return {
+          ...root,
+          beneficiary_count: beneficiaryContacts.length,
+          platform_fee_percent: platformFeePercent,
+          distributable_budget: distributableBudget,
+          estimated_minimum_users: impressionTarget,
+        };
       });
-      await paymentRepo.createEscrow(client, created.id, created.budget_total);
-      return created;
-    });
+    } catch (error: any) {
+      const message = String(error?.message ?? 'campaign_create_failed');
+      reply.code(400);
+      return {
+        error: message.startsWith('beneficiary_not_found')
+          ? 'beneficiary_not_found'
+          : message,
+        detail: message,
+      };
+    }
     return { campaign };
   });
 
@@ -252,6 +501,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         return { error: 'payment_redirect_urls_invalid' } as any;
       }
       const firstName = userEmail.split('@')[0] ?? 'User';
+      await ensureCampaignColumns(client);
       const campaign = await campaignRepo.getCampaign(client, params.id);
       if (!campaign) {
         reply.code(404);
@@ -261,7 +511,8 @@ export async function campaignRoutes(app: FastifyInstance) {
         reply.code(403);
         return { error: 'not_campaign_advertiser' } as any;
       }
-      const escrow = await paymentRepo.getEscrowByCampaign(client, params.id);
+      const escrowOwnerId = campaign.parent_campaign_id ?? params.id;
+      const escrow = await paymentRepo.getEscrowByCampaign(client, escrowOwnerId);
       if (!escrow) {
         reply.code(404);
         return { error: 'escrow_not_found' } as any;
@@ -334,16 +585,25 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const result = await withTransaction(async (client) => {
+      await ensureCampaignColumns(client);
       const campaign = await campaignRepo.getCampaign(client, body.campaign_id);
       if (!campaign) return { error: 'campaign_not_found' } as any;
       if (campaign.status !== 'ACTIVE') return { error: 'campaign_not_active' } as any;
       if (campaign.advertiser_id === authUser) {
         return { error: 'self_contract_forbidden' } as any;
       }
+      if (
+        campaign.visibility === 'PRIVATE' &&
+        campaign.assigned_distributor_id !== authUser &&
+        role !== 'ADMIN'
+      ) {
+        return { error: 'forbidden' } as any;
+      }
 
+      const escrowOwnerId = campaign.parent_campaign_id ?? body.campaign_id;
       const escrowRes = await client.query(
         'SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1',
-        [body.campaign_id]
+        [escrowOwnerId]
       );
       const escrow = escrowRes.rows[0];
       if (!escrow || (escrow.status !== 'FUNDED' && escrow.status !== 'PARTIALLY_DISBURSED')) {
@@ -383,6 +643,11 @@ export async function campaignRoutes(app: FastifyInstance) {
         return { error: 'campaign_already_claimed' } as any;
       }
 
+      const latestConfirmedViewers = await getLatestConfirmedViewers(client, authUser);
+      const allocatedViews =
+        campaign.execution_mode === 'OPEN_BUDGET'
+          ? Math.max(1, latestConfirmedViewers || Math.floor(Number(campaign.impression_target ?? 1) / 10) || 1)
+          : Number(campaign.impression_target ?? 0);
       const contractRes = await client.query(
         `INSERT INTO contracts (
           campaign_id,
@@ -395,8 +660,8 @@ export async function campaignRoutes(app: FastifyInstance) {
           $1,
           $2,
           'ACTIVE',
-          now() + interval '2 minutes',
-          now() + (($3::int * 60 + 2)::text || ' minutes')::interval
+          now() + interval '1 hour',
+          now() + (($3::int * 60 + 60)::text || ' minutes')::interval
         WHERE NOT EXISTS (
           SELECT 1 FROM contracts WHERE campaign_id=$1 AND status='ACTIVE'
         )
@@ -407,8 +672,18 @@ export async function campaignRoutes(app: FastifyInstance) {
         return { error: 'campaign_already_claimed' } as any;
       }
       return {
-        contract: contractRes.rows[0],
-        campaign,
+        contract: {
+          ...contractRes.rows[0],
+          allocated_views: allocatedViews,
+          allocated_value:
+            campaign.execution_mode === 'OPEN_BUDGET'
+              ? allocatedViews * OPEN_RATE_UGX
+              : Number(campaign.payout_amount ?? 0),
+        },
+        campaign: {
+          ...campaign,
+          allocated_views: allocatedViews,
+        },
       };
     });
 

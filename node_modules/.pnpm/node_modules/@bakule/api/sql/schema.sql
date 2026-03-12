@@ -112,10 +112,20 @@ END $$;
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   advertiser_id UUID NOT NULL REFERENCES users(id),
+  parent_campaign_id UUID REFERENCES campaigns(id),
+  assigned_distributor_id UUID REFERENCES users(id),
+  assigned_phone TEXT,
   title TEXT NOT NULL,
   platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'INSTAGRAM', 'X')),
+  execution_mode TEXT NOT NULL DEFAULT 'PRIVATE_CONTRACT' CHECK (execution_mode IN ('PRIVATE_CONTRACT', 'OPEN_BUDGET')),
+  visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK (visibility IN ('PUBLIC', 'PRIVATE')),
   payout_amount INTEGER NOT NULL,
   budget_total INTEGER NOT NULL,
+  impression_target INTEGER,
+  platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
+  advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY',
+  last_allocated_at TIMESTAMPTZ,
+  allocation_round INTEGER NOT NULL DEFAULT 0,
   media_type TEXT NOT NULL CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO')),
   media_text TEXT,
   media_url TEXT,
@@ -129,6 +139,88 @@ CREATE TABLE IF NOT EXISTS campaigns (
 );
 
 DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'parent_campaign_id'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN parent_campaign_id UUID REFERENCES campaigns(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'assigned_distributor_id'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN assigned_distributor_id UUID REFERENCES users(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'assigned_phone'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN assigned_phone TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'execution_mode'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'PRIVATE_CONTRACT'
+      CHECK (execution_mode IN ('PRIVATE_CONTRACT', 'OPEN_BUDGET'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'visibility'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN visibility TEXT NOT NULL DEFAULT 'PUBLIC'
+      CHECK (visibility IN ('PUBLIC', 'PRIVATE'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'impression_target'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN impression_target INTEGER;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'platform_fee_percent'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'advertiser_wallet_mode'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'last_allocated_at'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN last_allocated_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'allocation_round'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN allocation_round INTEGER NOT NULL DEFAULT 0;
+  END IF;
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns

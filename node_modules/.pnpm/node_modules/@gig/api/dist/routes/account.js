@@ -25,6 +25,7 @@ const walletWithdrawSchema = z.object({
     amount: z.number().int().positive(),
     phone: z.string().trim().min(7).max(20).optional(),
 });
+const MIN_WALLET_WITHDRAW_UGX = 10_000;
 async function ensureUserProfilesTable(client) {
     await client.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -470,12 +471,25 @@ export async function accountRoutes(app) {
     });
     app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
+        const role = request.user.role;
         const data = await withTransaction(async (client) => {
             await ensureWalletForUser(client, userId);
             const walletRes = await client.query('SELECT * FROM wallets WHERE user_id=$1', [userId]);
             const wallet = walletRes.rows[0];
             const txnsRes = await client.query(`SELECT * FROM wallet_txns WHERE wallet_id=$1 ORDER BY created_at DESC LIMIT 20`, [wallet?.id]);
-            return { wallet, txns: txnsRes.rows };
+            return {
+                wallet: wallet
+                    ? {
+                        ...wallet,
+                        minimum_withdrawal_amount: MIN_WALLET_WITHDRAW_UGX,
+                        wallet_mode: role === 'ADVERTISER' ? 'CAMPAIGN_ONLY' : 'STANDARD',
+                        wallet_notice: role === 'ADVERTISER'
+                            ? 'Advertiser wallet funds campaigns and receives escrow returns. Withdrawals are allowed from UGX 10,000.'
+                            : 'Distributor wallet supports withdrawals from UGX 10,000.',
+                    }
+                    : wallet,
+                txns: txnsRes.rows,
+            };
         });
         return data;
     });
@@ -502,6 +516,13 @@ export async function accountRoutes(app) {
                 return { error: 'missing_payout_phone' };
             }
             const amount = parsed.data.amount;
+            if (amount < MIN_WALLET_WITHDRAW_UGX) {
+                reply.code(400);
+                return {
+                    error: 'minimum_withdrawal_not_met',
+                    detail: `Minimum withdrawal amount is UGX ${MIN_WALLET_WITHDRAW_UGX}.`,
+                };
+            }
             const lockedWalletRes = await client.query(`SELECT * FROM wallets WHERE id=$1 FOR UPDATE`, [wallet.id]);
             const lockedWallet = lockedWalletRes.rows[0];
             const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);

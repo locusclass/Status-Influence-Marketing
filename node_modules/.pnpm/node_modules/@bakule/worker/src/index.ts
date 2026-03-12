@@ -6,6 +6,7 @@ import { DeterministicVerifier } from './verification/deterministicVerifier.js';
 import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
+import { v4 as uuid } from 'uuid';
 
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier =
@@ -17,6 +18,13 @@ const verifier =
     ? new DeterministicVerifier()
     : new MockVerifier();
 let lastContractExpirySweepAt = 0;
+let lastOpenAllocatorSweepAt = 0;
+
+type EligibleDistributor = {
+  id: string;
+  phone: string;
+  latest_views: number;
+};
 
 if (process.env.NODE_ENV === 'production' && verifierProvider === 'mock') {
   throw new Error('VERIFIER_PROVIDER=mock is not allowed in production');
@@ -57,6 +65,293 @@ async function fetchNextJob() {
     throw err;
   } finally {
     client.release();
+  }
+}
+
+function shuffle<T>(items: T[]): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j] as T, out[i] as T];
+  }
+  return out;
+}
+
+async function ensureCampaignAllocatorColumns(client: any) {
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS parent_campaign_id UUID REFERENCES campaigns(id)
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS assigned_distributor_id UUID REFERENCES users(id)
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS assigned_phone TEXT
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'PRIVATE_CONTRACT'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'PUBLIC'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS impression_target INTEGER
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS last_allocated_at TIMESTAMPTZ
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS allocation_round INTEGER NOT NULL DEFAULT 0
+  `);
+}
+
+async function getEligibleDistributors(client: any): Promise<EligibleDistributor[]> {
+  const res = await client.query(
+    `
+    SELECT
+      u.id,
+      u.phone,
+      COALESCE(lp.observed_views, 0)::int AS latest_views
+    FROM users u
+    LEFT JOIN LATERAL (
+      SELECT p.observed_views
+      FROM proofs p
+      WHERE p.user_id = u.id
+        AND p.status = 'VERIFIED'
+        AND p.observed_views IS NOT NULL
+      ORDER BY p.created_at DESC
+      LIMIT 1
+    ) lp ON TRUE
+    WHERE u.role = 'DISTRIBUTOR'
+      AND u.status = 'ACTIVE'
+      AND COALESCE(lp.observed_views, 0) > 0
+    ORDER BY lp.observed_views DESC, u.created_at ASC
+    `
+  );
+  return res.rows.map((row: any): EligibleDistributor => ({
+    id: row.id,
+    phone: String(row.phone ?? ''),
+    latest_views: Number(row.latest_views ?? 0),
+  }));
+}
+
+async function getOpenRootCampaignsReadyForAllocation(client: any) {
+  const res = await client.query(
+    `
+    SELECT c.*, e.amount_available, e.amount_total, e.status AS escrow_status
+    FROM campaigns c
+    JOIN escrow_ledger e ON e.campaign_id = c.id
+    WHERE c.parent_campaign_id IS NULL
+      AND c.execution_mode = 'OPEN_BUDGET'
+      AND c.status = 'ACTIVE'
+      AND e.status IN ('FUNDED', 'PARTIALLY_DISBURSED')
+    ORDER BY c.created_at ASC
+    `
+  );
+  return res.rows;
+}
+
+async function allocateOpenCampaignShares(client: any, rootCampaign: any) {
+  const eligible: EligibleDistributor[] = shuffle(await getEligibleDistributors(client));
+  if (!eligible.length) {
+    return 0;
+  }
+
+  const existingRes = await client.query(
+    `
+    SELECT COALESCE(SUM(impression_target), 0)::int AS allocated_views
+    FROM campaigns
+    WHERE parent_campaign_id=$1
+      AND status='ACTIVE'
+    `,
+    [rootCampaign.id]
+  );
+  let remainingViews =
+    Number(rootCampaign.impression_target ?? 0) -
+    Number(existingRes.rows[0]?.allocated_views ?? 0);
+  if (remainingViews <= 0) {
+    return 0;
+  }
+
+  let created = 0;
+  let round = Number(rootCampaign.allocation_round ?? 0) + 1;
+  const recentlyAssigned = new Set<string>();
+  while (remainingViews > 0 && eligible.length > 0) {
+    let allocatedThisPass = false;
+    for (const distributor of eligible) {
+      if (remainingViews <= 0) break;
+      if (recentlyAssigned.has(distributor.id) && recentlyAssigned.size < eligible.length) {
+        continue;
+      }
+      const activeRes = await client.query(
+        `
+        SELECT 1
+        FROM campaigns
+        WHERE parent_campaign_id=$1
+          AND assigned_distributor_id=$2
+          AND status='ACTIVE'
+        LIMIT 1
+        `,
+        [rootCampaign.id, distributor.id]
+      );
+      if (activeRes.rows[0]) {
+        continue;
+      }
+
+      const views = Math.max(1, Math.min(distributor.latest_views, remainingViews));
+      const budgetTotal = views * Number(rootCampaign.payout_amount ?? 10);
+      await client.query(
+        `
+        INSERT INTO campaigns (
+          advertiser_id,
+          parent_campaign_id,
+          assigned_distributor_id,
+          assigned_phone,
+          title,
+          platform,
+          execution_mode,
+          visibility,
+          payout_amount,
+          budget_total,
+          impression_target,
+          platform_fee_percent,
+          advertiser_wallet_mode,
+          last_allocated_at,
+          allocation_round,
+          media_type,
+          media_text,
+          media_url,
+          terms_keep_hours,
+          terms_min_views,
+          terms_requirement,
+          status,
+          start_date,
+          end_date
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,'OPEN_BUDGET','PRIVATE',$7,$8,$9,$10,$11,now(),$12,$13,$14,$15,$16,$17,$18,'ACTIVE',$19,$20
+        )
+        `,
+        [
+          rootCampaign.advertiser_id,
+          rootCampaign.id,
+          distributor.id,
+          distributor.phone,
+          `${rootCampaign.title} · Allocation ${uuid().slice(0, 8)}`,
+          rootCampaign.platform,
+          rootCampaign.payout_amount,
+          budgetTotal,
+          views,
+          rootCampaign.platform_fee_percent ?? 25,
+          rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
+          round,
+          rootCampaign.media_type,
+          rootCampaign.media_text,
+          rootCampaign.media_url,
+          rootCampaign.terms_keep_hours,
+          rootCampaign.terms_min_views,
+          rootCampaign.terms_requirement,
+          rootCampaign.start_date,
+          rootCampaign.end_date,
+        ]
+      );
+      remainingViews -= views;
+      created += 1;
+      allocatedThisPass = true;
+      recentlyAssigned.add(distributor.id);
+    }
+    if (!allocatedThisPass) {
+      break;
+    }
+    if (recentlyAssigned.size >= eligible.length) {
+      recentlyAssigned.clear();
+      round += 1;
+    }
+  }
+
+  if (created > 0) {
+    await client.query(
+      `
+      UPDATE campaigns
+      SET last_allocated_at = now(),
+          allocation_round = $2
+      WHERE id=$1
+      `,
+      [rootCampaign.id, round]
+    );
+  }
+  return created;
+}
+
+async function reallocateExpiredOpenAllocations(client: any) {
+  const res = await client.query(
+    `
+    SELECT c.*
+    FROM campaigns c
+    WHERE c.parent_campaign_id IS NOT NULL
+      AND c.execution_mode='OPEN_BUDGET'
+      AND c.status='ACTIVE'
+      AND c.last_allocated_at IS NOT NULL
+      AND c.last_allocated_at < now() - interval '1 hour'
+      AND NOT EXISTS (
+        SELECT 1 FROM contracts ctr
+        WHERE ctr.campaign_id = c.id
+          AND ctr.status IN ('ACTIVE', 'COMPLETED')
+      )
+    ORDER BY c.last_allocated_at ASC
+    `
+  );
+
+  const eligible: EligibleDistributor[] = shuffle(await getEligibleDistributors(client));
+  for (const allocation of res.rows as any[]) {
+    const completedProofRes = await client.query(
+      `
+      SELECT 1
+      FROM proofs p
+      JOIN verification_sessions s ON s.id = p.session_id
+      WHERE s.campaign_id=$1
+        AND p.status='VERIFIED'
+      LIMIT 1
+      `,
+      [allocation.id]
+    );
+    if (completedProofRes.rows[0]) {
+      continue;
+    }
+
+    const nextDistributor = eligible.find(
+      (row: EligibleDistributor) => row.id !== allocation.assigned_distributor_id
+    );
+    if (!nextDistributor) {
+      continue;
+    }
+
+    await client.query(
+      `
+      UPDATE campaigns
+      SET assigned_distributor_id=$2,
+          assigned_phone=$3,
+          last_allocated_at=now(),
+          allocation_round=allocation_round + 1
+      WHERE id=$1
+      `,
+      [allocation.id, nextDistributor.id, nextDistributor.phone]
+    );
   }
 }
 
@@ -197,6 +492,7 @@ function buildReviewReasons(input: {
 }
 
 async function preparePayoutRequest(client: any, proof: any, campaign: any) {
+  const escrowCampaignId = campaign.parent_campaign_id ?? campaign.id;
   const contractRes = await client.query(
     `SELECT id
      FROM contracts
@@ -218,7 +514,7 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
 
   const escrowRes = await client.query(
     'SELECT * FROM escrow_ledger WHERE campaign_id=$1',
-    [campaign.id]
+    [escrowCampaignId]
   );
   const escrow = escrowRes.rows[0];
 
@@ -584,12 +880,33 @@ async function expireOverdueContractsIfDue() {
   });
 }
 
+async function runOpenContractAllocatorIfDue() {
+  const now = Date.now();
+  if (now - lastOpenAllocatorSweepAt < 30_000) return;
+  lastOpenAllocatorSweepAt = now;
+
+  await withTransaction(async (client) => {
+    await ensureCampaignAllocatorColumns(client);
+    await reallocateExpiredOpenAllocations(client);
+    const roots = await getOpenRootCampaignsReadyForAllocation(client);
+    for (const root of roots) {
+      await allocateOpenCampaignShares(client, root);
+    }
+  });
+}
+
 async function loop() {
   while (true) {
     try {
       await expireOverdueContractsIfDue();
     } catch (err) {
       console.error('contract_expiry_sweep_failed', err);
+    }
+
+    try {
+      await runOpenContractAllocatorIfDue();
+    } catch (err) {
+      console.error('open_contract_allocator_failed', err);
     }
 
     const job = await fetchNextJob();
