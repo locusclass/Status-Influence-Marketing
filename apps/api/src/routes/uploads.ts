@@ -138,7 +138,7 @@ export async function uploadRoutes(app: FastifyInstance) {
           mime,
           error: message,
         },
-        'upload:firebase_failed'
+        `upload:firebase_failed ${message || 'unknown'}`
       );
 
       if (error?.message === 'file_too_large') {

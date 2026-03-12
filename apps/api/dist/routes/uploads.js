@@ -119,7 +119,7 @@ export async function uploadRoutes(app) {
                 objectName,
                 mime,
                 error: message,
-            }, 'upload:firebase_failed');
+            }, `upload:firebase_failed ${message || 'unknown'}`);
             if (error?.message === 'file_too_large') {
                 reply.code(413);
                 return { error: 'file_too_large' };
