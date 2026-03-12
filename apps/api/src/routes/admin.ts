@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR'])
@@ -431,12 +432,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(email ILIKE $${idx} OR phone ILIKE $${idx} OR id::text ILIKE $${idx})`);
+        conditions.push(`(email ILIKE $${idx} OR phone ILIKE $${idx} OR id::text ILIKE $${idx} OR public_id ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -583,12 +585,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(title ILIKE $${idx} OR id::text ILIKE $${idx})`);
+        conditions.push(`(title ILIKE $${idx} OR id::text ILIKE $${idx} OR public_id ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }

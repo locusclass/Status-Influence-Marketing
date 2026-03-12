@@ -1,31 +1,36 @@
-﻿import { PoolClient } from 'pg';
+import { PoolClient } from 'pg';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 
 export class CampaignRepo {
-  async createCampaign(client: PoolClient, input: {
-    advertiser_id: string;
-    parent_campaign_id?: string | null;
-    assigned_distributor_id?: string | null;
-    assigned_phone?: string | null;
-    title: string;
-    platform: string;
-    execution_mode?: 'PRIVATE_CONTRACT' | 'OPEN_BUDGET';
-    visibility?: 'PUBLIC' | 'PRIVATE';
-    payout_amount: number;
-    budget_total: number;
-    impression_target?: number | null;
-    platform_fee_percent?: number;
-    advertiser_wallet_mode?: 'CAMPAIGN_ONLY';
-    last_allocated_at?: string | null;
-    allocation_round?: number;
-    media_type: string;
-    media_text?: string;
-    media_url?: string;
-    terms_keep_hours?: number;
-    terms_min_views?: number | null;
-    terms_requirement?: 'DURATION' | 'VIEWS' | 'BOTH';
-    start_date: string;
-    end_date: string;
-  }) {
+  async createCampaign(
+    client: PoolClient,
+    input: {
+      advertiser_id: string;
+      parent_campaign_id?: string | null;
+      assigned_distributor_id?: string | null;
+      assigned_phone?: string | null;
+      title: string;
+      platform: string;
+      execution_mode?: 'PRIVATE_CONTRACT' | 'OPEN_BUDGET';
+      visibility?: 'PUBLIC' | 'PRIVATE';
+      payout_amount: number;
+      budget_total: number;
+      impression_target?: number | null;
+      platform_fee_percent?: number;
+      advertiser_wallet_mode?: 'CAMPAIGN_ONLY';
+      last_allocated_at?: string | null;
+      allocation_round?: number;
+      media_type: string;
+      media_text?: string;
+      media_url?: string;
+      terms_keep_hours?: number;
+      terms_min_views?: number | null;
+      terms_requirement?: 'DURATION' | 'VIEWS' | 'BOTH';
+      start_date: string;
+      end_date: string;
+    }
+  ) {
+    await ensurePublicIdColumns(client);
     const res = await client.query(
       `INSERT INTO campaigns
       (advertiser_id, parent_campaign_id, assigned_distributor_id, assigned_phone, title, platform, execution_mode, visibility, payout_amount, budget_total, impression_target, platform_fee_percent, advertiser_wallet_mode, last_allocated_at, allocation_round, media_type, media_text, media_url, terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date)
@@ -55,14 +60,19 @@ export class CampaignRepo {
         input.terms_requirement ?? 'DURATION',
         'ACTIVE',
         input.start_date,
-        input.end_date
+        input.end_date,
       ]
     );
     return res.rows[0];
   }
 
   async getCampaign(client: PoolClient, campaignId: string) {
-    const res = await client.query('SELECT * FROM campaigns WHERE id=$1', [campaignId]);
+    await ensurePublicIdColumns(client);
+    const identifier = String(campaignId ?? '').trim();
+    const res = await client.query(
+      'SELECT * FROM campaigns WHERE id::text=$1 OR public_id=$1 LIMIT 1',
+      [identifier]
+    );
     return res.rows[0];
   }
 }

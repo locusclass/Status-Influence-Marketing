@@ -5,6 +5,7 @@ import { withTransaction } from '../db.js';
 import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 const registerSchema = z.object({
     full_name: z.string().min(2).max(120),
     email: z.string().email(),
@@ -94,6 +95,7 @@ export async function authRoutes(app) {
         const body = parsed.data;
         const countryData = resolveCountry(body.country);
         const user = await withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
             const existing = await userRepo.findByEmail(client, body.email);
             if (existing) {
                 reply.code(400);
@@ -118,6 +120,7 @@ export async function authRoutes(app) {
             token,
             user: {
                 id: user.id,
+                public_id: user.public_id,
                 full_name: user.full_name ?? '',
                 email: user.email,
                 role: user.role,
@@ -150,6 +153,7 @@ export async function authRoutes(app) {
             token,
             user: {
                 id: user.id,
+                public_id: user.public_id,
                 full_name: user.full_name ?? '',
                 email: user.email,
                 role: user.role,
@@ -198,6 +202,7 @@ export async function authRoutes(app) {
             .trim()
             .slice(0, 1024);
         const user = await withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
             const existing = await userRepo.findByEmail(client, email);
             const typedPhone = body.phone.trim();
             if (existing) {
@@ -237,6 +242,7 @@ export async function authRoutes(app) {
             token,
             user: {
                 id: (refreshedUser ?? user).id,
+                public_id: (refreshedUser ?? user).public_id,
                 full_name: (refreshedUser ?? user).full_name ?? fullName,
                 email: (refreshedUser ?? user).email,
                 role: (refreshedUser ?? user).role,

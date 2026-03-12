@@ -18,8 +18,32 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+CREATE OR REPLACE FUNCTION generate_pronounceable_public_id(prefix TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  consonants TEXT[] := ARRAY[
+    'b','d','f','g','k','l','m','n','p','r','s','t','v','z'
+  ];
+  vowels TEXT[] := ARRAY['a','e','i','o','u'];
+  output TEXT := lower(prefix) || '-';
+  idx INTEGER;
+BEGIN
+  FOR idx IN 1..4 LOOP
+    output := output
+      || consonants[1 + floor(random() * array_length(consonants, 1))::int]
+      || vowels[1 + floor(random() * array_length(vowels, 1))::int];
+  END LOOP;
+
+  output := output || lpad(floor(random() * 100)::int::text, 2, '0');
+  RETURN output;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('usr'),
   full_name TEXT NOT NULL DEFAULT '',
   email TEXT UNIQUE NOT NULL,
   phone TEXT UNIQUE NOT NULL,
@@ -42,6 +66,17 @@ DO $$ BEGIN
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
   ALTER TABLE users
     ADD CONSTRAINT users_status_check CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'public_id'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('usr');
+  END IF;
+  UPDATE users
+  SET public_id = generate_pronounceable_public_id('usr')
+  WHERE public_id IS NULL OR btrim(public_id) = '';
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -111,6 +146,7 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('cmp'),
   advertiser_id UUID NOT NULL REFERENCES users(id),
   parent_campaign_id UUID REFERENCES campaigns(id),
   assigned_distributor_id UUID REFERENCES users(id),
@@ -139,6 +175,17 @@ CREATE TABLE IF NOT EXISTS campaigns (
 );
 
 DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'campaigns' AND column_name = 'public_id'
+  ) THEN
+    ALTER TABLE campaigns
+      ADD COLUMN public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('cmp');
+  END IF;
+  UPDATE campaigns
+  SET public_id = generate_pronounceable_public_id('cmp')
+  WHERE public_id IS NULL OR btrim(public_id) = '';
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -569,8 +616,10 @@ CREATE INDEX IF NOT EXISTS idx_trust_events_user ON trust_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_pesapal_txn_ref ON pesapal_transactions(merchant_reference);
 CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_public_id ON users(public_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_created_at ON campaigns(created_at);
 CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_campaigns_public_id ON campaigns(public_id);
 CREATE INDEX IF NOT EXISTS idx_proofs_created_at ON proofs(created_at);
 CREATE INDEX IF NOT EXISTS idx_proofs_status ON proofs(status);
 CREATE INDEX IF NOT EXISTS idx_payouts_created_at ON payout_requests(created_at);

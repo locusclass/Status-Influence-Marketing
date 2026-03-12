@@ -4,6 +4,7 @@ import { VerificationRepo } from '../repositories/verificationRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from '../utils.js';
 import { config } from '../config.js';
+import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
 const MIN_RECORDING_SECONDS = 58;
@@ -136,7 +137,7 @@ export async function verificationRoutes(app) {
         const body = CreateVerificationSessionSchema.parse(request.body);
         const authUser = request.user?.sub;
         const role = request.user?.role;
-        if (!authUser || authUser !== body.user_id) {
+        if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
@@ -149,7 +150,12 @@ export async function verificationRoutes(app) {
         const script = buildVerificationScript(body.platform);
         const expires_at = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
         const session = await withTransaction(async (client) => {
-            const campaignRes = await client.query('SELECT id, status, platform FROM campaigns WHERE id=$1', [body.campaign_id]);
+            await ensurePublicIdColumns(client);
+            const resolvedUserId = await resolveUserId(client, body.user_id);
+            if (!resolvedUserId || authUser !== resolvedUserId) {
+                return { error: 'unauthorized' };
+            }
+            const campaignRes = await client.query('SELECT id, public_id, status, platform FROM campaigns WHERE id::text=$1 OR public_id=$1 LIMIT 1', [body.campaign_id]);
             const campaign = campaignRes.rows[0];
             if (!campaign)
                 return { error: 'campaign_not_found' };
@@ -176,8 +182,8 @@ export async function verificationRoutes(app) {
                 return { error: 'session_active_exists' };
             }
             return verificationRepo.createSession(client, {
-                user_id: body.user_id,
-                campaign_id: body.campaign_id,
+                user_id: resolvedUserId,
+                campaign_id: campaign.id,
                 platform: body.platform,
                 challenge_code,
                 challenge_phrase,
@@ -187,6 +193,7 @@ export async function verificationRoutes(app) {
         });
         if (session.error) {
             const codeMap = {
+                unauthorized: 401,
                 campaign_not_found: 404,
                 campaign_not_active: 409,
                 platform_mismatch: 400,

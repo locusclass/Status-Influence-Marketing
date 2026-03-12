@@ -2,8 +2,8 @@ import { z } from 'zod';
 export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS', 'TIKTOK', 'INSTAGRAM', 'X']);
 export const MediaTypeSchema = z.enum(['TEXT', 'IMAGE', 'VIDEO']);
 export const CreateVerificationSessionSchema = z.object({
-    user_id: z.string().uuid(),
-    campaign_id: z.string().uuid(),
+    user_id: z.string().trim().min(3),
+    campaign_id: z.string().trim().min(3),
     platform: PlatformAdapterSchema
 });
 export const SubmitProofSchema = z.object({
@@ -51,13 +51,13 @@ export const CreateCampaignSchema = z
     }
 });
 export const FundCampaignSchema = z.object({
-    campaign_id: z.string().uuid(),
+    campaign_id: z.string().trim().min(3),
     amount: z.number().int().positive(),
     return_url: z.string().url(),
     cancel_url: z.string().url()
 });
 export const TrustScoreEventSchema = z.object({
-    user_id: z.string().uuid(),
+    user_id: z.string().trim().min(3),
     event_type: z.enum(['VERIFIED', 'REJECTED', 'MANUAL_REVIEW']),
     delta: z.number().int()
 });

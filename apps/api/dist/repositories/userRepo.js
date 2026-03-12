@@ -1,3 +1,4 @@
+import { ensurePublicIdColumns } from '../services/publicId.js';
 export class UserRepo {
     async getUsersColumns(client) {
         const res = await client.query(`
@@ -14,6 +15,7 @@ export class UserRepo {
         };
     }
     async createUser(client, fullName, email, phone, passwordHash, role, country, currency) {
+        await ensurePublicIdColumns(client);
         const { hasFullName, hasCanMultiContract } = await this.getUsersColumns(client);
         const insertColumns = [
             ...(hasFullName ? ['full_name'] : []),
@@ -42,7 +44,7 @@ export class UserRepo {
         ${insertColumns.join(', ')}
       )
       VALUES (${placeholders})
-      RETURNING id, email, role, phone, country, preferred_currency, ${canMultiReturning}
+      RETURNING id, public_id, email, role, phone, country, preferred_currency, ${canMultiReturning}
       `, values);
         const user = res.rows[0];
         user.full_name = hasFullName ? user.full_name ?? fullName : fullName;
@@ -52,6 +54,7 @@ export class UserRepo {
         return user;
     }
     async findByEmail(client, email) {
+        await ensurePublicIdColumns(client);
         const res = await client.query(`SELECT * FROM users WHERE email=$1`, [email]);
         return res.rows[0];
     }

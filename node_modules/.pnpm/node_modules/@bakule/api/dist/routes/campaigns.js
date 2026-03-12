@@ -6,6 +6,7 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { submitOrder } from '../services/pesapal.js';
 import { v4 as uuid } from 'uuid';
 import { config } from '../config.js';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 const PRIVATE_RATE_UGX = 25;
 const OPEN_RATE_UGX = 10;
 const PRIVATE_PLATFORM_FEE_PERCENT = 15;
@@ -14,6 +15,7 @@ function normalizePhone(input) {
     return input.replace(/[^\d+]/g, '').trim();
 }
 async function ensureCampaignColumns(client) {
+    await ensurePublicIdColumns(client);
     await client.query(`
     ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS parent_campaign_id UUID REFERENCES campaigns(id)
@@ -60,6 +62,7 @@ async function findDistributorByPhone(client, rawPhone) {
     const res = await client.query(`
     SELECT
       u.id,
+      u.public_id,
       u.phone,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email) AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -88,7 +91,7 @@ export async function campaignRoutes(app) {
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();
     const AcceptContractSchema = z.object({
-        campaign_id: z.string().uuid(),
+        campaign_id: z.string().trim().min(3),
     });
     const LookupDistributorSchema = z.object({
         phone: z.string().trim().min(7).max(20),
@@ -201,9 +204,9 @@ export async function campaignRoutes(app) {
             }
             const activeContract = await client.query(`SELECT *
          FROM contracts
-         WHERE campaign_id=$1
+        WHERE campaign_id=$1
            AND status='ACTIVE'
-         ORDER BY created_at DESC`, [params.id]);
+         ORDER BY created_at DESC`, [found.id]);
             const activeContractRow = activeContract.rows[0] ?? null;
             return {
                 ...found,
@@ -233,7 +236,7 @@ export async function campaignRoutes(app) {
                 return { error: 'campaign_not_found' };
             if (campaign.advertiser_id !== authUser)
                 return { error: 'not_campaign_advertiser' };
-            const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [params.id]);
+            const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [campaign.id]);
             const campaignIds = campaignIdsRes.rows.map((row) => row.id);
             const res = await client.query(`SELECT p.id,
                 p.status,
@@ -272,7 +275,7 @@ export async function campaignRoutes(app) {
                 return { error: 'campaign_not_found' };
             if (campaign.advertiser_id !== authUser)
                 return { error: 'not_campaign_advertiser' };
-            const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [params.id]);
+            const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [campaign.id]);
             const campaignIds = campaignIdsRes.rows.map((row) => row.id);
             const totalRes = await client.query(`SELECT COUNT(*)::int AS total FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
@@ -400,7 +403,7 @@ export async function campaignRoutes(app) {
         const params = request.params;
         const body = FundCampaignSchema.parse({ campaign_id: params.id, ...request.body });
         const pesapalCurrency = 'UGX';
-        const { order, pesapalTxn } = await withTransaction(async (client) => {
+        const { order, pesapalTxn, campaign } = await withTransaction(async (client) => {
             if (!config.pesapal.ipnId) {
                 reply.code(503);
                 return { error: 'pesapal_ipn_not_configured' };
@@ -435,7 +438,7 @@ export async function campaignRoutes(app) {
                 reply.code(403);
                 return { error: 'not_campaign_advertiser' };
             }
-            const escrowOwnerId = campaign.parent_campaign_id ?? params.id;
+            const escrowOwnerId = campaign.parent_campaign_id ?? campaign.id;
             const escrow = await paymentRepo.getEscrowByCampaign(client, escrowOwnerId);
             if (!escrow) {
                 reply.code(404);
@@ -464,7 +467,7 @@ export async function campaignRoutes(app) {
                 callback_url: body.return_url,
                 cancellation_url: body.cancel_url
             });
-            return { order, pesapalTxn };
+            return { order, pesapalTxn, campaign };
         });
         const orderAny = order;
         const pesapalError = orderAny?.error ?? orderAny?.errro;
@@ -472,7 +475,7 @@ export async function campaignRoutes(app) {
         if (pesapalError || (status && status !== '200' && status !== 200)) {
             app.log.error({
                 order,
-                campaignId: params.id,
+                campaignId: campaign.public_id ?? campaign.id,
                 amount: body.amount,
                 currency: pesapalCurrency
             }, 'pesapal_submit_order_failed');

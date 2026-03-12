@@ -5,6 +5,7 @@ import { hashPassword, verifyPassword } from '../services/auth.js';
 import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
@@ -206,6 +207,7 @@ export async function accountRoutes(app) {
     app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
         return withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
             await ensureWhatsappColumns(client);
             await ensureUserProfilesTable(client);
             const hasFullName = await usersHasColumn(client, 'full_name');
@@ -215,6 +217,7 @@ export async function accountRoutes(app) {
             const res = await client.query(`
         SELECT
           u.id,
+          u.public_id,
           u.email,
           u.role,
           u.phone,
@@ -384,6 +387,7 @@ export async function accountRoutes(app) {
         const body = parsed.data;
         return withTransaction(async (client) => {
             await ensureWhatsappColumns(client);
+            await ensurePublicIdColumns(client);
             await client.query('UPDATE users SET role=$2 WHERE id=$1', [
                 userId,
                 body.role,
@@ -395,6 +399,7 @@ export async function accountRoutes(app) {
             const res = await client.query(`
           SELECT
             id,
+            public_id,
             email,
             role,
             phone,
@@ -419,6 +424,7 @@ export async function accountRoutes(app) {
                 token,
                 user: {
                     id: user.id,
+                    public_id: user.public_id,
                     email: user.email,
                     role: user.role,
                     phone: user.phone,

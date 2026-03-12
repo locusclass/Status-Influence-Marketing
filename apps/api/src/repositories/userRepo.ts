@@ -1,4 +1,5 @@
 import { PoolClient } from 'pg';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 
 export class UserRepo {
   private async getUsersColumns(client: PoolClient) {
@@ -32,6 +33,7 @@ export class UserRepo {
     country: string,
     currency: string
   ) {
+    await ensurePublicIdColumns(client);
     const { hasFullName, hasCanMultiContract } = await this.getUsersColumns(client);
 
     const insertColumns = [
@@ -65,7 +67,7 @@ export class UserRepo {
         ${insertColumns.join(', ')}
       )
       VALUES (${placeholders})
-      RETURNING id, email, role, phone, country, preferred_currency, ${canMultiReturning}
+      RETURNING id, public_id, email, role, phone, country, preferred_currency, ${canMultiReturning}
       `,
       values
     );
@@ -80,6 +82,7 @@ export class UserRepo {
   }
 
   async findByEmail(client: PoolClient, email: string) {
+    await ensurePublicIdColumns(client);
     const res = await client.query(
       `SELECT * FROM users WHERE email=$1`,
       [email]

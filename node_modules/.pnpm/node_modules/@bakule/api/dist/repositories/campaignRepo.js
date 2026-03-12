@@ -1,5 +1,7 @@
+import { ensurePublicIdColumns } from '../services/publicId.js';
 export class CampaignRepo {
     async createCampaign(client, input) {
+        await ensurePublicIdColumns(client);
         const res = await client.query(`INSERT INTO campaigns
       (advertiser_id, parent_campaign_id, assigned_distributor_id, assigned_phone, title, platform, execution_mode, visibility, payout_amount, budget_total, impression_target, platform_fee_percent, advertiser_wallet_mode, last_allocated_at, allocation_round, media_type, media_text, media_url, terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
@@ -27,12 +29,14 @@ export class CampaignRepo {
             input.terms_requirement ?? 'DURATION',
             'ACTIVE',
             input.start_date,
-            input.end_date
+            input.end_date,
         ]);
         return res.rows[0];
     }
     async getCampaign(client, campaignId) {
-        const res = await client.query('SELECT * FROM campaigns WHERE id=$1', [campaignId]);
+        await ensurePublicIdColumns(client);
+        const identifier = String(campaignId ?? '').trim();
+        const res = await client.query('SELECT * FROM campaigns WHERE id::text=$1 OR public_id=$1 LIMIT 1', [identifier]);
         return res.rows[0];
     }
 }

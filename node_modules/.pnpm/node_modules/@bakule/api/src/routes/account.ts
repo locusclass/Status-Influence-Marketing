@@ -9,6 +9,7 @@ import {
   deleteFromFirebaseStorage,
   extractFirebaseObjectNameFromUrl,
 } from '../services/firebaseStorage.js';
+import { ensurePublicIdColumns } from '../services/publicId.js';
 
 const accountProfileSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -277,6 +278,7 @@ export async function accountRoutes(app: FastifyInstance) {
   app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
     const userId = (request.user as any).sub as string;
     return withTransaction(async (client) => {
+      await ensurePublicIdColumns(client);
       await ensureWhatsappColumns(client);
       await ensureUserProfilesTable(client);
       const hasFullName = await usersHasColumn(client, 'full_name');
@@ -287,6 +289,7 @@ export async function accountRoutes(app: FastifyInstance) {
         `
         SELECT
           u.id,
+          u.public_id,
           u.email,
           u.role,
           u.phone,
@@ -513,8 +516,9 @@ export async function accountRoutes(app: FastifyInstance) {
       const body = parsed.data;
 
       return withTransaction(async (client) => {
-        await ensureWhatsappColumns(client);
-        await client.query('UPDATE users SET role=$2 WHERE id=$1', [
+      await ensureWhatsappColumns(client);
+      await ensurePublicIdColumns(client);
+      await client.query('UPDATE users SET role=$2 WHERE id=$1', [
           userId,
           body.role,
         ]);
@@ -531,6 +535,7 @@ export async function accountRoutes(app: FastifyInstance) {
           `
           SELECT
             id,
+            public_id,
             email,
             role,
             phone,
@@ -559,6 +564,7 @@ export async function accountRoutes(app: FastifyInstance) {
           token,
           user: {
             id: user.id,
+            public_id: user.public_id,
             email: user.email,
             role: user.role,
             phone: user.phone,
