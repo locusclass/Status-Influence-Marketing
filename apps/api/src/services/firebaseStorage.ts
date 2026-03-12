@@ -33,22 +33,42 @@ async function getAccessToken() {
   return token.token;
 }
 
-function objectUploadUrl(objectName: string) {
-  const bucket = encodeURIComponent(config.firebase.storageBucket);
+function getBucketCandidates() {
+  const configured = config.firebase.storageBucket.trim();
+  const candidates = [configured].filter(Boolean);
+
+  if (
+    configured.endsWith('.firebasestorage.app') &&
+    config.firebase.projectId.trim()
+  ) {
+    candidates.push(`${config.firebase.projectId.trim()}.appspot.com`);
+  }
+
+  return candidates.filter(
+    (bucket, index, list) => list.indexOf(bucket) === index
+  );
+}
+
+function objectUploadUrl(bucketName: string, objectName: string) {
+  const bucket = encodeURIComponent(bucketName);
   const name = encodeURIComponent(objectName);
   return `https://storage.googleapis.com/upload/storage/v1/b/${bucket}/o?uploadType=media&name=${name}`;
 }
 
-function objectDownloadUrl(objectName: string) {
-  const bucket = encodeURIComponent(config.firebase.storageBucket);
+function objectDownloadUrl(bucketName: string, objectName: string) {
+  const bucket = encodeURIComponent(bucketName);
   const name = encodeURIComponent(objectName);
   return `https://storage.googleapis.com/storage/v1/b/${bucket}/o/${name}?alt=media`;
 }
 
-function objectMetadataUrl(objectName: string) {
-  const bucket = encodeURIComponent(config.firebase.storageBucket);
+function objectMetadataUrl(bucketName: string, objectName: string) {
+  const bucket = encodeURIComponent(bucketName);
   const name = encodeURIComponent(objectName);
   return `https://storage.googleapis.com/storage/v1/b/${bucket}/o/${name}`;
+}
+
+function isMissingBucket(status: number, detail: string) {
+  return status === 404 && /not found/i.test(detail);
 }
 
 export async function uploadToFirebaseStorage(input: {
@@ -57,20 +77,32 @@ export async function uploadToFirebaseStorage(input: {
   body: Readable;
 }) {
   const accessToken = await getAccessToken();
-  const response = await fetch(objectUploadUrl(input.objectName), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': input.mimeType,
-    },
-    body: input.body as any,
-    duplex: 'half',
-  } as any);
+  const buckets = getBucketCandidates();
+  let lastError = '';
 
-  if (!response.ok) {
+  for (const bucketName of buckets) {
+    const response = await fetch(objectUploadUrl(bucketName, input.objectName), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': input.mimeType,
+      },
+      body: input.body as any,
+      duplex: 'half',
+    } as any);
+
+    if (response.ok) {
+      return;
+    }
+
     const detail = await response.text();
-    throw new Error(`firebase_storage_upload_failed:${response.status}:${detail}`);
+    lastError = `firebase_storage_upload_failed:${response.status}:${bucketName}:${detail}`;
+    if (!isMissingBucket(response.status, detail)) {
+      break;
+    }
   }
+
+  throw new Error(lastError || 'firebase_storage_upload_failed:unknown');
 }
 
 export async function downloadFromFirebaseStorage(input: {
@@ -78,29 +110,43 @@ export async function downloadFromFirebaseStorage(input: {
   range?: string | undefined;
 }) {
   const accessToken = await getAccessToken();
-  const response = await fetch(objectDownloadUrl(input.objectName), {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...(input.range ? { Range: input.range } : {}),
-    },
-  });
+  const buckets = getBucketCandidates();
+  let lastError = '';
 
-  if (response.status === 404) {
-    return null;
-  }
-  if (!response.ok || !response.body) {
-    const detail = await response.text();
-    throw new Error(`firebase_storage_download_failed:${response.status}:${detail}`);
+  for (const bucketName of buckets) {
+    const response = await fetch(objectDownloadUrl(bucketName, input.objectName), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(input.range ? { Range: input.range } : {}),
+      },
+    });
+
+    if (response.status === 404) {
+      continue;
+    }
+    if (!response.ok || !response.body) {
+      const detail = await response.text();
+      lastError = `firebase_storage_download_failed:${response.status}:${bucketName}:${detail}`;
+      if (!isMissingBucket(response.status, detail)) {
+        break;
+      }
+      continue;
+    }
+
+    return {
+      stream: Readable.fromWeb(response.body as any),
+      status: response.status,
+      contentLength: response.headers.get('content-length'),
+      contentType: response.headers.get('content-type'),
+      contentRange: response.headers.get('content-range'),
+    };
   }
 
-  return {
-    stream: Readable.fromWeb(response.body as any),
-    status: response.status,
-    contentLength: response.headers.get('content-length'),
-    contentType: response.headers.get('content-type'),
-    contentRange: response.headers.get('content-range'),
-  };
+  if (lastError) {
+    throw new Error(lastError);
+  }
+  return null;
 }
 
 export function extractFirebaseObjectNameFromUrl(rawUrl: string) {
@@ -139,19 +185,34 @@ export function extractFirebaseObjectNameFromUrl(rawUrl: string) {
 
 export async function deleteFromFirebaseStorage(objectName: string) {
   const accessToken = await getAccessToken();
-  const response = await fetch(objectMetadataUrl(objectName), {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  const buckets = getBucketCandidates();
+  let lastError = '';
 
-  if (response.status === 404) {
-    return false;
+  for (const bucketName of buckets) {
+    const response = await fetch(objectMetadataUrl(bucketName, objectName), {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (response.status === 404) {
+      continue;
+    }
+    if (!response.ok) {
+      const detail = await response.text();
+      lastError = `firebase_storage_delete_failed:${response.status}:${bucketName}:${detail}`;
+      if (!isMissingBucket(response.status, detail)) {
+        break;
+      }
+      continue;
+    }
+
+    return true;
   }
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`firebase_storage_delete_failed:${response.status}:${detail}`);
+
+  if (lastError) {
+    throw new Error(lastError);
   }
-  return true;
+  return false;
 }

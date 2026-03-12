@@ -35,7 +35,7 @@ const UpdateCampaignSchema = z.object({
     budget_total: z.number().int().positive().optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
-    media_type: z.enum(['TEXT', 'IMAGE', 'VIDEO']).optional(),
+    media_type: z.enum(['IMAGE', 'VIDEO']).optional(),
     media_text: z.string().trim().max(2000).nullable().optional(),
     media_url: z.string().url().nullable().optional(),
     terms_keep_hours: z.number().int().positive().max(168).optional(),

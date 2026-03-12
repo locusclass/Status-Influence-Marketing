@@ -1,6 +1,6 @@
 import { z } from 'zod';
 export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
-export declare const MediaTypeSchema: z.ZodEnum<["TEXT", "IMAGE", "VIDEO"]>;
+export declare const MediaTypeSchema: z.ZodEnum<["IMAGE", "VIDEO"]>;
 export declare const CreateVerificationSessionSchema: z.ZodObject<{
     user_id: z.ZodString;
     campaign_id: z.ZodString;
@@ -30,7 +30,7 @@ export declare const SubmitProofSchema: z.ZodObject<{
     device_fingerprint: string;
     client_meta?: Record<string, any> | undefined;
 }>;
-export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
+export declare const CreateCampaignSchema: z.ZodObject<{
     title: z.ZodString;
     platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
     payout_amount: z.ZodNumber;
@@ -41,9 +41,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     start_date: z.ZodString;
     end_date: z.ZodString;
-    media_type: z.ZodEnum<["TEXT", "IMAGE", "VIDEO"]>;
-    media_text: z.ZodOptional<z.ZodString>;
-    media_url: z.ZodOptional<z.ZodString>;
+    media_type: z.ZodEnum<["IMAGE", "VIDEO"]>;
+    media_url: z.ZodString;
     impression_target: z.ZodOptional<z.ZodNumber>;
     platform_fee_percent: z.ZodOptional<z.ZodNumber>;
     advertiser_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
@@ -57,13 +56,12 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "TEXT" | "IMAGE" | "VIDEO";
+    media_type: "IMAGE" | "VIDEO";
+    media_url: string;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
-    media_text?: string | undefined;
-    media_url?: string | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
     advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
@@ -77,53 +75,12 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "TEXT" | "IMAGE" | "VIDEO";
+    media_type: "IMAGE" | "VIDEO";
+    media_url: string;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
-    media_text?: string | undefined;
-    media_url?: string | undefined;
-    impression_target?: number | undefined;
-    platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
-    terms_keep_hours?: number | undefined;
-    terms_min_views?: number | null | undefined;
-    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
-}>, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
-    title: string;
-    payout_amount: number;
-    budget_total: number;
-    start_date: string;
-    end_date: string;
-    media_type: "TEXT" | "IMAGE" | "VIDEO";
-    execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
-    visibility?: "PUBLIC" | "PRIVATE" | undefined;
-    counterparty_contact?: string | undefined;
-    beneficiary_contacts?: string[] | undefined;
-    media_text?: string | undefined;
-    media_url?: string | undefined;
-    impression_target?: number | undefined;
-    platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
-    terms_keep_hours?: number | undefined;
-    terms_min_views?: number | null | undefined;
-    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
-}, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
-    title: string;
-    payout_amount: number;
-    budget_total: number;
-    start_date: string;
-    end_date: string;
-    media_type: "TEXT" | "IMAGE" | "VIDEO";
-    execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
-    visibility?: "PUBLIC" | "PRIVATE" | undefined;
-    counterparty_contact?: string | undefined;
-    beneficiary_contacts?: string[] | undefined;
-    media_text?: string | undefined;
-    media_url?: string | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
     advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;

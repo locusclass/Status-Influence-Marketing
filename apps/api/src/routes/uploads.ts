@@ -90,13 +90,36 @@ export async function uploadRoutes(app: FastifyInstance) {
     try {
       await uploadPromise;
     } catch (error: any) {
+      const message = String(error?.message ?? '');
+      request.log.error(
+        {
+          reqId: request.id,
+          uploadId: id,
+          objectName,
+          mime,
+          error: message,
+        },
+        'upload:firebase_failed'
+      );
+
       if (error?.message === 'file_too_large') {
         reply.code(413);
         return { error: 'file_too_large' };
       }
-      if (String(error?.message ?? '').includes('firebase_storage_not_configured')) {
+      if (message.includes('firebase_storage_not_configured')) {
         reply.code(503);
         return { error: 'firebase_storage_not_configured' };
+      }
+      if (message.includes('firebase_access_token_unavailable')) {
+        reply.code(503);
+        return { error: 'firebase_access_token_unavailable' };
+      }
+      if (message.includes('firebase_storage_upload_failed')) {
+        reply.code(502);
+        return {
+          error: 'firebase_storage_upload_failed',
+          detail: message,
+        };
       }
       throw error;
     }

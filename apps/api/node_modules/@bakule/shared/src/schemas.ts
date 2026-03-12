@@ -1,7 +1,7 @@
-﻿import { z } from 'zod';
+import { z } from 'zod';
 
 export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS', 'TIKTOK', 'INSTAGRAM', 'X']);
-export const MediaTypeSchema = z.enum(['TEXT', 'IMAGE', 'VIDEO']);
+export const MediaTypeSchema = z.enum(['IMAGE', 'VIDEO']);
 
 export const CreateVerificationSessionSchema = z.object({
   user_id: z.string().trim().min(3),
@@ -29,30 +29,13 @@ export const CreateCampaignSchema = z
     start_date: z.string(),
     end_date: z.string(),
     media_type: MediaTypeSchema,
-    media_text: z.string().trim().max(2000).optional(),
-    media_url: z.string().url().optional(),
+    media_url: z.string().url(),
     impression_target: z.number().int().min(1).optional(),
     platform_fee_percent: z.number().min(0).max(100).optional(),
     advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
     terms_keep_hours: z.number().int().min(1).max(168).optional(),
     terms_min_views: z.number().int().min(1).optional().nullable(),
     terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional()
-  })
-  .superRefine((value, ctx) => {
-    if (value.media_type === 'TEXT' && !value.media_text) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'media_text is required for TEXT media.',
-        path: ['media_text']
-      });
-    }
-    if (value.media_type !== 'TEXT' && !value.media_url) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'media_url is required for IMAGE or VIDEO media.',
-        path: ['media_url']
-      });
-    }
   });
 
 export const FundCampaignSchema = z.object({
