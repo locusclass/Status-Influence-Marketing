@@ -26,10 +26,24 @@ export function buildServer() {
     }
   });
 
-  const allowedOrigins =
-    config.corsOrigin === '*'
-      ? ['*']
-      : config.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
+  const defaultAllowedOrigins = [
+    'https://primestatus.site',
+    'https://*.primestatus.site',
+    'https://prime-status-1f0ad.firebaseapp.com',
+    'https://prime-status-1f0ad.web.app',
+    'http://localhost:*',
+    'http://127.0.0.1:*',
+  ];
+
+  const configuredOrigins = config.corsOrigin
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  const allowedOrigins = [
+    ...configuredOrigins,
+    ...defaultAllowedOrigins,
+  ].filter((origin, index, list) => list.indexOf(origin) === index);
 
   const isOriginAllowed = (origin?: string) => {
     if (!origin) return true;
@@ -203,3 +217,4 @@ export function buildServer() {
 
   return app;
 }
+

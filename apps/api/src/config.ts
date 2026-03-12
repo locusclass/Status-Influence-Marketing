@@ -32,7 +32,7 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   jwtSecret: process.env.JWT_SECRET ?? 'dev-secret',
-  corsOrigin: process.env.CORS_ORIGIN ?? '*',
+  corsOrigin: process.env.CORS_ORIGIN ?? '',
   apiBaseUrl: process.env.API_BASE_URL ?? '',
   uploadDir: resolveUploadDir(),
   uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
@@ -103,3 +103,4 @@ export function getStartupConfigIssues() {
 
   return issues;
 }
+
