@@ -102,6 +102,50 @@ async function getLatestConfirmedViewers(client, distributorId) {
     `, [distributorId]);
     return Number(res.rows[0]?.observed_views ?? 0);
 }
+async function getContractCompletionReadiness(client, contractId, userId) {
+    const contractRes = await client.query(`
+    SELECT
+      ctr.*,
+      c.platform,
+      COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id
+    FROM contracts ctr
+    JOIN campaigns c ON c.id = ctr.campaign_id
+    WHERE ctr.id=$1
+    LIMIT 1
+    `, [contractId]);
+    const contract = contractRes.rows[0];
+    if (!contract)
+        return { error: 'contract_not_found' };
+    if (contract.distributor_id !== userId)
+        return { error: 'forbidden' };
+    if (contract.status !== 'ACTIVE')
+        return { error: 'contract_not_active' };
+    const escrowRes = await client.query(`
+    SELECT status
+    FROM escrow_ledger
+    WHERE campaign_id=$1
+    LIMIT 1
+    `, [contract.escrow_campaign_id]);
+    const escrow = escrowRes.rows[0];
+    if (!escrow || !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(String(escrow.status))) {
+        return { error: 'campaign_not_funded' };
+    }
+    const proofRes = await client.query(`
+    SELECT p.id
+    FROM proofs p
+    JOIN verification_sessions s ON s.id = p.session_id
+    WHERE s.campaign_id=$1
+      AND p.user_id=$2
+      AND p.status='VERIFIED'
+      AND p.decision='VERIFIED'
+    ORDER BY p.created_at DESC
+    LIMIT 1
+    `, [contract.campaign_id, userId]);
+    if (!proofRes.rows[0]) {
+        return { error: 'verified_proof_required' };
+    }
+    return { contract };
+}
 export async function campaignRoutes(app) {
     await withTransaction(async (client) => {
         await ensureCampaignColumns(client);
@@ -646,21 +690,16 @@ export async function campaignRoutes(app) {
             return { error: 'unauthorized' };
         }
         const result = await withTransaction(async (client) => {
-            const contractRes = await client.query(`SELECT ctr.*, c.platform
-         FROM contracts ctr
-         JOIN campaigns c ON c.id = ctr.campaign_id
-         WHERE ctr.id=$1`, [params.id]);
-            const contract = contractRes.rows[0];
-            if (!contract)
-                return null;
-            if (contract.distributor_id !== authUser)
-                return { error: 'forbidden' };
-            if (contract.status !== 'ACTIVE')
-                return { error: 'contract_not_active' };
+            const readiness = await getContractCompletionReadiness(client, params.id, authUser);
+            if ('error' in readiness)
+                return readiness;
+            const contract = readiness.contract;
             const updated = await client.query(`UPDATE contracts
          SET status='COMPLETED', completed_at=now()
-         WHERE id=$1
+         WHERE id=$1 AND status='ACTIVE'
          RETURNING *`, [params.id]);
+            if (!updated.rows[0])
+                return { error: 'contract_not_active' };
             return { contract: updated.rows[0], campaign_platform: contract.platform, campaign_id: contract.campaign_id };
         });
         if (!result) {
@@ -668,7 +707,15 @@ export async function campaignRoutes(app) {
             return { error: 'contract_not_found' };
         }
         if (result.error) {
-            reply.code(result.error === 'forbidden' ? 403 : 400);
+            const error = result.error;
+            const code = error === 'forbidden'
+                ? 403
+                : error === 'contract_not_found'
+                    ? 404
+                    : error === 'campaign_not_funded' || error === 'verified_proof_required'
+                        ? 409
+                        : 400;
+            reply.code(code);
             return result;
         }
         return result;

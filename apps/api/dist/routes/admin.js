@@ -71,6 +71,40 @@ const AuditQuerySchema = z.object({
     limit: z.string().optional(),
     offset: z.string().optional()
 });
+async function markContractCompletedForVerifiedProof(client, proofId) {
+    const proofContextRes = await client.query(`
+    SELECT
+      p.id,
+      p.user_id,
+      p.status,
+      p.decision,
+      s.campaign_id,
+      COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id
+    FROM proofs p
+    JOIN verification_sessions s ON s.id = p.session_id
+    JOIN campaigns c ON c.id = s.campaign_id
+    WHERE p.id=$1
+    LIMIT 1
+    `, [proofId]);
+    const proofContext = proofContextRes.rows[0];
+    if (!proofContext)
+        return;
+    if (proofContext.status !== 'VERIFIED' || proofContext.decision !== 'VERIFIED')
+        return;
+    const escrowRes = await client.query(`SELECT status FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1`, [proofContext.escrow_campaign_id]);
+    const escrow = escrowRes.rows[0];
+    if (!escrow || !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(String(escrow.status))) {
+        return;
+    }
+    await client.query(`
+    UPDATE contracts
+    SET status='COMPLETED',
+        completed_at=COALESCE(completed_at, now())
+    WHERE campaign_id=$1
+      AND distributor_id=$2
+      AND status='ACTIVE'
+    `, [proofContext.campaign_id, proofContext.user_id]);
+}
 function parsePaging(query) {
     const limitRaw = Number(query?.limit ?? 50);
     const offsetRaw = Number(query?.offset ?? 0);
@@ -656,6 +690,7 @@ export async function adminRoutes(app) {
                 await logAudit(client, request.user.sub, 'UPDATE_PROOF', 'proof', params.id, body);
                 const proof = updated.rows[0];
                 if (proof.status === 'VERIFIED' && proof.decision === 'VERIFIED') {
+                    await markContractCompletedForVerifiedProof(client, proof.id);
                     await jobRepo.enqueue(client, 'PAYOUT_PROOF', { proof_id: proof.id });
                 }
             }
