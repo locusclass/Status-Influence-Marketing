@@ -14,6 +14,71 @@ const OPEN_PLATFORM_FEE_PERCENT = 25;
 function normalizePhone(input) {
     return input.replace(/[^\d+]/g, '').trim();
 }
+function normalizeUrlOrigin(value) {
+    if (!value)
+        return null;
+    try {
+        return new URL(value).origin;
+    }
+    catch {
+        return null;
+    }
+}
+function getForwardedHeader(value) {
+    if (Array.isArray(value)) {
+        return value[0]?.trim() || undefined;
+    }
+    return value?.split(',')[0]?.trim() || undefined;
+}
+function getRequestBaseUrl(request) {
+    const explicit = config.apiBaseUrl.trim();
+    if (explicit) {
+        try {
+            return new URL(explicit).origin;
+        }
+        catch {
+            // Ignore invalid configuration and fall through to request headers.
+        }
+    }
+    const forwardedProto = getForwardedHeader(request.headers['x-forwarded-proto']);
+    const forwardedHost = getForwardedHeader(request.headers['x-forwarded-host']);
+    const host = forwardedHost || getForwardedHeader(request.headers.host);
+    if (!host)
+        return null;
+    const protocol = forwardedProto || request.protocol || 'https';
+    return `${protocol}://${host}`;
+}
+function getBrowserOrigin(request) {
+    const origin = normalizeUrlOrigin(getForwardedHeader(request.headers.origin));
+    if (origin)
+        return origin;
+    const referer = getForwardedHeader(request.headers.referer) ?? getForwardedHeader(request.headers.referrer);
+    return normalizeUrlOrigin(referer);
+}
+function resolveWebRedirectUrl(rawUrl, browserOrigin, fallbackPath) {
+    const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+    if (value) {
+        try {
+            return new URL(value, browserOrigin ?? undefined).toString();
+        }
+        catch {
+            return null;
+        }
+    }
+    if (!browserOrigin)
+        return null;
+    return new URL(fallbackPath, browserOrigin).toString();
+}
+function buildPaymentCallbackUrl(request, routePath, targetUrl) {
+    const baseUrl = getRequestBaseUrl(request);
+    if (!baseUrl)
+        return null;
+    const url = new URL(routePath, `${baseUrl}/`);
+    if (targetUrl) {
+        url.searchParams.set('target', targetUrl);
+    }
+    return url.toString();
+}
 async function ensureCampaignColumns(client) {
     await ensurePublicIdColumns(client);
     await client.query(`
@@ -459,6 +524,11 @@ export async function campaignRoutes(app) {
         const params = request.params;
         const body = FundCampaignSchema.parse({ campaign_id: params.id, ...request.body });
         const pesapalCurrency = 'UGX';
+        const browserOrigin = getBrowserOrigin(request);
+        const webReturnUrl = resolveWebRedirectUrl(body.return_url, browserOrigin, '/payment/success');
+        const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
+        const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
+        const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
         const { order, pesapalTxn, campaign } = await withTransaction(async (client) => {
             if (!config.pesapal.ipnId) {
                 reply.code(503);
@@ -474,12 +544,11 @@ export async function campaignRoutes(app) {
                 reply.code(400);
                 return { error: 'user_email_missing' };
             }
-            if (!body.return_url || !body.cancel_url) {
+            if (!callbackUrl || !cancellationUrl) {
                 reply.code(400);
                 return { error: 'payment_redirect_urls_missing' };
             }
-            const isValidUrl = (url) => /^https?:\/\//i.test(url);
-            if (!isValidUrl(body.return_url) || !isValidUrl(body.cancel_url)) {
+            if ((body.return_url && !webReturnUrl) || (body.cancel_url && !webCancelUrl)) {
                 reply.code(400);
                 return { error: 'payment_redirect_urls_invalid' };
             }
@@ -519,8 +588,8 @@ export async function campaignRoutes(app) {
                 lastName: 'User',
                 email: userEmail,
                 currency: pesapalCurrency,
-                callback_url: body.return_url,
-                cancellation_url: body.cancel_url
+                callback_url: callbackUrl,
+                cancellation_url: cancellationUrl
             });
             return { order, pesapalTxn, campaign };
         });

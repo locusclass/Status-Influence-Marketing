@@ -50,6 +50,30 @@ export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
     const deepLinkReturn = 'bakule://payment/return';
     const deepLinkCancel = 'bakule://payment/cancel';
+    const resolveBrowserTarget = (request, fallbackPath) => {
+        const queryTarget = request.query?.target;
+        if (typeof queryTarget === 'string' && queryTarget.trim()) {
+            try {
+                const target = new URL(queryTarget.trim());
+                if (target.protocol === 'http:' || target.protocol === 'https:') {
+                    return target.toString();
+                }
+            }
+            catch {
+                // Ignore invalid targets and fall back below.
+            }
+        }
+        const referer = request.headers.referer ?? request.headers.referrer;
+        if (typeof referer === 'string' && referer.trim()) {
+            try {
+                return new URL(fallbackPath, referer).toString();
+            }
+            catch {
+                // Ignore invalid referers and use the deep link fallback.
+            }
+        }
+        return null;
+    };
     const ipnInfo = async () => {
         return {
             ok: true,
@@ -121,11 +145,11 @@ export async function paymentRoutes(app) {
     };
     app.get('/payments/pesapal/ipn', ipnInfo);
     app.post('/payments/pesapal/ipn', handleIpn);
-    app.get('/payments/return', async (_request, reply) => {
-        reply.redirect(deepLinkReturn);
+    app.get('/payments/return', async (request, reply) => {
+        reply.redirect(resolveBrowserTarget(request, '/payment/success') ?? deepLinkReturn);
     });
-    app.get('/payments/cancel', async (_request, reply) => {
-        reply.redirect(deepLinkCancel);
+    app.get('/payments/cancel', async (request, reply) => {
+        reply.redirect(resolveBrowserTarget(request, '/payment/cancel') ?? deepLinkCancel);
     });
     app.post('/payments/pesapal/payout-webhook', async (request, reply) => {
         const signature = request.headers['x-pesapal-signature'];

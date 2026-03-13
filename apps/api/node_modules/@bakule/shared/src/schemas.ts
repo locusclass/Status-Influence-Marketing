@@ -41,8 +41,8 @@ export const CreateCampaignSchema = z
 export const FundCampaignSchema = z.object({
   campaign_id: z.string().trim().min(3),
   amount: z.number().int().positive(),
-  return_url: z.string().url(),
-  cancel_url: z.string().url()
+  return_url: z.string().trim().min(1).optional(),
+  cancel_url: z.string().trim().min(1).optional()
 });
 
 export const TrustScoreEventSchema = z.object({
