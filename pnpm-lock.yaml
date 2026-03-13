@@ -14,7 +14,7 @@ importers:
 
   apps/api:
     dependencies:
-      '@bakule/shared':
+      '@prime/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@fastify/cors':
@@ -102,7 +102,7 @@ importers:
 
   apps/worker:
     dependencies:
-      '@bakule/shared':
+      '@prime/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       pg:

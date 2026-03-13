@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { CreateCampaignSchema, FundCampaignSchema } from '@bakule/shared';
+import { CreateCampaignSchema, FundCampaignSchema } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';

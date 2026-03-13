@@ -1,18 +1,18 @@
 import { z } from 'zod';
-export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
+export declare const PlatformAdapterSchema: z.ZodLiteral<"WHATSAPP_STATUS">;
 export declare const MediaTypeSchema: z.ZodEnum<["IMAGE", "VIDEO"]>;
 export declare const CreateVerificationSessionSchema: z.ZodObject<{
     user_id: z.ZodString;
     campaign_id: z.ZodString;
-    platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
+    platform: z.ZodLiteral<"WHATSAPP_STATUS">;
 }, "strip", z.ZodTypeAny, {
     user_id: string;
     campaign_id: string;
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
+    platform: "WHATSAPP_STATUS";
 }, {
     user_id: string;
     campaign_id: string;
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
+    platform: "WHATSAPP_STATUS";
 }>;
 export declare const SubmitProofSchema: z.ZodObject<{
     session_id: z.ZodString;
@@ -32,7 +32,7 @@ export declare const SubmitProofSchema: z.ZodObject<{
 }>;
 export declare const CreateCampaignSchema: z.ZodObject<{
     title: z.ZodString;
-    platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "INSTAGRAM", "X"]>;
+    platform: z.ZodLiteral<"WHATSAPP_STATUS">;
     payout_amount: z.ZodNumber;
     budget_total: z.ZodNumber;
     execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT", "OPEN_BUDGET"]>>;
@@ -50,7 +50,7 @@ export declare const CreateCampaignSchema: z.ZodObject<{
     terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
     terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
 }, "strip", z.ZodTypeAny, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
+    platform: "WHATSAPP_STATUS";
     title: string;
     payout_amount: number;
     budget_total: number;
@@ -69,7 +69,7 @@ export declare const CreateCampaignSchema: z.ZodObject<{
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "INSTAGRAM" | "X";
+    platform: "WHATSAPP_STATUS";
     title: string;
     payout_amount: number;
     budget_total: number;

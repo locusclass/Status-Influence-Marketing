@@ -50,7 +50,7 @@ const UpdateEscrowSchema = z.object({
 
 const UpdateCampaignSchema = z.object({
   title: z.string().min(3).max(120).optional(),
-  platform: z.enum(['WHATSAPP_STATUS', 'TIKTOK', 'INSTAGRAM', 'X']).optional(),
+  platform: z.literal('WHATSAPP_STATUS').optional(),
   payout_amount: z.number().int().positive().optional(),
   budget_total: z.number().int().positive().optional(),
   start_date: z.string().optional(),

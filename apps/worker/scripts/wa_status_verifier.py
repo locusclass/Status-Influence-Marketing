@@ -8,6 +8,7 @@ Single-file WhatsApp Status "Viewed by" verification bot.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -51,6 +52,20 @@ def safe_float(x: Any, default: float = 0.0) -> float:
 
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+
+def safe_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)).strip())
+    except Exception:
+        return default
+
+
+def safe_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)).strip())
+    except Exception:
+        return default
 
 
 def json_dumps(obj: Any) -> str:
@@ -253,6 +268,17 @@ def _roi(img: np.ndarray, x0: float, y0: float, x1: float, y1: float) -> np.ndar
     return img[ya:yb, xa:xb].copy()
 
 
+def normalize_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def frame_fingerprint(frame_bgr: np.ndarray) -> str:
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    tiny = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
+    digest = hashlib.sha256(tiny.tobytes()).hexdigest()
+    return digest
+
+
 def detect_whatsapp_status_viewer_screen(frame_bgr: np.ndarray) -> Tuple[float, Dict[str, Any]]:
     details: Dict[str, Any] = {}
     h, w = frame_bgr.shape[:2]
@@ -303,6 +329,71 @@ def detect_whatsapp_status_viewer_screen(frame_bgr: np.ndarray) -> Tuple[float, 
         score += 0.15 * clamp01((list_edge_density - header_edge_density) * 6.0)
     score += 0.30 * clamp01(peak_count / 18.0)
     return clamp01(score), details
+
+
+def detect_challenge(
+    frames: List[SampledFrame],
+    challenge_code: str,
+    challenge_phrase: str,
+    ui_scores: List[float],
+) -> Tuple[bool, float, Dict[str, Any]]:
+    normalized_code = normalize_text(challenge_code)
+    normalized_phrase = normalize_text(challenge_phrase)
+    details: Dict[str, Any] = {
+        "challenge_code": challenge_code,
+        "challenge_phrase": challenge_phrase,
+        "matches": [],
+    }
+    if not normalized_code or not normalized_phrase:
+        details["reason"] = "challenge_missing"
+        return False, 0.0, details
+
+    if not frames:
+        details["reason"] = "no_frames"
+        return False, 0.0, details
+
+    frame_indexes = list(range(max(0, len(frames) - 12), len(frames)))
+    best_score = 0.0
+    code_found = False
+    phrase_found = False
+
+    for index in frame_indexes:
+        frame = frames[index]
+        full_text, full_conf = ocr_text(frame.frame_bgr, psm=6, digits_only=False)
+        normalized = normalize_text(full_text)
+        current_code_found = bool(normalized_code and normalized_code in normalized)
+        current_phrase_found = bool(normalized_phrase and normalized_phrase in normalized)
+        code_found = code_found or current_code_found
+        phrase_found = phrase_found or current_phrase_found
+
+        score = 0.0
+        if current_code_found:
+            score += 0.45
+        if current_phrase_found:
+            score += 0.45
+        score += 0.10 * clamp01(full_conf)
+        score += 0.05 * clamp01(ui_scores[index] if index < len(ui_scores) else 0.0)
+        best_score = max(best_score, score)
+
+        if current_code_found or current_phrase_found:
+            details["matches"].append(
+                {
+                    "frame_index": index,
+                    "t_s": round(frame.t_s, 2),
+                    "code_found": current_code_found,
+                    "phrase_found": current_phrase_found,
+                    "ocr_confidence": round(full_conf, 4),
+                    "text_excerpt": full_text[:160],
+                }
+            )
+
+    min_score = safe_float_env("WA_VERIFIER_CHALLENGE_MIN_SCORE", 0.75)
+    passed = code_found and phrase_found and best_score >= min_score
+    details["code_found"] = code_found
+    details["phrase_found"] = phrase_found
+    details["best_score"] = round(best_score, 4)
+    details["min_score"] = round(min_score, 4)
+    return passed, clamp01(best_score), details
 
 
 def compute_viewer_count_roi(frame_bgr: np.ndarray) -> np.ndarray:
@@ -494,22 +585,28 @@ def compute_scores(
     ui_auth: float,
     viewer_conf: float,
     liveness_score: float,
+    challenge_score: float,
     tamper_risk: float,
     ui_detected: bool,
     viewer_count_present: bool,
     scroll_passed: bool,
+    challenge_detected: bool,
 ) -> Tuple[Dict[str, float], str]:
     ui = clamp01(ui_auth)
     vc = clamp01(viewer_conf)
     lv = clamp01(liveness_score)
+    ch = clamp01(challenge_score)
     tr = clamp01(tamper_risk)
-    final = clamp01(0.40 * ui + 0.30 * vc + 0.20 * lv - 0.10 * tr)
+    final = clamp01(0.30 * ui + 0.25 * vc + 0.15 * lv + 0.20 * ch - 0.10 * tr)
 
-    if not ui_detected:
+    verified_threshold = safe_float_env("WA_VERIFIER_VERIFIED_THRESHOLD", 0.85)
+    probable_threshold = safe_float_env("WA_VERIFIER_PROBABLE_THRESHOLD", 0.70)
+
+    if not ui_detected or not challenge_detected:
         verdict = "REJECTED"
-    elif final >= 0.85 and viewer_count_present and scroll_passed:
+    elif final >= verified_threshold and viewer_count_present and scroll_passed:
         verdict = "VERIFIED"
-    elif final >= 0.70:
+    elif final >= probable_threshold:
         verdict = "PROBABLE"
     else:
         verdict = "REJECTED"
@@ -518,14 +615,29 @@ def compute_scores(
         "ui_authenticity": ui,
         "viewer_count": vc,
         "liveness": lv,
+        "challenge": ch,
         "tamper_risk": tr,
         "final": final,
     }
     return scores, verdict
 
 
-def verify_video(video_path: str, fps: float = 2.0, max_seconds: float = 60.0) -> Dict[str, Any]:
+def verify_video(
+    video_path: str,
+    fps: float = 2.0,
+    max_seconds: float = 60.0,
+    platform: str = "WHATSAPP_STATUS",
+    challenge_code: str = "",
+    challenge_phrase: str = "",
+) -> Dict[str, Any]:
     t0 = time.time()
+    if platform != "WHATSAPP_STATUS":
+        return {
+            "error": f"unsupported_platform:{platform}",
+            "tamper_signals": ["unsupported_platform"],
+            "scores": {"final": 0.0},
+            "verdict": "REJECTED",
+        }
     md, md_signals, md_risk = inspect_video_metadata(video_path)
     frames = extract_frames(video_path, fps=fps, max_seconds=max_seconds)
     if not frames:
@@ -546,25 +658,35 @@ def verify_video(video_path: str, fps: float = 2.0, max_seconds: float = 60.0) -
     k = max(3, int(len(ui_scores) * 0.25))
     topk = sorted(ui_scores, reverse=True)[:k]
     ui_auth = float(np.mean(topk)) if topk else float(np.mean(ui_scores))
-    ui_detected = sum(ui_mask) >= 3
+    min_ui_frames = safe_int_env("WA_VERIFIER_MIN_UI_FRAMES", 3)
+    ui_detected = sum(ui_mask) >= min_ui_frames
 
     viewer_count, viewer_conf, vc_details = verify_viewer_count_stability(frames, ui_mask, burst_len=10)
     scroll_passed, liveness_score, live_details = detect_scroll(frames, ui_mask)
+    challenge_detected, challenge_score, challenge_details = detect_challenge(
+        frames, challenge_code, challenge_phrase, ui_scores
+    )
     frame_signals, frame_risk, frame_details = detect_video_tampering(frames)
+    best_ui_index = int(np.argmax(ui_scores)) if ui_scores else 0
+    post_fingerprint = frame_fingerprint(frames[best_ui_index].frame_bgr) if frames else ""
 
     tamper_signals: List[str] = []
     tamper_signals.extend(md_signals)
     tamper_signals.extend(frame_signals)
+    if not challenge_detected:
+        tamper_signals.append("challenge_not_detected")
     tamper_risk = clamp01(0.55 * md_risk + 0.45 * frame_risk)
 
     scores, verdict = compute_scores(
         ui_auth=ui_auth,
         viewer_conf=viewer_conf,
         liveness_score=liveness_score,
+        challenge_score=challenge_score,
         tamper_risk=tamper_risk,
         ui_detected=ui_detected,
         viewer_count_present=(viewer_count is not None),
         scroll_passed=scroll_passed,
+        challenge_detected=challenge_detected,
     )
 
     elapsed = time.time() - t0
@@ -573,6 +695,8 @@ def verify_video(video_path: str, fps: float = 2.0, max_seconds: float = 60.0) -
         "viewer_count": viewer_count,
         "viewer_count_confidence": round(float(viewer_conf), 4),
         "scroll_detected": bool(scroll_passed),
+        "challenge_detected": bool(challenge_detected),
+        "post_fingerprint": post_fingerprint,
         "tamper_signals": tamper_signals,
         "scores": {k: round(float(v), 4) for k, v in scores.items()},
         "verdict": verdict,
@@ -596,6 +720,7 @@ def verify_video(video_path: str, fps: float = 2.0, max_seconds: float = 60.0) -
             "frame_tamper_details": frame_details,
             "viewer_count_details": vc_details,
             "liveness_details": live_details,
+            "challenge_details": challenge_details,
         },
     }
     return report
@@ -604,6 +729,9 @@ def verify_video(video_path: str, fps: float = 2.0, max_seconds: float = 60.0) -
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="WhatsApp Status 'Viewed by' verification bot (single script).")
     p.add_argument("--video", required=True, help="Path to screen recording video (mp4/mov).")
+    p.add_argument("--platform", default="WHATSAPP_STATUS", help="Target platform identifier.")
+    p.add_argument("--challenge-code", default="", help="Expected challenge code visible in recording.")
+    p.add_argument("--challenge-phrase", default="", help="Expected challenge phrase visible in recording.")
     p.add_argument("--fps", type=float, default=2.0, help="Sampling fps for analysis (default: 2).")
     p.add_argument("--max-seconds", type=float, default=60.0, help="Max seconds of video to analyze (default: 60).")
     p.add_argument("--json-output", default="", help="Optional path to save JSON report.")
@@ -618,7 +746,14 @@ def main() -> None:
     if not os.path.exists(video_path):
         print(f"ERROR: video not found: {video_path}", file=sys.stderr)
         sys.exit(2)
-    report = verify_video(video_path, fps=args.fps, max_seconds=args.max_seconds)
+    report = verify_video(
+        video_path,
+        fps=args.fps,
+        max_seconds=args.max_seconds,
+        platform=str(args.platform or "WHATSAPP_STATUS").strip().upper(),
+        challenge_code=str(args.challenge_code or "").strip(),
+        challenge_phrase=str(args.challenge_phrase or "").strip(),
+    )
     out = json_dumps(report)
     print(out)
     if args.json_output:

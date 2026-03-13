@@ -9,11 +9,14 @@ type PythonBotReport = {
   viewer_count?: number | null;
   viewer_count_confidence?: number;
   scroll_detected?: boolean;
+  challenge_detected?: boolean;
+  post_fingerprint?: string;
   tamper_signals?: string[];
   scores?: {
     ui_authenticity?: number;
     viewer_count?: number;
     liveness?: number;
+    challenge?: number;
     tamper_risk?: number;
     final?: number;
   };
@@ -67,6 +70,7 @@ export class PythonBotVerifier implements Verifier {
   private scriptPath: string;
   private fps: number;
   private maxSeconds: number;
+  private supportedPlatforms: Set<string>;
 
   constructor() {
     const configured = process.env.PYTHON_VERIFIER_SCRIPT?.trim();
@@ -76,21 +80,32 @@ export class PythonBotVerifier implements Verifier {
         : path.resolve(process.cwd(), 'scripts', 'wa_status_verifier.py');
     this.fps = Number(process.env.WA_VERIFIER_FPS ?? 2) || 2;
     this.maxSeconds = Number(process.env.WA_VERIFIER_MAX_SECONDS ?? 60) || 60;
+    this.supportedPlatforms = new Set(['WHATSAPP_STATUS']);
   }
 
-  async verify(videoPath: string, _campaignSpec: any, _challenge: any): Promise<WorkerVerificationResult> {
+  async verify(videoPath: string, campaignSpec: any, challenge: any): Promise<WorkerVerificationResult> {
     if (!fs.existsSync(this.scriptPath)) {
       throw new Error(`python_verifier_script_missing:${this.scriptPath}`);
+    }
+    const platform = String(campaignSpec?.platform ?? '').trim().toUpperCase();
+    if (!this.supportedPlatforms.has(platform)) {
+      throw new Error(`python_verifier_unsupported_platform:${platform || 'UNKNOWN'}`);
     }
 
     const args = [
       this.scriptPath,
       '--video',
       videoPath,
+      '--platform',
+      platform,
       '--fps',
       String(this.fps),
       '--max-seconds',
       String(this.maxSeconds),
+      '--challenge-code',
+      String(challenge?.challenge_code ?? ''),
+      '--challenge-phrase',
+      String(challenge?.challenge_phrase ?? ''),
       '--quiet',
     ];
     const run = await runPythonBot(args);
@@ -99,17 +114,23 @@ export class PythonBotVerifier implements Verifier {
     }
 
     const report = parseJsonFromStdout(run.stdout);
+    if (report.error) {
+      throw new Error(`python_verifier_report_error:${report.error}`);
+    }
     const verdict = mapVerdict(report.verdict);
     const confidence = Math.max(0, Math.min(1, Number(report.scores?.final ?? 0)));
     const observedViews = Math.max(0, Number(report.viewer_count ?? 0));
     const uiDetected = Boolean(report.ui_detected);
     const scrollDetected = Boolean(report.scroll_detected);
-    const challengeSeen = uiDetected && scrollDetected;
-    const hash = crypto.createHash('sha256').update(fs.readFileSync(videoPath)).digest('hex').slice(0, 12);
+    const challengeSeen = Boolean(report.challenge_detected);
+    const hash =
+      typeof report.post_fingerprint === 'string' && report.post_fingerprint.trim().length > 0
+        ? report.post_fingerprint.trim().slice(0, 64)
+        : crypto.createHash('sha256').update(fs.readFileSync(videoPath)).digest('hex').slice(0, 12);
 
     return {
       observed_views: observedViews,
-      observed_post_hash: hash,
+      observed_post_hash: hash.slice(0, 12),
       challenge_seen: challengeSeen,
       confidence,
       decision: verdict,

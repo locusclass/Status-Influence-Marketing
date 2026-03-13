@@ -61,8 +61,8 @@ async function refundWalletWithdrawal(client: any, withdrawal: any, reason: stri
 
 export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
-  const deepLinkReturn = 'bakule://payment/return';
-  const deepLinkCancel = 'bakule://payment/cancel';
+  const deepLinkReturn = 'prime://payment/return';
+  const deepLinkCancel = 'prime://payment/cancel';
 
   const resolveBrowserTarget = (request: any, fallbackPath: string) => {
     const queryTarget = (request.query as Record<string, unknown> | undefined)?.target;

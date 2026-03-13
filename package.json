@@ -1,12 +1,12 @@
 {
-  "name": "bakule",
+  "name": "prime",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "pnpm -r build",
     "start": "node apps/api/dist/index.js",
-    "dev:api": "pnpm --filter @bakule/shared build && pnpm --filter @bakule/api dev",
-    "dev:worker": "pnpm --filter @bakule/shared build && pnpm --filter @bakule/worker dev",
+    "dev:api": "pnpm --filter @prime/shared build && pnpm --filter @prime/api dev",
+    "dev:worker": "pnpm --filter @prime/shared build && pnpm --filter @prime/worker dev",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test"
   },

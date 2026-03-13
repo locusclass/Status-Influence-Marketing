@@ -1,9 +1,9 @@
-# Bakule
+# Prime
 
-Bakule is a Pan-African escrow and verification infrastructure that formalizes paid social media distribution. It turns informal peer-to-peer promotion into structured, escrow-backed distribution contracts with automated compliance enforcement. The platform enforces distribution integrity, not marketing outcomes.
+Prime is a Pan-African escrow and verification infrastructure that formalizes paid social media distribution. It turns informal peer-to-peer promotion into structured, escrow-backed distribution contracts with automated compliance enforcement. The platform enforces distribution integrity, not marketing outcomes.
 
 ## Operating modes
-- Private Contract Mode: Advertisers and distributors negotiate off-platform, then execute via Bakule. Funds are held in escrow, and payouts release only after verified compliance (content authenticity, posting duration, and validated impression accumulation). A 15% execution fee is applied to successful settlements.
+- Private Contract Mode: Advertisers and distributors negotiate off-platform, then execute via Prime. Funds are held in escrow, and payouts release only after verified compliance (content authenticity, posting duration, and validated impression accumulation). A 15% execution fee is applied to successful settlements.
 - Open Budget Mode: Advertisers deposit a budget and upload content. The system converts funds into a fixed number of verified impressions using a deterministic pricing model. Qualified distributors claim portions of the campaign, and payouts are calculated strictly per verified unit delivered.
 
 ## Verification and risk controls
@@ -30,9 +30,9 @@ Bakule is a Pan-African escrow and verification infrastructure that formalizes p
 3. Initialize the database:
    - Apply `apps/api/sql/schema.sql` to your Postgres instance.
 4. Start API:
-   - `pnpm --filter @bakule/api dev`
+   - `pnpm --filter @prime/api dev`
 5. Start worker:
-   - `pnpm --filter @bakule/worker dev`
+   - `pnpm --filter @prime/worker dev`
 
 ## PesaPal sandbox configuration
 - Use PesaPal sandbox credentials.

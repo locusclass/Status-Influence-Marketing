@@ -306,6 +306,7 @@ function evaluateClientTrace(script, clientMeta, tamperDuration) {
     const events = Array.isArray(clientMeta?.steps) ? clientMeta.steps : [];
     const completedIds = [];
     const completedAt = [];
+    let scheduledTimingValid = true;
     for (const event of events) {
         const id = String(event?.id ?? '').trim();
         if (!id)
@@ -314,6 +315,15 @@ function evaluateClientTrace(script, clientMeta, tamperDuration) {
         const ts = Date.parse(String(event?.completed_at ?? ''));
         if (!Number.isNaN(ts))
             completedAt.push(ts);
+        const matchingStep = steps.find((step) => String(step?.id ?? '') === id);
+        const scheduledSecond = Number(matchingStep?.at_second ?? 0);
+        const completedSecond = Number(event?.completed_second ?? NaN);
+        if (matchingStep &&
+            Number.isFinite(completedSecond) &&
+            (completedSecond < Math.max(0, scheduledSecond - 12) ||
+                completedSecond > scheduledSecond + 12)) {
+            scheduledTimingValid = false;
+        }
     }
     const startedAt = Date.parse(String(clientMeta?.recording_started_at ?? ''));
     const stoppedAt = Date.parse(String(clientMeta?.recording_stopped_at ?? ''));
@@ -336,6 +346,7 @@ function evaluateClientTrace(script, clientMeta, tamperDuration) {
     const valid = uniqueRequired.size > 0 &&
         requiredCompletedCount >= uniqueRequired.size &&
         timelineOrderValid &&
+        scheduledTimingValid &&
         strictDuration;
     return {
         valid,
@@ -344,6 +355,7 @@ function evaluateClientTrace(script, clientMeta, tamperDuration) {
         unique_completed_steps: requiredCompletedCount,
         duration_seconds: duration,
         timeline_order_valid: timelineOrderValid,
+        scheduled_timing_valid: scheduledTimingValid,
     };
 }
 function buildReviewReasons(input) {
@@ -405,6 +417,12 @@ function buildReviewReasons(input) {
             message: 'Verification step timeline is inconsistent.',
         });
     }
+    if (!trace.scheduled_timing_valid) {
+        reasons.push({
+            code: 'STEP_TIMING_INVALID',
+            message: 'Verification steps were completed outside the expected timing windows.',
+        });
+    }
     if (trace.duration_seconds < 58 || trace.duration_seconds > 75) {
         reasons.push({
             code: 'RECORDING_DURATION_INVALID',
@@ -412,6 +430,52 @@ function buildReviewReasons(input) {
         });
     }
     return reasons;
+}
+function deriveFinalProofDecision(input) {
+    const confidence = Number(input.result?.confidence ?? 0);
+    const observedViews = Number(input.result?.observed_views ?? 0);
+    const challengeSeen = Boolean(input.result?.challenge_seen);
+    const verifierDecision = String(input.result?.decision ?? '').toUpperCase();
+    const blockingReasonCodes = new Set(input.reasons.map((reason) => reason.code));
+    const hasBlockingReason = blockingReasonCodes.size > 0 ||
+        !input.trace.valid ||
+        !challengeSeen ||
+        observedViews <= 0 ||
+        confidence < 0.7 ||
+        verifierDecision !== 'VERIFIED';
+    return hasBlockingReason ? 'REJECTED' : 'VERIFIED';
+}
+async function markContractCompletedForVerifiedProof(client, proofId) {
+    const proofContextRes = await client.query(`
+    SELECT
+      p.id,
+      p.user_id,
+      p.status,
+      p.decision,
+      s.campaign_id
+    FROM proofs p
+    JOIN verification_sessions s ON s.id = p.session_id
+    WHERE p.id=$1
+    LIMIT 1
+    `, [proofId]);
+    const proofContext = proofContextRes.rows[0];
+    if (!proofContext)
+        return;
+    if (proofContext.status !== 'VERIFIED' || proofContext.decision !== 'VERIFIED')
+        return;
+    await client.query(`
+    UPDATE contracts
+    SET status='COMPLETED',
+        completed_at=COALESCE(completed_at, now())
+    WHERE campaign_id=$1
+      AND distributor_id=$2
+      AND status='ACTIVE'
+    `, [proofContext.campaign_id, proofContext.user_id]);
+    await client.query(`
+    UPDATE campaigns
+    SET status='COMPLETED'
+    WHERE id=$1
+    `, [proofContext.campaign_id]);
 }
 async function preparePayoutRequest(client, proof, campaign) {
     const escrowCampaignId = campaign.parent_campaign_id ?? campaign.id;
@@ -424,8 +488,6 @@ async function preparePayoutRequest(client, proof, campaign) {
     if (!contractRes.rows[0]) {
         throw new Error('active_contract_required');
     }
-    const trustRow = await client.query('SELECT score FROM trust_scores WHERE user_id=$1', [proof.user_id]);
-    const trustScore = trustRow.rows[0]?.score ?? 50;
     const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1', [escrowCampaignId]);
     const escrow = escrowRes.rows[0];
     if (!escrow || escrow.status === 'PENDING') {
@@ -443,10 +505,6 @@ async function preparePayoutRequest(client, proof, campaign) {
         return null;
     if (payoutRow.status === 'PAID')
         return null;
-    if (trustScore < 60) {
-        await client.query("UPDATE payout_requests SET status='REQUESTED' WHERE id=$1", [payoutRow.id]);
-        return null;
-    }
     if (payoutRow.status === 'PROCESSING' && payoutRow.pesapal_reference) {
         return null;
     }
@@ -553,7 +611,7 @@ async function processVerificationJob(job) {
         });
         const trace = evaluateClientTrace(session.script, proof.meta, Number(tamper?.details?.duration ?? 0));
         const reasons = buildReviewReasons({ tamper, result, script: session.script, clientMeta: proof.meta });
-        const finalDecision = 'MANUAL_REVIEW';
+        const finalDecision = deriveFinalProofDecision({ reasons, result, trace });
         const verificationReport = {
             generated_at: new Date().toISOString(),
             verifier_provider: verifierProvider,
@@ -588,18 +646,13 @@ async function processVerificationJob(job) {
             ]);
             const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
             if (!isAdvertiserProof) {
-                const delta = 0;
-                await client.query('INSERT INTO trust_events (user_id, event_type, delta) VALUES ($1,$2,$3)', [proof.user_id, finalDecision, delta]);
-                await client.query(`INSERT INTO trust_scores (user_id, score)
-           VALUES ($1, 50)
-           ON CONFLICT (user_id) DO NOTHING`, [proof.user_id]);
-                await client.query(`UPDATE trust_scores
-           SET score = LEAST(100, GREATEST(0, score + $2)),
-               updated_at = now()
-           WHERE user_id=$1`, [proof.user_id, delta]);
+                // Trust-based payout gating is disabled for now; autonomous verification drives settlement.
             }
-            // Strict admin-gated verification mode:
-            // payout jobs are only enqueued after explicit admin approval on /admin/proofs/:id.
+            if (finalDecision === 'VERIFIED') {
+                await markContractCompletedForVerifiedProof(client, proofId);
+                await client.query(`INSERT INTO job_queue (job_type, payload, status)
+           VALUES ('PAYOUT_PROOF', $1::jsonb, 'QUEUED')`, [JSON.stringify({ proof_id: proofId })]);
+            }
         });
         await pool.query("UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1", [job.id]);
     }

@@ -48,8 +48,8 @@ async function refundWalletWithdrawal(client, withdrawal, reason) {
 }
 export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
-    const deepLinkReturn = 'bakule://payment/return';
-    const deepLinkCancel = 'bakule://payment/cancel';
+    const deepLinkReturn = 'prime://payment/return';
+    const deepLinkCancel = 'prime://payment/cancel';
     const resolveBrowserTarget = (request, fallbackPath) => {
         const queryTarget = request.query?.target;
         if (typeof queryTarget === 'string' && queryTarget.trim()) {

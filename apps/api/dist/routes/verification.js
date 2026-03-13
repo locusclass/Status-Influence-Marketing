@@ -1,8 +1,9 @@
-import { CreateVerificationSessionSchema, SubmitProofSchema } from '@bakule/shared';
+import { CreateVerificationSessionSchema, SubmitProofSchema } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from '../utils.js';
+import { randomInt } from 'crypto';
 import { config } from '../config.js';
 import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
 import { canAccessDistributorFeatures } from '../services/roles.js';
@@ -10,6 +11,7 @@ const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
 const MIN_RECORDING_SECONDS = 58;
 const MAX_RECORDING_SECONDS = 75;
+const STEP_TIMING_LEEWAY_SECONDS = 12;
 const platformInstructionPool = {
     WHATSAPP_STATUS: [
         'Open the status post and keep it centered in frame.',
@@ -20,38 +22,11 @@ const platformInstructionPool = {
         'Switch to another status briefly and return.',
         'Long-press the media preview for 2 seconds.',
     ],
-    TIKTOK: [
-        'Open the posted advert video and keep it in frame.',
-        'Open analytics/insights where views are visible.',
-        'Scroll analytics panel down and back up once.',
-        'Open comments then return to insights.',
-        'Pause on engagement metrics for 3 seconds.',
-        'Open share panel then close it.',
-        'Replay the video briefly and return to analytics.',
-    ],
-    INSTAGRAM: [
-        'Open the post and keep it in frame.',
-        'Open post insights where views are visible.',
-        'Scroll insights down and back up once.',
-        'Open comments then return to insights.',
-        'Open profile and return to the post.',
-        'Switch to reels tab and return to the post.',
-        'Hold on post metrics for 3 seconds.',
-    ],
-    X: [
-        'Open the post and keep it in frame.',
-        'Open analytics details where impressions are visible.',
-        'Scroll analytics down and back up once.',
-        'Open replies then return to analytics.',
-        'Open profile card and close it.',
-        'Refresh timeline then reopen analytics.',
-        'Hold analytics screen for 3 seconds.',
-    ],
 };
 function shuffle(items) {
     const out = [...items];
     for (let i = out.length - 1; i > 0; i -= 1) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = randomInt(0, i + 1);
         const temp = out[i];
         out[i] = out[j];
         out[j] = temp;
@@ -59,30 +34,37 @@ function shuffle(items) {
     return out;
 }
 function buildVerificationScript(platform) {
-    const fallbackPool = platformInstructionPool.WHATSAPP_STATUS ?? [];
-    const pool = platformInstructionPool[platform] ?? fallbackPool;
+    const pool = platformInstructionPool[platform];
+    if (!pool || pool.length < 4) {
+        throw new Error(`unsupported_platform:${platform}`);
+    }
     const picks = shuffle(pool).slice(0, 4);
-    const schedule = [5, 16, 28, 40];
+    const schedule = [
+        randomInt(4, 9),
+        randomInt(14, 20),
+        randomInt(25, 32),
+        randomInt(36, 44),
+    ];
     const scripted = picks.map((text, idx) => ({
-        id: `step_${idx + 1}`,
+        id: `step_${idx + 1}_${randomInt(100000, 999999)}`,
         text,
         type: 'GESTURE',
         required: true,
         at_second: schedule[idx],
     }));
     scripted.push({
-        id: 'show_code',
+        id: `show_code_${randomInt(100000, 999999)}`,
         text: 'Display the challenge code clearly and hold it for 3 seconds.',
         type: 'CHECKPOINT',
         required: true,
-        at_second: 48,
+        at_second: randomInt(46, 52),
     });
     scripted.push({
-        id: 'read_phrase',
+        id: `read_phrase_${randomInt(100000, 999999)}`,
         text: 'Read the challenge phrase clearly before recording ends.',
         type: 'CHECKPOINT',
         required: true,
-        at_second: 55,
+        at_second: randomInt(53, 58),
     });
     return scripted;
 }
@@ -105,22 +87,51 @@ function validateStrictClientMeta(clientMeta, script) {
     const events = Array.isArray(clientMeta?.steps) ? clientMeta.steps : [];
     if (!events.length)
         return 'client_meta_steps_missing';
-    const completed = new Set(events
+    const eventIds = events
         .map((event) => String(event?.id ?? '').trim())
-        .filter(Boolean));
+        .filter(Boolean);
+    const completed = new Set(eventIds);
+    const steps = Array.isArray(script) ? script.filter((step) => step?.required !== false) : [];
     const requiredIds = extractRequiredStepIds(script);
     const missing = requiredIds.filter((id) => !completed.has(id));
     if (missing.length > 0)
         return 'client_meta_required_steps_missing';
+    if (eventIds.join('|') !== requiredIds.join('|')) {
+        return 'client_meta_step_sequence_invalid';
+    }
+    for (const step of steps) {
+        const stepId = String(step?.id ?? '').trim();
+        if (!stepId)
+            continue;
+        const matchingEvent = events.find((event) => String(event?.id ?? '').trim() === stepId);
+        if (!matchingEvent)
+            return 'client_meta_required_steps_missing';
+        const scheduledSecond = Number(step?.at_second ?? 0);
+        const completedSecondRaw = Number.isFinite(Number(matchingEvent?.completed_second))
+            ? Number(matchingEvent.completed_second)
+            : Math.round((Date.parse(String(matchingEvent?.completed_at ?? '')) - startedAt) / 1000);
+        if (!Number.isFinite(completedSecondRaw)) {
+            return 'client_meta_step_timing_invalid';
+        }
+        if (completedSecondRaw < Math.max(0, scheduledSecond - STEP_TIMING_LEEWAY_SECONDS) ||
+            completedSecondRaw > scheduledSecond + STEP_TIMING_LEEWAY_SECONDS) {
+            return 'client_meta_step_timing_invalid';
+        }
+    }
     return null;
 }
 function isAllowedProofVideoUrl(value) {
     if (value.startsWith('/uploads/files/') || value.startsWith('/api/uploads/files/')) {
-        return true;
+        const parsed = new URL(value, 'http://local.test');
+        const mime = String(parsed.searchParams.get('mime') ?? '');
+        return mime.startsWith('video/');
     }
     try {
         const parsed = new URL(value);
         if (!parsed.pathname.includes('/uploads/files/'))
+            return false;
+        const mime = String(parsed.searchParams.get('mime') ?? '');
+        if (!mime.startsWith('video/'))
             return false;
         if (!config.apiBaseUrl)
             return true;
@@ -148,7 +159,6 @@ export async function verificationRoutes(app) {
         }
         const challenge_code = generateChallengeCode();
         const challenge_phrase = generateChallengePhrase();
-        const script = buildVerificationScript(body.platform);
         const expires_at = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
         const session = await withTransaction(async (client) => {
             await ensurePublicIdColumns(client);
@@ -164,6 +174,17 @@ export async function verificationRoutes(app) {
                 return { error: 'campaign_not_active' };
             if (campaign.platform !== body.platform)
                 return { error: 'platform_mismatch' };
+            const script = (() => {
+                try {
+                    return buildVerificationScript(body.platform);
+                }
+                catch {
+                    return { error: 'unsupported_platform' };
+                }
+            })();
+            if (script.error) {
+                return script;
+            }
             const contractRes = await client.query(`SELECT id
          FROM contracts
          WHERE campaign_id=$1
@@ -198,6 +219,7 @@ export async function verificationRoutes(app) {
                 campaign_not_found: 404,
                 campaign_not_active: 409,
                 platform_mismatch: 400,
+                unsupported_platform: 400,
                 contract_required: 403,
                 session_active_exists: 409,
             };
@@ -258,13 +280,21 @@ export async function verificationRoutes(app) {
          LIMIT 1`, [session.campaign_id, authUser]);
             if (priorProof.rows[0])
                 return { error: 'duplicate_campaign_proof' };
+            const fingerprintHash = hashFingerprint(body.device_fingerprint);
+            const fingerprintConflict = await client.query(`SELECT 1
+         FROM device_fingerprints
+         WHERE fingerprint_hash=$1
+           AND user_id <> $2
+         LIMIT 1`, [fingerprintHash, authUser]);
+            if (fingerprintConflict.rows[0]) {
+                return { error: 'device_fingerprint_conflict' };
+            }
             const created = await verificationRepo.createProof(client, {
                 session_id: body.session_id,
                 user_id: authUser,
                 video_url: body.proof_video_url,
                 meta: body.client_meta ?? null
             });
-            const fingerprintHash = hashFingerprint(body.device_fingerprint);
             await verificationRepo.insertDeviceFingerprint(client, authUser, fingerprintHash);
             await jobRepo.enqueue(client, 'VERIFY_PROOF', { proof_id: created.id });
             return created;
@@ -279,9 +309,12 @@ export async function verificationRoutes(app) {
                 client_meta_recording_duration_invalid: 400,
                 client_meta_steps_missing: 400,
                 client_meta_required_steps_missing: 400,
+                client_meta_step_sequence_invalid: 400,
+                client_meta_step_timing_invalid: 400,
                 proof_already_submitted: 409,
                 contract_not_active: 403,
                 duplicate_campaign_proof: 409,
+                device_fingerprint_conflict: 409,
             };
             reply.code(codeMap[proof.error] ?? 400);
             return proof;

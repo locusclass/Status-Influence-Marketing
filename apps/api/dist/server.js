@@ -141,7 +141,7 @@ export function buildServer() {
     app.register(swagger, {
         openapi: {
             info: {
-                title: 'Bakule API',
+                title: 'Prime API',
                 version: '0.1.0',
             },
         },

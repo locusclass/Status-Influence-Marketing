@@ -2,7 +2,7 @@ export async function healthRoutes(app) {
     app.get('/', async () => {
         return {
             ok: true,
-            name: 'Bakule API',
+            name: 'Prime API',
             docs: '/docs',
             health: '/health',
             ts: new Date().toISOString(),
