@@ -48,7 +48,7 @@ async function usersHasColumn(client, columnName) {
     `, [columnName]);
     return Boolean(res.rowCount);
 }
-async function upsertGoogleProfile(client, userId, fullName, photoUrl) {
+async function upsertSocialProfile(client, userId, fullName, photoUrl) {
     await ensureUserProfilesTable(client);
     await client.query(`
     INSERT INTO user_profiles (user_id, full_name, avatar_url, updated_at)
@@ -201,7 +201,7 @@ export async function authRoutes(app) {
                     }
                     await client.query(`UPDATE users SET phone=$2 WHERE id=$1`, [existing.id, typedPhone]);
                 }
-                await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
+                await upsertSocialProfile(client, existing.id, fullName, photoUrl);
                 if (String(existing.role ?? '').trim().toUpperCase() !== body.role) {
                     await client.query(`
             UPDATE users
@@ -224,7 +224,7 @@ export async function authRoutes(app) {
             const syntheticPassword = buildSyntheticPassword(sub, email);
             const created = await userRepo.createUser(client, fullName, email, typedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
-            await upsertGoogleProfile(client, created.id, fullName, photoUrl);
+            await upsertSocialProfile(client, created.id, fullName, photoUrl);
             return created;
         });
         if (user?.error) {

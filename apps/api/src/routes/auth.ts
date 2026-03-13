@@ -58,7 +58,7 @@ async function usersHasColumn(client: any, columnName: string) {
   return Boolean(res.rowCount);
 }
 
-async function upsertGoogleProfile(
+async function upsertSocialProfile(
   client: any,
   userId: string,
   fullName: string,
@@ -269,7 +269,7 @@ export async function authRoutes(app: FastifyInstance) {
           );
         }
 
-        await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
+        await upsertSocialProfile(client, existing.id, fullName, photoUrl);
         if (String(existing.role ?? '').trim().toUpperCase() !== body.role) {
           await client.query(
             `
@@ -311,7 +311,7 @@ export async function authRoutes(app: FastifyInstance) {
         countryData.currency
       );
       await userRepo.ensureWallet(client, created.id, countryData.currency);
-      await upsertGoogleProfile(client, created.id, fullName, photoUrl);
+      await upsertSocialProfile(client, created.id, fullName, photoUrl);
       return created;
     });
 
@@ -336,5 +336,6 @@ export async function authRoutes(app: FastifyInstance) {
       },
     };
   });
+
 }
 
