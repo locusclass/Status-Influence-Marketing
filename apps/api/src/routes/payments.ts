@@ -61,15 +61,19 @@ async function refundWalletWithdrawal(client: any, withdrawal: any, reason: stri
 
 export async function paymentRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
-  const deepLinkReturn = 'prime://payment/return';
-  const deepLinkCancel = 'prime://payment/cancel';
+  const deepLinkReturn = 'bakule://payment/return';
+  const deepLinkCancel = 'bakule://payment/cancel';
 
   const resolveBrowserTarget = (request: any, fallbackPath: string) => {
     const queryTarget = (request.query as Record<string, unknown> | undefined)?.target;
     if (typeof queryTarget === 'string' && queryTarget.trim()) {
       try {
         const target = new URL(queryTarget.trim());
-        if (target.protocol === 'http:' || target.protocol === 'https:') {
+        if (
+          target.protocol === 'http:' ||
+          target.protocol === 'https:' ||
+          target.protocol === 'bakule:'
+        ) {
           return target.toString();
         }
       } catch {

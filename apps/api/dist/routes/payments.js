@@ -48,14 +48,16 @@ async function refundWalletWithdrawal(client, withdrawal, reason) {
 }
 export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
-    const deepLinkReturn = 'prime://payment/return';
-    const deepLinkCancel = 'prime://payment/cancel';
+    const deepLinkReturn = 'bakule://payment/return';
+    const deepLinkCancel = 'bakule://payment/cancel';
     const resolveBrowserTarget = (request, fallbackPath) => {
         const queryTarget = request.query?.target;
         if (typeof queryTarget === 'string' && queryTarget.trim()) {
             try {
                 const target = new URL(queryTarget.trim());
-                if (target.protocol === 'http:' || target.protocol === 'https:') {
+                if (target.protocol === 'http:' ||
+                    target.protocol === 'https:' ||
+                    target.protocol === 'bakule:') {
                     return target.toString();
                 }
             }
