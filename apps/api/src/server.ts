@@ -21,6 +21,7 @@ import {
 
 export function buildServer() {
   const app = Fastify({
+    pluginTimeout: Number(process.env.FASTIFY_PLUGIN_TIMEOUT ?? 30000),
     logger: {
       level: process.env.LOG_LEVEL ?? 'info'
     }

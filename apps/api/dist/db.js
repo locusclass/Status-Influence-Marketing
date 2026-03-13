@@ -12,9 +12,11 @@ if (!config.databaseUrl) {
  */
 export const pool = new Pool({
     connectionString: config.databaseUrl,
-    ssl: {
-        rejectUnauthorized: false
-    }
+    ssl: /localhost|127\.0\.0\.1/i.test(config.databaseUrl)
+        ? false
+        : {
+            rejectUnauthorized: false
+        }
 });
 /**
  * Optional: log connection errors clearly instead of silent crashes

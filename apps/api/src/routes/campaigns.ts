@@ -345,6 +345,7 @@ export async function buildCampaignStatusSummaries(
 
   const statusRes = await client.query(
     `
+    WITH
     scope AS (
       SELECT
         c.id AS campaign_id,
@@ -504,6 +505,34 @@ async function getContractCompletionReadiness(
     return { error: 'verified_proof_required' } as const;
   }
 
+  return { contract } as const;
+}
+
+async function getContractForAdvertiserAction(
+  client: any,
+  contractId: string,
+  advertiserId: string,
+  role?: string
+) {
+  const contractRes = await client.query(
+    `
+    SELECT
+      ctr.*,
+      c.advertiser_id,
+      c.platform,
+      COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id
+    FROM contracts ctr
+    JOIN campaigns c ON c.id = ctr.campaign_id
+    WHERE ctr.id=$1
+    LIMIT 1
+    `,
+    [contractId]
+  );
+  const contract = contractRes.rows[0];
+  if (!contract) return { error: 'contract_not_found' } as const;
+  if (contract.advertiser_id !== advertiserId && role !== 'ADMIN') {
+    return { error: 'forbidden' } as const;
+  }
   return { contract } as const;
 }
 
@@ -703,9 +732,76 @@ export async function campaignRoutes(app: FastifyInstance) {
               )
             ).rows
           : [];
+      const managedContracts =
+        found.advertiser_id === authUser
+          ? (
+              await client.query(
+                `
+                SELECT
+                  c.id AS campaign_id,
+                  c.public_id AS campaign_public_id,
+                  c.title AS campaign_title,
+                  c.assigned_phone,
+                  c.assigned_distributor_id,
+                  ctr.id AS contract_id,
+                  ctr.status AS contract_status,
+                  ctr.accepted_at,
+                  ctr.post_deadline_at,
+                  ctr.contract_deadline_at,
+                  ctr.completed_at,
+                  ctr.cancelled_at,
+                  p.status AS latest_proof_status,
+                  p.decision AS latest_proof_decision
+                FROM campaigns c
+                LEFT JOIN LATERAL (
+                  SELECT *
+                  FROM contracts ctr
+                  WHERE ctr.campaign_id = c.id
+                  ORDER BY ctr.created_at DESC
+                  LIMIT 1
+                ) ctr ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT p.status, p.decision
+                  FROM proofs p
+                  JOIN verification_sessions vs ON vs.id = p.session_id
+                  WHERE vs.campaign_id = c.id
+                    AND (
+                      ctr.distributor_id IS NULL
+                      OR p.user_id = ctr.distributor_id
+                    )
+                  ORDER BY p.created_at DESC
+                  LIMIT 1
+                ) p ON TRUE
+                WHERE (
+                  ($1::boolean = TRUE AND c.parent_campaign_id = $2)
+                  OR ($1::boolean = FALSE AND c.id = $2)
+                )
+                ORDER BY c.created_at ASC
+                `,
+                [beneficiaries.length > 0, found.id]
+              )
+            ).rows.map((row: any) => {
+              const proof_status = deriveProofStatus(
+                row.latest_proof_status
+                  ? {
+                      status: row.latest_proof_status,
+                      decision: row.latest_proof_decision,
+                    }
+                  : null
+              );
+              return {
+                ...row,
+                proof_status,
+                can_complete:
+                  row.contract_status === 'ACTIVE' && proof_status === 'VERIFIED',
+                can_cancel: row.contract_status === 'ACTIVE',
+              };
+            })
+          : [];
       return {
         ...found,
         beneficiaries,
+        managed_contracts: managedContracts,
         active_contract: activeContractRow,
         my_active_contract:
           authUser
@@ -1346,15 +1442,25 @@ export async function campaignRoutes(app: FastifyInstance) {
   app.post('/contracts/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
       return { error: 'unauthorized' };
     }
     const result = await withTransaction(async (client) => {
-      const contractRes = await client.query('SELECT * FROM contracts WHERE id=$1', [params.id]);
-      const contract = contractRes.rows[0];
-      if (!contract) return null;
-      if (contract.distributor_id !== authUser) return { error: 'forbidden' } as any;
+      const contractAccess = await getContractForAdvertiserAction(
+        client,
+        params.id,
+        authUser,
+        role
+      );
+      if ('error' in contractAccess) return contractAccess as any;
+      const contract = contractAccess.contract;
+      const canManage =
+        contract.distributor_id === authUser ||
+        contract.advertiser_id === authUser ||
+        role === 'ADMIN';
+      if (!canManage) return { error: 'forbidden' } as any;
       if (contract.status !== 'ACTIVE') return { error: 'contract_not_active' } as any;
       const updated = await client.query(
         `UPDATE contracts
@@ -1397,12 +1503,67 @@ export async function campaignRoutes(app: FastifyInstance) {
   app.post('/contracts/:id/complete', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
       return { error: 'unauthorized' };
     }
     const result = await withTransaction(async (client) => {
-      const readiness = await getContractCompletionReadiness(client, params.id, authUser);
+      const contractAccess = await getContractForAdvertiserAction(
+        client,
+        params.id,
+        authUser,
+        role
+      );
+      if ('error' in contractAccess) return contractAccess as any;
+      const accessContract = contractAccess.contract;
+      const readiness =
+        accessContract.distributor_id === authUser
+          ? await getContractCompletionReadiness(client, params.id, authUser)
+          : accessContract.advertiser_id === authUser || role === 'ADMIN'
+              ? await (async () => {
+                  if (accessContract.status !== 'ACTIVE') {
+                    return { error: 'contract_not_active' } as const;
+                  }
+                  const escrowRes = await client.query(
+                    `
+                    SELECT status
+                    FROM escrow_ledger
+                    WHERE campaign_id=$1
+                    LIMIT 1
+                    `,
+                    [accessContract.escrow_campaign_id]
+                  );
+                  const escrow = escrowRes.rows[0];
+                  if (
+                    !escrow ||
+                    !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(
+                      String(escrow.status)
+                    )
+                  ) {
+                    return { error: 'campaign_not_funded' } as const;
+                  }
+
+                  const proofRes = await client.query(
+                    `
+                    SELECT p.id
+                    FROM proofs p
+                    JOIN verification_sessions s ON s.id = p.session_id
+                    WHERE s.campaign_id=$1
+                      AND p.user_id=$2
+                      AND p.status='VERIFIED'
+                      AND p.decision='VERIFIED'
+                    ORDER BY p.created_at DESC
+                    LIMIT 1
+                    `,
+                    [accessContract.campaign_id, accessContract.distributor_id]
+                  );
+                  if (!proofRes.rows[0]) {
+                    return { error: 'verified_proof_required' } as const;
+                  }
+                  return { contract: accessContract } as const;
+                })()
+              : ({ error: 'forbidden' } as const);
       if ('error' in readiness) return readiness as any;
       const contract = readiness.contract;
       const updated = await client.query(
@@ -1441,6 +1602,61 @@ export async function campaignRoutes(app: FastifyInstance) {
       return result;
     }
     return result;
+  });
+
+  app.post('/campaigns/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    if (!canAccessAdvertiserFeatures(role)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+
+    const result = await withTransaction(async (client) => {
+      const campaign = await campaignRepo.getCampaign(client, params.id);
+      if (!campaign) return { error: 'campaign_not_found' } as const;
+      if (campaign.advertiser_id !== authUser && role !== 'ADMIN') {
+        return { error: 'forbidden' } as const;
+      }
+
+      const scopeId = campaign.parent_campaign_id ?? campaign.id;
+      const scopeRes = await client.query(
+        'SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1',
+        [scopeId]
+      );
+      const campaignIds = scopeRes.rows.map((row: any) => row.id);
+
+      await client.query(
+        `UPDATE contracts
+         SET status='CANCELLED',
+             cancelled_at=COALESCE(cancelled_at, now())
+         WHERE campaign_id = ANY($1::uuid[])
+           AND status='ACTIVE'`,
+        [campaignIds]
+      );
+      await client.query(
+        `UPDATE campaigns
+         SET status='CANCELLED'
+         WHERE id = ANY($1::uuid[])`,
+        [campaignIds]
+      );
+
+      const refreshed = await campaignRepo.getCampaign(client, scopeId);
+      return {
+        ...refreshed,
+        status_summary: await buildCampaignStatusSummary(client, scopeId, authUser),
+      };
+    });
+    if ('error' in result) {
+      reply.code(result.error === 'campaign_not_found' ? 404 : 403);
+      return result;
+    }
+    return { campaign: result };
   });
 }
 
