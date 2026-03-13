@@ -251,7 +251,7 @@ async function buildCampaignStatusSummary(client: any, campaignId: string, userI
   );
 }
 
-async function buildCampaignStatusSummaries(
+export async function buildCampaignStatusSummaries(
   client: any,
   campaignIds: string[],
   userId?: string | null

@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
+import { buildCampaignStatusSummaries } from './campaigns.js';
 import {
   ensurePublicIdColumns,
   resolveCampaignId,
@@ -728,7 +729,25 @@ export async function adminRoutes(app: FastifyInstance) {
         `SELECT * FROM campaigns ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
         [...params, limit, offset]
       );
-      return { campaigns: res.rows };
+      const statusSummaries = await buildCampaignStatusSummaries(
+        client,
+        res.rows.map((row: any) => String(row.id)),
+        null
+      );
+      return {
+        campaigns: res.rows.map((row: any) => ({
+          ...row,
+          status_summary: statusSummaries.get(String(row.id)) ?? {
+            campaign_status: String(row.status ?? 'ACTIVE'),
+            escrow_status: 'PENDING',
+            latest_contract_status: 'UNCLAIMED',
+            my_contract_status: null,
+            proof_status: 'NOT_SUBMITTED',
+            settlement_status: 'AWAITING_FUNDING',
+            is_available: false,
+          },
+        })),
+      };
     });
   });
 

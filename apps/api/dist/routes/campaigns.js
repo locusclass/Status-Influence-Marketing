@@ -209,7 +209,7 @@ async function buildCampaignStatusSummary(client, campaignId, userId) {
         is_available: false,
     });
 }
-async function buildCampaignStatusSummaries(client, campaignIds, userId) {
+export async function buildCampaignStatusSummaries(client, campaignIds, userId) {
     if (campaignIds.length === 0) {
         return new Map();
     }

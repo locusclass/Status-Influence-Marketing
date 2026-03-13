@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
+import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, normalizeActiveRole, } from '../services/roles.js';
 const UpdateUserRoleSchema = z.object({
@@ -591,7 +592,21 @@ export async function adminRoutes(app) {
             }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
             const res = await client.query(`SELECT * FROM campaigns ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
-            return { campaigns: res.rows };
+            const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), null);
+            return {
+                campaigns: res.rows.map((row) => ({
+                    ...row,
+                    status_summary: statusSummaries.get(String(row.id)) ?? {
+                        campaign_status: String(row.status ?? 'ACTIVE'),
+                        escrow_status: 'PENDING',
+                        latest_contract_status: 'UNCLAIMED',
+                        my_contract_status: null,
+                        proof_status: 'NOT_SUBMITTED',
+                        settlement_status: 'AWAITING_FUNDING',
+                        is_available: false,
+                    },
+                })),
+            };
         });
     });
     app.patch('/admin/campaigns/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
