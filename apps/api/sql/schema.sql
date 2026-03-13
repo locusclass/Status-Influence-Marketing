@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS users (
   whatsapp_verified_at TIMESTAMPTZ,
   whatsapp_jid TEXT,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
+  role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN')),
+  active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR' CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
   country TEXT NOT NULL DEFAULT 'UG',
   preferred_currency TEXT NOT NULL DEFAULT 'UGX',
@@ -60,9 +61,21 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'active_role'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
+      CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+  END IF;
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
   ALTER TABLE users
-    ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+    ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN'));
+  ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_role_check;
+  ALTER TABLE users
+    ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
   ALTER TABLE users
     ADD CONSTRAINT users_status_check CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
@@ -94,6 +107,18 @@ DO $$ BEGIN
       ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'
       CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
   END IF;
+  UPDATE users
+  SET active_role = CASE
+      WHEN role = 'ADMIN' THEN 'ADMIN'
+      WHEN role = 'ADVERTISER' THEN 'ADVERTISER'
+      WHEN role = 'DUAL_USER' AND (active_role IS NULL OR btrim(active_role) = '') THEN 'DISTRIBUTOR'
+      ELSE COALESCE(NULLIF(active_role, ''), 'DISTRIBUTOR')
+    END
+  WHERE active_role IS NULL
+     OR btrim(active_role) = ''
+     OR (role = 'ADMIN' AND active_role <> 'ADMIN')
+     OR (role = 'ADVERTISER' AND active_role NOT IN ('ADVERTISER', 'ADMIN'))
+     OR (role = 'DISTRIBUTOR' AND active_role NOT IN ('DISTRIBUTOR', 'ADMIN'));
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns

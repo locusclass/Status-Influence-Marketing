@@ -7,6 +7,7 @@ import { submitOrder } from '../services/pesapal.js';
 import { v4 as uuid } from 'uuid';
 import { config } from '../config.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
+import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
 const PRIVATE_RATE_UGX = 25;
 const OPEN_RATE_UGX = 10;
 const PRIVATE_PLATFORM_FEE_PERCENT = 15;
@@ -150,7 +151,7 @@ async function findDistributorByPhone(client, rawPhone) {
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
     WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9+]', '', 'g') = $1
-      AND u.role IN ('DISTRIBUTOR', 'ADMIN')
+      AND u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
     `, [phone]);
     return res.rows[0] ?? null;
@@ -225,7 +226,7 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns/distributor-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
         const role = request.user?.role;
-        if (role !== 'ADVERTISER' && role !== 'ADMIN') {
+        if (!canAccessAdvertiserFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -245,7 +246,7 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns', { preHandler: [app.authenticate] }, async (request) => {
         const authUser = request.user?.sub;
-        const role = request.user?.role;
+        const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         const query = (request.query ?? {});
         const limitRaw = Number(query.limit ?? 50);
         const offsetRaw = Number(query.offset ?? 0);
@@ -436,7 +437,7 @@ export async function campaignRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (role !== 'ADVERTISER' && role !== 'ADMIN') {
+        if (!canAccessAdvertiserFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -623,7 +624,7 @@ export async function campaignRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (role !== 'DISTRIBUTOR' && role !== 'ADMIN') {
+        if (!canAccessDistributorFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }

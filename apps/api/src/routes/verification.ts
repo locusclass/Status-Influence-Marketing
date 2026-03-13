@@ -6,6 +6,7 @@ import { JobRepo } from '../repositories/jobRepo.js';
 import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from '../utils.js';
 import { config } from '../config.js';
 import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
+import { canAccessDistributorFeatures } from '../services/roles.js';
 
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
@@ -151,7 +152,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       reply.code(401);
       return { error: 'unauthorized' } as any;
     }
-    if (role !== 'DISTRIBUTOR' && role !== 'ADMIN') {
+    if (!canAccessDistributorFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' } as any;
     }

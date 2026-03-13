@@ -6,8 +6,9 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
+import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, normalizeActiveRole, } from '../services/roles.js';
 const UpdateUserRoleSchema = z.object({
-    role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR'])
+    role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER'])
 });
 const UpdateUserStatusSchema = z.object({
     status: z.enum(['ACTIVE', 'SUSPENDED', 'BANNED'])
@@ -450,7 +451,21 @@ export async function adminRoutes(app) {
             if (!resolvedUserId) {
                 return null;
             }
-            const res = await client.query('UPDATE users SET role=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.role]);
+            const res = await client.query(`UPDATE users
+         SET role=$2,
+             active_role=$3
+         WHERE id=$1
+         RETURNING *`, [
+                resolvedUserId,
+                body.role,
+                body.role === ACCOUNT_ROLE_ADMIN
+                    ? ACCOUNT_ROLE_ADMIN
+                    : body.role === ACCOUNT_ROLE_ADVERTISER
+                        ? ACCOUNT_ROLE_ADVERTISER
+                        : body.role === ACCOUNT_ROLE_DISTRIBUTOR
+                            ? ACCOUNT_ROLE_DISTRIBUTOR
+                            : normalizeActiveRole(null, ACCOUNT_ROLE_DUAL_USER),
+            ]);
             if (res.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_USER_ROLE', 'user', resolvedUserId, { role: body.role });
             }

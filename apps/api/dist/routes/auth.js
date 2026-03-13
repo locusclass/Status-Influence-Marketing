@@ -6,6 +6,7 @@ import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
+import { buildAuthClaims, buildUserSession } from '../services/roles.js';
 const registerSchema = z.object({
     full_name: z.string().min(2).max(120),
     email: z.string().email(),
@@ -112,22 +113,12 @@ export async function authRoutes(app) {
         });
         if (user.error)
             return user;
-        const token = app.jwt.sign({
-            sub: user.id,
-            role: user.role,
-        });
+        const token = app.jwt.sign(buildAuthClaims(user));
         return {
             token,
             user: {
-                id: user.id,
-                public_id: user.public_id,
+                ...buildUserSession(user),
                 full_name: user.full_name ?? '',
-                email: user.email,
-                role: user.role,
-                phone: user.phone,
-                country: user.country,
-                currency: user.currency ?? user.preferred_currency ?? 'UGX',
-                can_multi_contract: user.can_multi_contract ?? false,
                 dialCode: countryData.dialCode,
                 whatsapp_verified: false,
             },
@@ -145,23 +136,12 @@ export async function authRoutes(app) {
             reply.code(401);
             return { error: 'invalid_credentials' };
         }
-        const token = app.jwt.sign({
-            sub: user.id,
-            role: user.role,
-        });
+        const token = app.jwt.sign(buildAuthClaims(user));
         return {
             token,
             user: {
-                id: user.id,
-                public_id: user.public_id,
+                ...buildUserSession(user),
                 full_name: user.full_name ?? '',
-                email: user.email,
-                role: user.role,
-                phone: user.phone,
-                country: user.country,
-                currency: user.currency ?? user.preferred_currency ?? 'UGX',
-                can_multi_contract: user.can_multi_contract ?? false,
-                whatsapp_verified: user.whatsapp_verified ?? false,
             },
         };
     });
@@ -222,6 +202,17 @@ export async function authRoutes(app) {
                     await client.query(`UPDATE users SET phone=$2 WHERE id=$1`, [existing.id, typedPhone]);
                 }
                 await upsertGoogleProfile(client, existing.id, fullName, photoUrl);
+                if (String(existing.role ?? '').trim().toUpperCase() !== body.role) {
+                    await client.query(`
+            UPDATE users
+            SET role='DUAL_USER',
+                active_role=$2
+            WHERE id=$1
+            `, [existing.id, body.role]);
+                }
+                else {
+                    await client.query('UPDATE users SET active_role=$2 WHERE id=$1', [existing.id, body.role]);
+                }
                 const refreshed = await userRepo.findByEmail(client, email);
                 return refreshed ?? existing;
             }
@@ -240,27 +231,15 @@ export async function authRoutes(app) {
             return user;
         }
         const refreshedUser = await withTransaction(async (client) => userRepo.findByEmail(client, email));
-        const token = app.jwt.sign({
-            sub: (refreshedUser ?? user).id,
-            role: (refreshedUser ?? user).role,
-        });
+        const sessionUser = refreshedUser ?? user;
+        const token = app.jwt.sign(buildAuthClaims(sessionUser));
         return {
             token,
             user: {
-                id: (refreshedUser ?? user).id,
-                public_id: (refreshedUser ?? user).public_id,
-                full_name: (refreshedUser ?? user).full_name ?? fullName,
-                email: (refreshedUser ?? user).email,
-                role: (refreshedUser ?? user).role,
-                phone: (refreshedUser ?? user).phone,
-                country: (refreshedUser ?? user).country,
-                currency: (refreshedUser ?? user).currency ??
-                    (refreshedUser ?? user).preferred_currency ??
-                    'UGX',
-                can_multi_contract: (refreshedUser ?? user).can_multi_contract ?? false,
+                ...buildUserSession(sessionUser),
+                full_name: sessionUser.full_name ?? fullName,
                 avatar_url: photoUrl || null,
                 dialCode: countryData.dialCode,
-                whatsapp_verified: (refreshedUser ?? user).whatsapp_verified ?? false,
             },
         };
     });

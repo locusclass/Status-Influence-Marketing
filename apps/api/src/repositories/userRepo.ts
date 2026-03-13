@@ -42,6 +42,7 @@ export class UserRepo {
       'phone',
       'password_hash',
       'role',
+      'active_role',
       'country',
       'preferred_currency',
     ];
@@ -51,6 +52,7 @@ export class UserRepo {
       email,
       phone,
       passwordHash,
+      role,
       role,
       country,
       currency,
@@ -67,7 +69,7 @@ export class UserRepo {
         ${insertColumns.join(', ')}
       )
       VALUES (${placeholders})
-      RETURNING id, public_id, email, role, phone, country, preferred_currency, ${canMultiReturning}
+      RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency, ${canMultiReturning}
       `,
       values
     );

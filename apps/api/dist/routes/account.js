@@ -6,6 +6,7 @@ import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
+import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
@@ -168,6 +169,38 @@ async function ensureAccountSchema(client) {
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE
   `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
+  `);
+    await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN'))
+  `);
+    await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_role_check
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'))
+  `);
+    await client.query(`
+    UPDATE users
+    SET active_role = CASE
+      WHEN role='ADMIN' THEN 'ADMIN'
+      WHEN role='ADVERTISER' THEN 'ADVERTISER'
+      WHEN role='DUAL_USER' AND (active_role IS NULL OR btrim(active_role)='') THEN 'DISTRIBUTOR'
+      ELSE COALESCE(NULLIF(active_role, ''), 'DISTRIBUTOR')
+    END
+    WHERE active_role IS NULL
+       OR btrim(active_role)=''
+       OR (role='ADMIN' AND active_role<>'ADMIN')
+       OR (role='ADVERTISER' AND active_role NOT IN ('ADVERTISER', 'ADMIN'))
+       OR (role='DISTRIBUTOR' AND active_role NOT IN ('DISTRIBUTOR', 'ADMIN'))
+  `);
     await ensureWalletTables(client);
 }
 async function ensureWalletForUser(client, userId) {
@@ -241,6 +274,7 @@ export async function accountRoutes(app) {
           u.public_id,
           u.email,
           u.role,
+          u.active_role,
           u.phone,
           COALESCE(u.whatsapp_verified, FALSE) AS whatsapp_verified,
           u.country,
@@ -404,10 +438,30 @@ export async function accountRoutes(app) {
         }
         const body = parsed.data;
         return withTransaction(async (client) => {
-            await client.query('UPDATE users SET role=$2 WHERE id=$1', [
-                userId,
-                body.role,
-            ]);
+            const currentRes = await client.query(`
+          SELECT
+            id,
+            role,
+            active_role
+          FROM users
+          WHERE id=$1
+          LIMIT 1
+          `, [userId]);
+            const currentUser = currentRes.rows[0];
+            if (!currentUser) {
+                reply.code(404);
+                return { error: 'user_not_found' };
+            }
+            const currentRole = normalizeAccountRole(currentUser.role);
+            const nextActiveRole = normalizeActiveRole(body.role, body.role);
+            const nextRole = currentRole === 'ADMIN'
+                ? 'ADMIN'
+                : currentRole === body.role
+                    ? currentRole
+                    : currentRole === 'DUAL_USER'
+                        ? 'DUAL_USER'
+                        : 'DUAL_USER';
+            await client.query('UPDATE users SET role=$2, active_role=$3 WHERE id=$1', [userId, nextRole, nextActiveRole]);
             const hasCanMultiContract = await usersHasColumn(client, 'can_multi_contract');
             const canMultiSelect = hasCanMultiContract
                 ? 'can_multi_contract'
@@ -418,6 +472,7 @@ export async function accountRoutes(app) {
             public_id,
             email,
             role,
+            active_role,
             phone,
             country,
             preferred_currency AS currency,
@@ -431,24 +486,11 @@ export async function accountRoutes(app) {
                 reply.code(404);
                 return { error: 'user_not_found' };
             }
-            const token = app.jwt.sign({
-                sub: user.id,
-                role: user.role,
-            });
+            const token = app.jwt.sign(buildAuthClaims(user));
             return {
                 ok: true,
                 token,
-                user: {
-                    id: user.id,
-                    public_id: user.public_id,
-                    email: user.email,
-                    role: user.role,
-                    phone: user.phone,
-                    whatsapp_verified: user.whatsapp_verified ?? false,
-                    country: user.country,
-                    currency: user.currency ?? 'UGX',
-                    can_multi_contract: user.can_multi_contract ?? false,
-                },
+                user: buildUserSession(user),
             };
         });
     });
@@ -586,7 +628,8 @@ export async function accountRoutes(app) {
     });
     app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
-        const role = request.user.role;
+        const accountRole = request.user.role;
+        const activeRole = normalizeActiveRole(request.user.active_role, accountRole);
         const data = await withTransaction(async (client) => {
             await ensureWalletForUser(client, userId);
             const walletRes = await client.query('SELECT * FROM wallets WHERE user_id=$1', [userId]);
@@ -597,8 +640,8 @@ export async function accountRoutes(app) {
                     ? {
                         ...wallet,
                         minimum_withdrawal_amount: MIN_WALLET_WITHDRAW_UGX,
-                        wallet_mode: role === 'ADVERTISER' ? 'CAMPAIGN_ONLY' : 'STANDARD',
-                        wallet_notice: role === 'ADVERTISER'
+                        wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
+                        wallet_notice: activeRole === ACCOUNT_ROLE_ADVERTISER
                             ? 'Advertiser wallet funds campaigns and receives escrow returns. Withdrawals are allowed from UGX 10,000.'
                             : 'Distributor wallet supports withdrawals from UGX 10,000.',
                     }
@@ -749,9 +792,10 @@ export async function accountRoutes(app) {
     });
     app.get('/dashboard/summary', { preHandler: [app.authenticate] }, async (request) => {
         const userId = request.user.sub;
-        const role = request.user.role;
+        const accountRole = request.user.role;
+        const activeRole = normalizeActiveRole(request.user.active_role, accountRole);
         return withTransaction(async (client) => {
-            if (role === 'ADVERTISER') {
+            if (activeRole === ACCOUNT_ROLE_ADVERTISER && canAccessAdvertiserFeatures(accountRole)) {
                 const campaignsRes = await client.query(`SELECT c.id,
                   c.title,
                   c.created_at,
