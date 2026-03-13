@@ -137,7 +137,7 @@ async function getEligibleDistributors(client: any): Promise<EligibleDistributor
       ORDER BY p.created_at DESC
       LIMIT 1
     ) lp ON TRUE
-    WHERE u.role = 'DISTRIBUTOR'
+    WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER')
       AND u.status = 'ACTIVE'
       AND COALESCE(lp.observed_views, 0) > 0
     ORDER BY lp.observed_views DESC, u.created_at ASC
@@ -177,7 +177,7 @@ async function allocateOpenCampaignShares(client: any, rootCampaign: any) {
     SELECT COALESCE(SUM(impression_target), 0)::int AS allocated_views
     FROM campaigns
     WHERE parent_campaign_id=$1
-      AND status='ACTIVE'
+      AND status IN ('ACTIVE', 'COMPLETED')
     `,
     [rootCampaign.id]
   );
@@ -319,18 +319,21 @@ async function reallocateExpiredOpenAllocations(client: any) {
 
   const eligible: EligibleDistributor[] = shuffle(await getEligibleDistributors(client));
   for (const allocation of res.rows as any[]) {
-    const completedProofRes = await client.query(
+    const unresolvedProofRes = await client.query(
       `
       SELECT 1
       FROM proofs p
       JOIN verification_sessions s ON s.id = p.session_id
       WHERE s.campaign_id=$1
-        AND p.status='VERIFIED'
+        AND (
+          p.status IN ('PENDING', 'MANUAL_REVIEW', 'VERIFIED')
+          OR (p.status = 'REJECTED' AND COALESCE(p.decision, '') <> 'REJECTED')
+        )
       LIMIT 1
       `,
       [allocation.id]
     );
-    if (completedProofRes.rows[0]) {
+    if (unresolvedProofRes.rows[0]) {
       continue;
     }
 
@@ -498,7 +501,7 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
      FROM contracts
      WHERE campaign_id=$1
        AND distributor_id=$2
-       AND status='ACTIVE'
+       AND status IN ('ACTIVE', 'COMPLETED')
      LIMIT 1`,
     [campaign.id, proof.user_id]
   );
@@ -869,14 +872,32 @@ async function expireOverdueContractsIfDue() {
   lastContractExpirySweepAt = now;
 
   await withTransaction(async (client) => {
-    await client.query(
-      `UPDATE contracts
+    const expired = await client.query(
+      `UPDATE contracts ctr
        SET status='CANCELLED',
            cancelled_at=COALESCE(cancelled_at, now())
-       WHERE status='ACTIVE'
-         AND contract_deadline_at IS NOT NULL
-         AND contract_deadline_at < now()`
+       FROM campaigns c
+       WHERE ctr.campaign_id = c.id
+         AND ctr.status='ACTIVE'
+         AND ctr.contract_deadline_at IS NOT NULL
+         AND ctr.contract_deadline_at < now()
+       RETURNING ctr.id, ctr.campaign_id, c.execution_mode`
     );
+
+    const openCampaignIds = expired.rows
+      .filter((row: any) => row.execution_mode === 'OPEN_BUDGET')
+      .map((row: any) => row.campaign_id);
+
+    if (openCampaignIds.length > 0) {
+      await client.query(
+        `
+        UPDATE campaigns
+        SET last_allocated_at = now() - interval '2 hours'
+        WHERE id = ANY($1::uuid[])
+        `,
+        [openCampaignIds]
+      );
+    }
   });
 }
 

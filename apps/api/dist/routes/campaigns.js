@@ -168,6 +168,139 @@ async function getLatestConfirmedViewers(client, distributorId) {
     `, [distributorId]);
     return Number(res.rows[0]?.observed_views ?? 0);
 }
+function deriveProofStatus(latestProof) {
+    if (!latestProof)
+        return 'NOT_SUBMITTED';
+    if (latestProof.status === 'VERIFIED' && latestProof.decision === 'VERIFIED') {
+        return 'VERIFIED';
+    }
+    if (latestProof.status === 'VERIFIED' && latestProof.decision === 'REJECTED') {
+        return 'REJECTED';
+    }
+    if (latestProof.decision === 'MANUAL_REVIEW' || latestProof.status === 'MANUAL_REVIEW') {
+        return 'UNDER_REVIEW';
+    }
+    if (latestProof.status === 'REJECTED') {
+        return 'REJECTED';
+    }
+    return 'PENDING_REVIEW';
+}
+function deriveSettlementStatus(escrowStatus, latestContractStatus, proofStatus) {
+    if (proofStatus === 'VERIFIED' || latestContractStatus === 'COMPLETED') {
+        return escrowStatus === 'COMPLETED' ? 'PAID_OUT' : 'PAYOUT_IN_PROGRESS';
+    }
+    if (latestContractStatus === 'CANCELLED') {
+        return 'NOT_SETTLED';
+    }
+    if (escrowStatus === 'PENDING') {
+        return 'AWAITING_FUNDING';
+    }
+    return 'LOCKED_IN_ESCROW';
+}
+async function buildCampaignStatusSummary(client, campaignId, userId) {
+    const summaries = await buildCampaignStatusSummaries(client, [campaignId], userId);
+    return (summaries.get(campaignId) ?? {
+        campaign_status: 'ACTIVE',
+        escrow_status: 'PENDING',
+        latest_contract_status: 'UNCLAIMED',
+        my_contract_status: null,
+        proof_status: 'NOT_SUBMITTED',
+        settlement_status: 'AWAITING_FUNDING',
+        is_available: false,
+    });
+}
+async function buildCampaignStatusSummaries(client, campaignIds, userId) {
+    if (campaignIds.length === 0) {
+        return new Map();
+    }
+    const statusRes = await client.query(`
+    scope AS (
+      SELECT
+        c.id AS campaign_id,
+        COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id,
+        c.status AS campaign_status,
+        (c.parent_campaign_id IS NULL) AS is_root
+      FROM campaigns c
+      WHERE c.id = ANY($1::uuid[])
+    ),
+    scoped_members AS (
+      SELECT
+        s.campaign_id AS selected_campaign_id,
+        c.id AS member_campaign_id
+      FROM scope s
+      JOIN campaigns c
+        ON (
+          (s.is_root AND (c.id = s.campaign_id OR c.parent_campaign_id = s.campaign_id))
+          OR
+          ((NOT s.is_root) AND c.id = s.campaign_id)
+        )
+    )
+    SELECT
+      s.campaign_status,
+      s.campaign_id,
+      COALESCE(e.status, 'PENDING') AS escrow_status,
+      lc.status AS latest_contract_status,
+      mc.status AS my_contract_status,
+      lp.status AS latest_proof_status,
+      lp.decision AS latest_proof_decision
+    FROM scope s
+    LEFT JOIN escrow_ledger e ON e.campaign_id = s.escrow_campaign_id
+    LEFT JOIN LATERAL (
+      SELECT status
+      FROM contracts
+      WHERE campaign_id IN (
+        SELECT member_campaign_id
+        FROM scoped_members
+        WHERE selected_campaign_id = s.campaign_id
+      )
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) lc ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT status
+      FROM contracts
+      WHERE campaign_id = s.campaign_id
+        AND distributor_id = $2
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) mc ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT p.status, p.decision
+      FROM proofs p
+      JOIN verification_sessions vs ON vs.id = p.session_id
+      WHERE vs.campaign_id IN (
+        SELECT member_campaign_id
+        FROM scoped_members
+        WHERE selected_campaign_id = s.campaign_id
+      )
+      ORDER BY p.created_at DESC
+      LIMIT 1
+    ) lp ON TRUE
+    `, [campaignIds, userId ?? null]);
+    const result = new Map();
+    for (const row of statusRes.rows) {
+        const campaignStatus = String(row.campaign_status ?? 'ACTIVE');
+        const escrowStatus = String(row.escrow_status ?? 'PENDING');
+        const latestContractStatus = String(row.latest_contract_status ?? 'UNCLAIMED');
+        const myContractStatus = row.my_contract_status == null ? null : String(row.my_contract_status);
+        const proofStatus = deriveProofStatus(row.latest_proof_status
+            ? { status: row.latest_proof_status, decision: row.latest_proof_decision }
+            : null);
+        const settlementStatus = deriveSettlementStatus(escrowStatus, latestContractStatus, proofStatus);
+        result.set(String(row.campaign_id), {
+            campaign_status: campaignStatus,
+            escrow_status: escrowStatus,
+            latest_contract_status: latestContractStatus,
+            my_contract_status: myContractStatus,
+            proof_status: proofStatus,
+            settlement_status: settlementStatus,
+            is_available: campaignStatus === 'ACTIVE' &&
+                escrowStatus !== 'PENDING' &&
+                latestContractStatus === 'UNCLAIMED',
+        });
+    }
+    return result;
+}
 async function getContractCompletionReadiness(client, contractId, userId) {
     const contractRes = await client.query(`
     SELECT
@@ -282,9 +415,11 @@ export async function campaignRoutes(app) {
                 filters.push(`c.advertiser_id = $${idx}`);
                 params.push(authUser ?? '');
                 idx++;
+                filters.push(`c.parent_campaign_id IS NULL`);
             }
             const availableOnly = (query.available_only ?? 'true').toString().toLowerCase();
             if (role === 'DISTRIBUTOR' && availableOnly !== 'false') {
+                filters.push(`c.status='ACTIVE'`);
                 filters.push(`NOT EXISTS (
              SELECT 1
              FROM contracts ctr
@@ -310,7 +445,20 @@ export async function campaignRoutes(app) {
         ORDER BY c.created_at DESC
         LIMIT $${idx + 1} OFFSET $${idx + 2}
         `, [...params, authUser ?? '', limit, offset]);
-            return res.rows;
+            const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), authUser ?? null);
+            const campaignsWithStatus = res.rows.map((row) => ({
+                ...row,
+                status_summary: statusSummaries.get(String(row.id)) ?? {
+                    campaign_status: String(row.status ?? 'ACTIVE'),
+                    escrow_status: 'PENDING',
+                    latest_contract_status: 'UNCLAIMED',
+                    my_contract_status: null,
+                    proof_status: 'NOT_SUBMITTED',
+                    settlement_status: 'AWAITING_FUNDING',
+                    is_available: false,
+                },
+            }));
+            return campaignsWithStatus;
         });
         return { campaigns };
     });
@@ -339,6 +487,7 @@ export async function campaignRoutes(app) {
                 my_active_contract: authUser
                     ? activeContract.rows.find((row) => row.distributor_id === authUser) ?? null
                     : null,
+                status_summary: await buildCampaignStatusSummary(client, found.id, authUser ?? null),
             };
         });
         if (!campaign) {
@@ -472,18 +621,24 @@ export async function campaignRoutes(app) {
                     payout_amount: rootPayout,
                     platform_fee_percent: platformFeePercent,
                     advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-                    impression_target: body.impression_target ?? impressionTarget,
+                    impression_target: executionMode === 'OPEN_BUDGET'
+                        ? impressionTarget
+                        : body.impression_target ?? impressionTarget,
                 });
                 await paymentRepo.createEscrow(client, root.id, root.budget_total);
                 if (executionMode === 'PRIVATE_CONTRACT') {
-                    const splitBudget = Math.floor(rootBudget / beneficiaryContacts.length);
                     const splitDistributable = Math.floor(distributableBudget / beneficiaryContacts.length);
-                    const splitViews = Math.max(1, Math.floor(splitDistributable / PRIVATE_RATE_UGX));
+                    const splitGrossBudget = Math.floor(rootBudget / beneficiaryContacts.length);
+                    const budgetRemainder = rootBudget - splitGrossBudget * beneficiaryContacts.length;
+                    const distributableRemainder = distributableBudget - splitDistributable * beneficiaryContacts.length;
+                    let beneficiaryIndex = 0;
                     for (const phone of beneficiaryContacts) {
                         const distributor = await findDistributorByPhone(client, phone);
                         if (!distributor) {
                             throw new Error(`beneficiary_not_found:${phone}`);
                         }
+                        const grossBudgetShare = splitGrossBudget + (beneficiaryIndex < budgetRemainder ? 1 : 0);
+                        const distributableShare = splitDistributable + (beneficiaryIndex < distributableRemainder ? 1 : 0);
                         await campaignRepo.createCampaign(client, {
                             ...body,
                             advertiser_id: authUser,
@@ -492,12 +647,13 @@ export async function campaignRoutes(app) {
                             assigned_phone: distributor.phone,
                             visibility: 'PRIVATE',
                             execution_mode: 'PRIVATE_CONTRACT',
-                            payout_amount: splitBudget,
-                            budget_total: splitBudget,
+                            payout_amount: distributableShare,
+                            budget_total: grossBudgetShare,
                             platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
                             advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-                            impression_target: splitViews,
+                            impression_target: Math.max(1, Math.floor(distributableShare / PRIVATE_RATE_UGX)),
                         });
+                        beneficiaryIndex += 1;
                     }
                 }
                 return {
@@ -634,6 +790,9 @@ export async function campaignRoutes(app) {
                 return { error: 'campaign_not_found' };
             if (campaign.status !== 'ACTIVE')
                 return { error: 'campaign_not_active' };
+            if (campaign.execution_mode === 'OPEN_BUDGET' && !campaign.parent_campaign_id) {
+                return { error: 'open_campaign_allocation_required' };
+            }
             if (campaign.advertiser_id === authUser) {
                 return { error: 'self_contract_forbidden' };
             }
@@ -678,6 +837,7 @@ export async function campaignRoutes(app) {
           campaign_id,
           distributor_id,
           status,
+          accepted_at,
           post_deadline_at,
           contract_deadline_at
         )
@@ -685,6 +845,7 @@ export async function campaignRoutes(app) {
           $1,
           $2,
           'ACTIVE',
+          now(),
           now() + interval '1 hour',
           now() + (($3::int * 60 + 60)::text || ' minutes')::interval
         WHERE NOT EXISTS (
@@ -705,6 +866,7 @@ export async function campaignRoutes(app) {
                 campaign: {
                     ...campaign,
                     allocated_views: allocatedViews,
+                    status_summary: await buildCampaignStatusSummary(client, campaign.id, authUser),
                 },
             };
         });
@@ -712,9 +874,11 @@ export async function campaignRoutes(app) {
             const error = result.error;
             const code = error === 'campaign_not_found'
                 ? 404
-                : error === 'forbidden' || error === 'self_contract_forbidden'
-                    ? 403
-                    : 409;
+                : error === 'open_campaign_allocation_required'
+                    ? 409
+                    : error === 'forbidden' || error === 'self_contract_forbidden'
+                        ? 403
+                        : 409;
             reply.code(code);
             return { error };
         }
@@ -740,6 +904,18 @@ export async function campaignRoutes(app) {
          SET status='CANCELLED', cancelled_at=now()
          WHERE id=$1
          RETURNING *`, [params.id]);
+            await client.query(`UPDATE campaigns
+         SET last_allocated_at = CASE
+               WHEN execution_mode='OPEN_BUDGET'
+               THEN now() - interval '2 hours'
+               ELSE last_allocated_at
+             END
+         WHERE id=$1`, [contract.campaign_id]);
+            await client.query(`UPDATE campaigns
+         SET status='CANCELLED'
+         WHERE id=$1
+           AND execution_mode='PRIVATE_CONTRACT'
+           AND visibility='PRIVATE'`, [contract.campaign_id]);
             return updated.rows[0];
         });
         if (!result) {
@@ -768,6 +944,11 @@ export async function campaignRoutes(app) {
          SET status='COMPLETED', completed_at=now()
          WHERE id=$1 AND status='ACTIVE'
          RETURNING *`, [params.id]);
+            await client.query(`UPDATE campaigns
+         SET status='COMPLETED'
+         WHERE id=$1
+           AND execution_mode='PRIVATE_CONTRACT'
+           AND visibility='PRIVATE'`, [contract.campaign_id]);
             if (!updated.rows[0])
                 return { error: 'contract_not_active' };
             return { contract: updated.rows[0], campaign_platform: contract.platform, campaign_id: contract.campaign_id };

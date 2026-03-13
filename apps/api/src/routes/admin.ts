@@ -139,6 +139,14 @@ async function markContractCompletedForVerifiedProof(client: any, proofId: strin
     `,
     [proofContext.campaign_id, proofContext.user_id]
   );
+  await client.query(
+    `
+    UPDATE campaigns
+    SET status='COMPLETED'
+    WHERE id=$1
+    `,
+    [proofContext.campaign_id]
+  );
 }
 
 function parsePaging(query: any) {

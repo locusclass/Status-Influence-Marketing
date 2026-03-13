@@ -105,6 +105,11 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
       AND distributor_id=$2
       AND status='ACTIVE'
     `, [proofContext.campaign_id, proofContext.user_id]);
+    await client.query(`
+    UPDATE campaigns
+    SET status='COMPLETED'
+    WHERE id=$1
+    `, [proofContext.campaign_id]);
 }
 function parsePaging(query) {
     const limitRaw = Number(query?.limit ?? 50);

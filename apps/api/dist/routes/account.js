@@ -872,13 +872,55 @@ export async function accountRoutes(app) {
                 c.payout_amount,
                 c.terms_keep_hours,
                 c.terms_min_views,
-                c.terms_requirement
+                c.terms_requirement,
+                c.status AS campaign_status,
+                COALESCE(e.status, 'PENDING') AS escrow_status,
+                p.status AS latest_proof_status,
+                p.decision AS latest_proof_decision
          FROM contracts ctr
          JOIN campaigns c ON c.id = ctr.campaign_id
+         LEFT JOIN escrow_ledger e ON e.campaign_id = COALESCE(c.parent_campaign_id, c.id)
+         LEFT JOIN LATERAL (
+           SELECT p.status, p.decision
+           FROM proofs p
+           JOIN verification_sessions s ON s.id = p.session_id
+           WHERE s.campaign_id = ctr.campaign_id
+             AND p.user_id = ctr.distributor_id
+           ORDER BY p.created_at DESC
+           LIMIT 1
+         ) p ON TRUE
          ${where}
          ORDER BY ctr.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`, params);
-            return { contracts: res.rows };
+            return {
+                contracts: res.rows.map((row) => {
+                    const proofStatus = !row.latest_proof_status
+                        ? 'NOT_SUBMITTED'
+                        : row.latest_proof_status === 'VERIFIED' && row.latest_proof_decision === 'VERIFIED'
+                            ? 'VERIFIED'
+                            : row.latest_proof_decision === 'REJECTED' || row.latest_proof_status === 'REJECTED'
+                                ? 'REJECTED'
+                                : row.latest_proof_status === 'MANUAL_REVIEW' || row.latest_proof_decision === 'MANUAL_REVIEW'
+                                    ? 'UNDER_REVIEW'
+                                    : 'PENDING_REVIEW';
+                    return {
+                        ...row,
+                        status_summary: {
+                            contract_status: row.status,
+                            campaign_status: row.campaign_status,
+                            escrow_status: row.escrow_status,
+                            proof_status: proofStatus,
+                            settlement_status: row.status === 'COMPLETED'
+                                ? row.escrow_status === 'COMPLETED'
+                                    ? 'PAID_OUT'
+                                    : 'PAYOUT_IN_PROGRESS'
+                                : row.escrow_status === 'PENDING'
+                                    ? 'AWAITING_FUNDING'
+                                    : 'LOCKED_IN_ESCROW',
+                        },
+                    };
+                }),
+            };
         });
     });
 }
