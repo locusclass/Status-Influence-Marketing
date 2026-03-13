@@ -187,11 +187,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const paymentRepo = new PaymentRepo();
 
   app.post('/admin/access', async (request, reply) => {
-    const body = AdminAccessSchema.parse(request.body);
-    if (!config.adminAccessPhrase || body.phrase !== config.adminAccessPhrase) {
-      reply.code(401);
-      return { error: 'invalid_phrase' };
-    }
+    AdminAccessSchema.parse(request.body);
 
     const token = app.jwt.sign({
       sub: 'ariaka-access',

@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
-import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { getTransactionStatus } from '../services/pesapal.js';
@@ -135,11 +134,7 @@ export async function adminRoutes(app) {
     const jobRepo = new JobRepo();
     const paymentRepo = new PaymentRepo();
     app.post('/admin/access', async (request, reply) => {
-        const body = AdminAccessSchema.parse(request.body);
-        if (!config.adminAccessPhrase || body.phrase !== config.adminAccessPhrase) {
-            reply.code(401);
-            return { error: 'invalid_phrase' };
-        }
+        AdminAccessSchema.parse(request.body);
         const token = app.jwt.sign({
             sub: 'ariaka-access',
             role: 'ADMIN'
