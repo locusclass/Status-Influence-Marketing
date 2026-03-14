@@ -133,6 +133,29 @@ function validateStrictClientMeta(clientMeta: any, script: any): string | null {
   return null;
 }
 
+async function getActiveDistributorContract(
+  client: any,
+  campaignId: string,
+  userId: string
+) {
+  const contractRes = await client.query(
+    `SELECT id, post_deadline_at, contract_deadline_at
+     FROM contracts
+     WHERE campaign_id=$1
+       AND distributor_id=$2
+       AND status='ACTIVE'
+     LIMIT 1`,
+    [campaignId, userId]
+  );
+  return contractRes.rows[0] ?? null;
+}
+
+function hasDeadlinePassed(raw: unknown) {
+  if (!raw) return false;
+  const deadline = Date.parse(String(raw));
+  return Number.isFinite(deadline) && deadline < Date.now();
+}
+
 function isAllowedProofVideoUrl(value: string): boolean {
   if (value.startsWith('/uploads/files/') || value.startsWith('/api/uploads/files/')) {
     const parsed = new URL(value, 'http://local.test');
@@ -198,16 +221,18 @@ export async function verificationRoutes(app: FastifyInstance) {
         return script;
       }
 
-      const contractRes = await client.query(
-        `SELECT id
-         FROM contracts
-         WHERE campaign_id=$1
-           AND distributor_id=$2
-           AND status='ACTIVE'
-         LIMIT 1`,
-        [body.campaign_id, authUser]
+      const contract = await getActiveDistributorContract(
+        client,
+        body.campaign_id,
+        authUser
       );
-      if (!contractRes.rows[0] && role !== 'ADMIN') return { error: 'contract_required' } as any;
+      if (!contract && role !== 'ADMIN') return { error: 'contract_required' } as any;
+      if (contract && hasDeadlinePassed(contract.contract_deadline_at)) {
+        return { error: 'contract_not_active' } as any;
+      }
+      if (contract && hasDeadlinePassed(contract.post_deadline_at)) {
+        return { error: 'post_deadline_passed' } as any;
+      }
 
       const activeSessionRes = await client.query(
         `SELECT id
@@ -242,6 +267,7 @@ export async function verificationRoutes(app: FastifyInstance) {
         platform_mismatch: 400,
         unsupported_platform: 400,
         contract_required: 403,
+        post_deadline_passed: 409,
         session_active_exists: 409,
       };
       reply.code(codeMap[(session as any).error] ?? 400);
@@ -287,16 +313,18 @@ export async function verificationRoutes(app: FastifyInstance) {
       );
       if (existingForSession.rows[0]) return { error: 'proof_already_submitted' } as any;
 
-      const contractRes = await client.query(
-        `SELECT id
-         FROM contracts
-         WHERE campaign_id=$1
-           AND distributor_id=$2
-           AND status='ACTIVE'
-         LIMIT 1`,
-        [session.campaign_id, authUser]
+      const contract = await getActiveDistributorContract(
+        client,
+        session.campaign_id,
+        authUser
       );
-      if (!contractRes.rows[0]) return { error: 'contract_not_active' } as any;
+      if (!contract) return { error: 'contract_not_active' } as any;
+      if (hasDeadlinePassed(contract.contract_deadline_at)) {
+        return { error: 'contract_not_active' } as any;
+      }
+      if (hasDeadlinePassed(contract.post_deadline_at)) {
+        return { error: 'post_deadline_passed' } as any;
+      }
 
       const priorProof = await client.query(
         `SELECT p.id
@@ -349,6 +377,7 @@ export async function verificationRoutes(app: FastifyInstance) {
         client_meta_step_timing_invalid: 400,
         proof_already_submitted: 409,
         contract_not_active: 403,
+        post_deadline_passed: 409,
         duplicate_campaign_proof: 409,
         device_fingerprint_conflict: 409,
       };
