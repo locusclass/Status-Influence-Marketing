@@ -45,6 +45,15 @@ function resolveDistributorCapacity(body: {
   return Number.isFinite(capacity) && capacity > 0 ? Math.trunc(capacity) : 0;
 }
 
+function currentDistributorCapacity(user: {
+  max_status_viewers_12h?: unknown;
+  maxStatusViewers12h?: unknown;
+}) {
+  const raw = user.max_status_viewers_12h ?? user.maxStatusViewers12h ?? 0;
+  const capacity = Number(raw);
+  return Number.isFinite(capacity) && capacity > 0 ? Math.trunc(capacity) : 0;
+}
+
 async function ensureUserProfilesTable(client: any) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -232,10 +241,6 @@ export async function authRoutes(app: FastifyInstance) {
 
     const body = parsed.data;
     const distributorCapacity = resolveDistributorCapacity(body);
-    if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
-      reply.code(400);
-      return { error: 'max_status_viewers_required' };
-    }
     const countryData = resolveCountry(body.country);
 
     let payload: any;
@@ -276,6 +281,7 @@ export async function authRoutes(app: FastifyInstance) {
       const existing = await userRepo.findByEmail(client, email);
       const typedPhone = body.phone.trim();
       if (existing) {
+        const existingDistributorCapacity = currentDistributorCapacity(existing);
         if (typedPhone && typedPhone !== String(existing.phone ?? '').trim()) {
           const phoneOwner = await client.query(
             `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
@@ -299,15 +305,17 @@ export async function authRoutes(app: FastifyInstance) {
             `
             UPDATE users
             SET role='DUAL_USER',
-                active_role=$2,
-                max_status_viewers_12h = CASE
+              active_role=$2,
+              max_status_viewers_12h = CASE
                   WHEN $2='DISTRIBUTOR' AND $3::int > 0
                     THEN $3
+                  WHEN $2='DISTRIBUTOR' AND $4::int > 0
+                    THEN $4
                   ELSE COALESCE(max_status_viewers_12h, 0)
                 END
             WHERE id=$1
             `,
-            [existing.id, body.role, distributorCapacity]
+            [existing.id, body.role, distributorCapacity, existingDistributorCapacity]
           );
         } else {
           await client.query(
@@ -317,15 +325,22 @@ export async function authRoutes(app: FastifyInstance) {
                 max_status_viewers_12h = CASE
                   WHEN $2='DISTRIBUTOR' AND $3::int > 0
                     THEN $3
+                  WHEN $2='DISTRIBUTOR' AND $4::int > 0
+                    THEN $4
                   ELSE COALESCE(max_status_viewers_12h, 0)
                 END
             WHERE id=$1
             `,
-            [existing.id, body.role, distributorCapacity]
+            [existing.id, body.role, distributorCapacity, existingDistributorCapacity]
           );
         }
         const refreshed = await userRepo.findByEmail(client, email);
         return refreshed ?? existing;
+      }
+
+      if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
+        reply.code(400);
+        return { error: 'max_status_viewers_required' } as any;
       }
 
       const phoneOwner = await client.query(
