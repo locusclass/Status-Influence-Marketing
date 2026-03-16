@@ -552,6 +552,54 @@ async function preparePayoutRequest(client, proof, campaign) {
     await client.query("UPDATE payout_requests SET status='PAID', pesapal_reference=$2 WHERE id=$1", [payoutRow.id, `WALLET_CREDIT:${proof.id}`]);
     return null;
 }
+async function ensureWalletForUser(client, userId) {
+    const existing = await client.query('SELECT * FROM wallets WHERE user_id=$1 LIMIT 1', [userId]);
+    if (existing.rows[0]) {
+        return existing.rows[0];
+    }
+    const userRes = await client.query('SELECT preferred_currency FROM users WHERE id=$1 LIMIT 1', [userId]);
+    const currency = (userRes.rows[0]?.preferred_currency ?? 'UGX').toString().trim().toUpperCase();
+    const created = await client.query(`
+    INSERT INTO wallets (user_id, currency, balance_available, balance_escrow, balance)
+    VALUES ($1,$2,0,0,0)
+    RETURNING *
+    `, [userId, currency]);
+    return created.rows[0];
+}
+async function refundExpiredPrivateContractToWallet(client, expiredContract) {
+    const refundAmount = Number(expiredContract.budget_total ?? 0);
+    if (refundAmount <= 0) {
+        return;
+    }
+    const escrowRes = await client.query(`
+    UPDATE escrow_ledger
+    SET amount_available = amount_available - $2,
+        status = CASE
+          WHEN amount_available - $2 <= 0 THEN 'COMPLETED'
+          ELSE 'PARTIALLY_DISBURSED'
+        END
+    WHERE campaign_id=$1 AND amount_available >= $2
+    RETURNING *
+    `, [expiredContract.escrow_campaign_id, refundAmount]);
+    if (!escrowRes.rows[0]) {
+        return;
+    }
+    const wallet = await ensureWalletForUser(client, expiredContract.advertiser_id);
+    await client.query(`
+    UPDATE wallets
+    SET balance_available = balance_available + $2,
+        balance = balance + $2
+    WHERE id=$1
+    `, [wallet.id, refundAmount]);
+    await client.query(`
+    INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+    VALUES ($1,$2,'CREDIT',$3)
+    `, [
+        wallet.id,
+        refundAmount,
+        `ESCROW_RETURN:CONTRACT_EXPIRE:${expiredContract.id}`,
+    ]);
+}
 async function compensatePayoutFailure(proofId, campaignId) {
     await withTransaction(async (client) => {
         const payoutRes = await client.query('SELECT * FROM payout_requests WHERE proof_id=$1', [proofId]);
@@ -746,10 +794,19 @@ async function expireOverdueContractsIfDue() {
          AND ctr.status='ACTIVE'
          AND ctr.contract_deadline_at IS NOT NULL
          AND ctr.contract_deadline_at < now()
-       RETURNING ctr.id, ctr.campaign_id, c.execution_mode`);
+       RETURNING
+         ctr.id,
+         ctr.campaign_id,
+         c.execution_mode,
+         c.advertiser_id,
+         c.budget_total,
+         COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id`);
         const openCampaignIds = expired.rows
             .filter((row) => row.execution_mode === 'OPEN_BUDGET')
             .map((row) => row.campaign_id);
+        for (const row of expired.rows.filter((entry) => entry.execution_mode !== 'OPEN_BUDGET')) {
+            await refundExpiredPrivateContractToWallet(client, row);
+        }
         if (openCampaignIds.length > 0) {
             await client.query(`
         UPDATE campaigns

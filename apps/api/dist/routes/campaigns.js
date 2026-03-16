@@ -752,39 +752,74 @@ export async function campaignRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        const summary = await withTransaction(async (client) => {
-            const campaign = await campaignRepo.getCampaign(client, params.id);
-            if (!campaign)
-                return { error: 'campaign_not_found' };
-            if (campaign.advertiser_id !== authUser)
-                return { error: 'not_campaign_advertiser' };
-            const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [campaign.id]);
-            const campaignIds = campaignIdsRes.rows.map((row) => row.id);
-            const totalRes = await client.query(`SELECT COUNT(*)::int AS total FROM proofs p
-         JOIN verification_sessions s ON s.id = p.session_id
-         WHERE s.campaign_id = ANY($1::uuid[])`, [campaignIds]);
-            const latestRes = await client.query(`SELECT p.status, p.decision, p.created_at
-         FROM proofs p
-         JOIN verification_sessions s ON s.id = p.session_id
-         WHERE s.campaign_id = ANY($1::uuid[])
-         ORDER BY p.created_at DESC
-         LIMIT 1`, [campaignIds]);
-            const completedRes = await client.query(`SELECT
-           COUNT(*)::int AS completed_contracts,
-           COUNT(*) FILTER (WHERE status='COMPLETED')::int AS successful_contracts
-         FROM contracts
-         WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+        let summary;
+        try {
+            summary = await withTransaction(async (client) => {
+                const campaign = await campaignRepo.getCampaign(client, params.id);
+                if (!campaign)
+                    return { error: 'campaign_not_found' };
+                if (campaign.advertiser_id !== authUser) {
+                    return { error: 'not_campaign_advertiser' };
+                }
+                const scopeId = campaign.parent_campaign_id ?? campaign.id;
+                const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [scopeId]);
+                const campaignIds = Array.from(new Set(campaignIdsRes.rows
+                    .map((row) => String(row.id ?? '').trim())
+                    .filter(Boolean)));
+                if (campaignIds.length === 0) {
+                    return {
+                        total: 0,
+                        latest: null,
+                        contract_completion_notice: 'Contract completion summary generated from verified screen-recording review results.',
+                        completed_contracts: 0,
+                        successful_contracts: 0,
+                        thanks_note: 'Thank you for advertising with the platform.',
+                    };
+                }
+                const totalRes = await client.query(`SELECT COUNT(*)::int AS total
+           FROM proofs p
+           JOIN verification_sessions s ON s.id = p.session_id
+           WHERE s.campaign_id = ANY($1::uuid[])`, [campaignIds]);
+                const latestRes = await client.query(`SELECT p.status, p.decision, p.created_at
+           FROM proofs p
+           JOIN verification_sessions s ON s.id = p.session_id
+           WHERE s.campaign_id = ANY($1::uuid[])
+           ORDER BY p.created_at DESC
+           LIMIT 1`, [campaignIds]);
+                const completedRes = await client.query(`SELECT
+             COUNT(*)::int AS completed_contracts,
+             COALESCE(SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END), 0)::int AS successful_contracts
+           FROM contracts
+           WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+                return {
+                    total: totalRes.rows[0]?.total ?? 0,
+                    latest: latestRes.rows[0] ?? null,
+                    contract_completion_notice: 'Contract completion summary generated from verified screen-recording review results.',
+                    completed_contracts: completedRes.rows[0]?.completed_contracts ?? 0,
+                    successful_contracts: completedRes.rows[0]?.successful_contracts ?? 0,
+                    thanks_note: 'Thank you for advertising with the platform.',
+                };
+            });
+        }
+        catch (error) {
+            app.log.error({
+                error,
+                campaignId: params.id,
+                advertiserId: authUser,
+            }, 'campaign_proofs_summary_failed');
+            reply.code(200);
             return {
-                total: totalRes.rows[0]?.total ?? 0,
-                latest: latestRes.rows[0] ?? null,
-                contract_completion_notice: 'Contract completion summary generated from verified screen-recording review results.',
-                completed_contracts: completedRes.rows[0]?.completed_contracts ?? 0,
-                successful_contracts: completedRes.rows[0]?.successful_contracts ?? 0,
+                total: 0,
+                latest: null,
+                contract_completion_notice: 'Contract completion summary is temporarily unavailable.',
+                completed_contracts: 0,
+                successful_contracts: 0,
                 thanks_note: 'Thank you for advertising with the platform.',
             };
-        });
+        }
         if (summary.error) {
-            reply.code(403);
+            const error = summary.error;
+            reply.code(error === 'campaign_not_found' ? 404 : 403);
             return summary;
         }
         return summary;
@@ -1144,11 +1179,23 @@ export async function campaignRoutes(app) {
         const pesapalError = orderAny?.error ?? orderAny?.errro;
         const status = orderAny?.status;
         if (pesapalError || (status && status !== '200' && status !== 200)) {
+            const providerDetails = {
+                status,
+                error: pesapalError,
+                message: orderAny?.message ?? orderAny?.error_message ?? null,
+                response_code: orderAny?.response_code ?? null,
+                redirect_url: orderAny?.redirect_url ?? null,
+                merchant_reference: pesapalTxn?.merchant_reference ?? null,
+            };
             app.log.error({
                 order,
+                providerDetails,
                 campaignId: campaign.public_id ?? campaign.id,
                 amount: body.amount,
-                currency: pesapalCurrency
+                currency: pesapalCurrency,
+                callbackUrl,
+                cancellationUrl,
+                ipnId: config.pesapal.ipnId,
             }, 'pesapal_submit_order_failed');
             reply.code(502);
             return { error: 'pesapal_submit_failed', pesapal_response: order };
