@@ -13,13 +13,14 @@ export class UserRepo {
         AND table_name = 'users'
         AND column_name = ANY($1::text[])
       `,
-      [['full_name', 'can_multi_contract']]
+      [['full_name', 'can_multi_contract', 'max_status_viewers_12h']]
     );
 
     const columns = new Set(res.rows.map((r) => r.column_name));
     return {
       hasFullName: columns.has('full_name'),
       hasCanMultiContract: columns.has('can_multi_contract'),
+      hasMaxStatusViewers12h: columns.has('max_status_viewers_12h'),
     };
   }
 
@@ -31,10 +32,12 @@ export class UserRepo {
     passwordHash: string,
     role: 'ADVERTISER' | 'DISTRIBUTOR',
     country: string,
-    currency: string
+    currency: string,
+    maxStatusViewers12h?: number | null
   ) {
     await ensurePublicIdColumns(client);
-    const { hasFullName, hasCanMultiContract } = await this.getUsersColumns(client);
+    const { hasFullName, hasCanMultiContract, hasMaxStatusViewers12h } =
+      await this.getUsersColumns(client);
 
     const insertColumns = [
       ...(hasFullName ? ['full_name'] : []),
@@ -45,6 +48,7 @@ export class UserRepo {
       'active_role',
       'country',
       'preferred_currency',
+      ...(hasMaxStatusViewers12h ? ['max_status_viewers_12h'] : []),
     ];
 
     const values = [
@@ -56,12 +60,16 @@ export class UserRepo {
       role,
       country,
       currency,
+      ...(hasMaxStatusViewers12h ? [Math.max(0, Number(maxStatusViewers12h ?? 0))] : []),
     ];
 
     const placeholders = insertColumns.map((_, i) => `$${i + 1}`).join(', ');
     const canMultiReturning = hasCanMultiContract
       ? 'can_multi_contract'
       : 'false::boolean AS can_multi_contract';
+    const maxStatusViewersReturning = hasMaxStatusViewers12h
+      ? 'max_status_viewers_12h'
+      : '0::int AS max_status_viewers_12h';
 
     const res = await client.query(
       `
@@ -69,7 +77,7 @@ export class UserRepo {
         ${insertColumns.join(', ')}
       )
       VALUES (${placeholders})
-      RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency, ${canMultiReturning}
+      RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency, ${canMultiReturning}, ${maxStatusViewersReturning}
       `,
       values
     );
@@ -79,6 +87,10 @@ export class UserRepo {
     if (typeof user.can_multi_contract !== 'boolean') {
       user.can_multi_contract = false;
     }
+    user.max_status_viewers_12h = Math.max(
+      0,
+      Number(user.max_status_viewers_12h ?? maxStatusViewers12h ?? 0)
+    );
 
     return user;
   }

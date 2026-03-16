@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS users (
   country TEXT NOT NULL DEFAULT 'UG',
   preferred_currency TEXT NOT NULL DEFAULT 'UGX',
   can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE,
+  max_status_viewers_12h INTEGER NOT NULL DEFAULT 0,
+  current_advertiser_viewers INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -142,6 +144,22 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE users
       ADD COLUMN can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'max_status_viewers_12h'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN max_status_viewers_12h INTEGER NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'current_advertiser_viewers'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN current_advertiser_viewers INTEGER NOT NULL DEFAULT 0;
   END IF;
   IF NOT EXISTS (
     SELECT 1

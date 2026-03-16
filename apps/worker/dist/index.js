@@ -103,26 +103,17 @@ async function getEligibleDistributors(client) {
     SELECT
       u.id,
       u.phone,
-      COALESCE(lp.observed_views, 0)::int AS latest_views
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h
     FROM users u
-    LEFT JOIN LATERAL (
-      SELECT p.observed_views
-      FROM proofs p
-      WHERE p.user_id = u.id
-        AND p.status = 'VERIFIED'
-        AND p.observed_views IS NOT NULL
-      ORDER BY p.created_at DESC
-      LIMIT 1
-    ) lp ON TRUE
     WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER')
       AND u.status = 'ACTIVE'
-      AND COALESCE(lp.observed_views, 0) > 0
-    ORDER BY lp.observed_views DESC, u.created_at ASC
+      AND COALESCE(u.max_status_viewers_12h, 0) > 0
+    ORDER BY u.max_status_viewers_12h DESC, u.created_at ASC
     `);
     return res.rows.map((row) => ({
         id: row.id,
         phone: String(row.phone ?? ''),
-        latest_views: Number(row.latest_views ?? 0),
+        max_status_viewers_12h: Number(row.max_status_viewers_12h ?? 0),
     }));
 }
 async function getOpenRootCampaignsReadyForAllocation(client) {
@@ -176,7 +167,7 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
             if (activeRes.rows[0]) {
                 continue;
             }
-            const views = Math.max(1, Math.min(distributor.latest_views, remainingViews));
+            const views = Math.max(1, Math.min(distributor.max_status_viewers_12h, remainingViews));
             const budgetTotal = views * Number(rootCampaign.payout_amount ?? 10);
             await client.query(`
         INSERT INTO campaigns (
@@ -285,7 +276,8 @@ async function reallocateExpiredOpenAllocations(client) {
         if (unresolvedProofRes.rows[0]) {
             continue;
         }
-        const nextDistributor = eligible.find((row) => row.id !== allocation.assigned_distributor_id);
+        const nextDistributor = eligible.find((row) => row.id !== allocation.assigned_distributor_id
+            && row.max_status_viewers_12h >= Number(allocation.impression_target ?? 0));
         if (!nextDistributor) {
             continue;
         }

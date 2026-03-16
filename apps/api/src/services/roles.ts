@@ -73,6 +73,11 @@ export function buildAuthClaims(user: {
 export function buildUserSession(user: Record<string, unknown>) {
   const role = normalizeAccountRole(user.role);
   const activeRole = normalizeActiveRole(user.active_role, role);
+  const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
+  const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
+  const requiresDistributorCapacitySetup =
+    (activeRole === ACCOUNT_ROLE_DISTRIBUTOR || role === ACCOUNT_ROLE_DUAL_USER)
+      && maxStatusViewers12h <= 0;
   return {
     id: String(user.id ?? ''),
     public_id: String(user.public_id ?? ''),
@@ -84,5 +89,13 @@ export function buildUserSession(user: Record<string, unknown>) {
     country: String(user.country ?? ''),
     currency: String(user.currency ?? user.preferred_currency ?? 'UGX'),
     can_multi_contract: Boolean(user.can_multi_contract ?? false),
+    max_status_viewers_12h: Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0),
+    current_advertiser_viewers: Math.max(
+      0,
+      Number.isFinite(currentAdvertiserViewers)
+        ? Math.trunc(currentAdvertiserViewers)
+        : 0
+    ),
+    requires_distributor_capacity_setup: requiresDistributorCapacitySetup,
   };
 }

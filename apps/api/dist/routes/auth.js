@@ -14,6 +14,7 @@ const registerSchema = z.object({
     password: z.string().min(8),
     role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
     country: z.string().min(2),
+    max_status_viewers_12h: z.number().int().positive().optional(),
 });
 const loginSchema = z.object({
     email: z.string().email(),
@@ -26,7 +27,15 @@ const googleAuthSchema = z.object({
     country: z.string().min(2),
     full_name: z.string().min(2).max(120).optional(),
     avatar_url: z.string().url().max(1024).optional(),
+    max_status_viewers_12h: z.number().int().positive().optional(),
 });
+function resolveDistributorCapacity(body) {
+    if (body.role !== 'DISTRIBUTOR') {
+        return 0;
+    }
+    const capacity = Number(body.max_status_viewers_12h ?? 0);
+    return Number.isFinite(capacity) && capacity > 0 ? Math.trunc(capacity) : 0;
+}
 async function ensureUserProfilesTable(client) {
     await client.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -94,6 +103,11 @@ export async function authRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         const body = parsed.data;
+        const distributorCapacity = resolveDistributorCapacity(body);
+        if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
+            reply.code(400);
+            return { error: 'max_status_viewers_required' };
+        }
         const countryData = resolveCountry(body.country);
         const user = await withTransaction(async (client) => {
             await ensurePublicIdColumns(client);
@@ -107,7 +121,7 @@ export async function authRoutes(app) {
                 reply.code(400);
                 return { error: 'phone_taken' };
             }
-            const created = await userRepo.createUser(client, body.full_name, body.email, body.phone, hashPassword(body.password), body.role, countryData.iso2, countryData.currency);
+            const created = await userRepo.createUser(client, body.full_name, body.email, body.phone, hashPassword(body.password), body.role, countryData.iso2, countryData.currency, distributorCapacity);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             return created;
         });
@@ -159,6 +173,11 @@ export async function authRoutes(app) {
             };
         }
         const body = parsed.data;
+        const distributorCapacity = resolveDistributorCapacity(body);
+        if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
+            reply.code(400);
+            return { error: 'max_status_viewers_required' };
+        }
         const countryData = resolveCountry(body.country);
         let payload;
         try {
@@ -206,12 +225,26 @@ export async function authRoutes(app) {
                     await client.query(`
             UPDATE users
             SET role='DUAL_USER',
-                active_role=$2
+                active_role=$2,
+                max_status_viewers_12h = CASE
+                  WHEN $2='DISTRIBUTOR' AND $3::int > 0
+                    THEN $3
+                  ELSE COALESCE(max_status_viewers_12h, 0)
+                END
             WHERE id=$1
-            `, [existing.id, body.role]);
+            `, [existing.id, body.role, distributorCapacity]);
                 }
                 else {
-                    await client.query('UPDATE users SET active_role=$2 WHERE id=$1', [existing.id, body.role]);
+                    await client.query(`
+            UPDATE users
+            SET active_role=$2,
+                max_status_viewers_12h = CASE
+                  WHEN $2='DISTRIBUTOR' AND $3::int > 0
+                    THEN $3
+                  ELSE COALESCE(max_status_viewers_12h, 0)
+                END
+            WHERE id=$1
+            `, [existing.id, body.role, distributorCapacity]);
                 }
                 const refreshed = await userRepo.findByEmail(client, email);
                 return refreshed ?? existing;
@@ -222,7 +255,7 @@ export async function authRoutes(app) {
                 return { error: 'phone_taken' };
             }
             const syntheticPassword = buildSyntheticPassword(sub, email);
-            const created = await userRepo.createUser(client, fullName, email, typedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency);
+            const created = await userRepo.createUser(client, fullName, email, typedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency, distributorCapacity);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             await upsertSocialProfile(client, created.id, fullName, photoUrl);
             return created;

@@ -35,6 +35,13 @@ type EditableCampaign = {
   escrow: any;
 };
 
+type DistributorCapacityShare = {
+  distributor: any;
+  allocated_views: number;
+  payout_amount: number;
+  budget_total: number;
+};
+
 function normalizePhone(input: string) {
   return input.replace(/[^\d+]/g, '').trim();
 }
@@ -284,6 +291,7 @@ async function findDistributorByPhone(client: any, rawPhone: string) {
       u.id,
       u.public_id,
       u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
@@ -375,20 +383,93 @@ function normalizeBeneficiaryContacts(body: any) {
     )
   );
 }
-async function getLatestConfirmedViewers(client: any, distributorId: string) {
-  const res = await client.query(
-    `
-    SELECT COALESCE(p.observed_views, 0)::int AS observed_views
-    FROM proofs p
-    WHERE p.user_id=$1
-      AND p.status='VERIFIED'
-      AND p.observed_views IS NOT NULL
-    ORDER BY p.created_at DESC
-    LIMIT 1
-    `,
-    [distributorId]
-  );
-  return Number(res.rows[0]?.observed_views ?? 0);
+
+function distributeIntegerTotal(total: number, weights: number[]) {
+  if (weights.length === 0) {
+    return [] as number[];
+  }
+  if (total <= 0) {
+    return weights.map(() => 0);
+  }
+  const safeWeights = weights.map((value) => Math.max(0, Math.trunc(value)));
+  const totalWeight = safeWeights.reduce((sum, value) => sum + value, 0);
+  if (totalWeight <= 0) {
+    const base = Math.floor(total / safeWeights.length);
+    const remainder = total - base * safeWeights.length;
+    return safeWeights.map((_, index) => base + (index < remainder ? 1 : 0));
+  }
+
+  const exactShares = safeWeights.map((weight) => (total * weight) / totalWeight);
+  const shares = exactShares.map((value) => Math.floor(value));
+  let remainder = total - shares.reduce((sum, value) => sum + value, 0);
+  const order = exactShares
+    .map((value, index) => ({
+      index,
+      fraction: value - Math.floor(value),
+      weight: safeWeights[index] ?? 0,
+    }))
+    .sort((left, right) => {
+      if (right.fraction !== left.fraction) {
+        return right.fraction - left.fraction;
+      }
+      if (right.weight !== left.weight) {
+        return right.weight - left.weight;
+      }
+      return left.index - right.index;
+    });
+  for (const item of order) {
+    if (remainder <= 0) break;
+    shares[item.index] = (shares[item.index] ?? 0) + 1;
+    remainder -= 1;
+  }
+  return shares;
+}
+
+async function resolvePrivateDistributorShares(
+  client: any,
+  beneficiaryContacts: string[],
+  requestedViewerTarget: number,
+  rootBudgetTotal: number,
+  distributableBudget: number
+) {
+  const distributors: any[] = [];
+  let remainingViewers = requestedViewerTarget;
+  for (const phone of beneficiaryContacts) {
+    const distributor = await findDistributorByPhone(client, phone);
+    if (!distributor) {
+      throw new Error(`beneficiary_not_found:${phone}`);
+    }
+    const capacity = Math.max(0, Number(distributor.max_status_viewers_12h ?? 0));
+    if (capacity <= 0) {
+      throw new Error(`beneficiary_capacity_not_set:${phone}`);
+    }
+    const allocatedViews = Math.min(capacity, remainingViewers);
+    if (allocatedViews > 0) {
+      distributors.push({
+        distributor,
+        allocated_views: allocatedViews,
+      });
+      remainingViewers -= allocatedViews;
+    }
+    if (remainingViewers <= 0) {
+      break;
+    }
+  }
+
+  if (remainingViewers > 0) {
+    throw new Error(`beneficiary_capacity_insufficient:${remainingViewers}`);
+  }
+
+  const weights = distributors.map((entry) => entry.allocated_views);
+  const payoutShares = distributeIntegerTotal(distributableBudget, weights);
+  const budgetShares = distributeIntegerTotal(rootBudgetTotal, weights);
+
+  return distributors.map((entry, index): DistributorCapacityShare => ({
+    distributor: entry.distributor,
+    allocated_views: entry.allocated_views,
+    payout_amount: Math.max(1, payoutShares[index] ?? 0),
+    budget_total: Math.max(1, budgetShares[index] ?? 0),
+  }));
 }
 
 function deriveProofStatus(latestProof: any) {
@@ -828,9 +909,15 @@ export async function campaignRoutes(app: FastifyInstance) {
         found.advertiser_id === authUser && !found.parent_campaign_id
           ? (
               await client.query(
-                `SELECT id, assigned_distributor_id, assigned_phone
+                `SELECT
+                   c.id,
+                   c.assigned_distributor_id,
+                   c.assigned_phone,
+                   COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h
                  FROM campaigns
-                 WHERE parent_campaign_id=$1
+                 c
+                 LEFT JOIN users u ON u.id = c.assigned_distributor_id
+                 WHERE c.parent_campaign_id=$1
                  ORDER BY created_at ASC`,
                 [found.id]
               )
@@ -1101,8 +1188,15 @@ export async function campaignRoutes(app: FastifyInstance) {
           visibility,
           distributableBudget,
           normalizedPayout: rootPayout,
-          impressionTarget,
+          impressionTarget: budgetImpressionTarget,
         } = deriveCampaignBudget(executionMode, body.budget_total, body.payout_amount);
+        const requestedViewerTarget =
+          executionMode === 'OPEN_BUDGET'
+            ? budgetImpressionTarget
+            : Number(body.impression_target ?? budgetImpressionTarget);
+        if (executionMode === 'PRIVATE_CONTRACT' && requestedViewerTarget > budgetImpressionTarget) {
+          throw new Error('private_target_exceeds_budget');
+        }
         const rootBudget = body.budget_total;
 
         const root = await campaignRepo.createCampaign(client, {
@@ -1115,42 +1209,34 @@ export async function campaignRoutes(app: FastifyInstance) {
           advertiser_wallet_mode: 'CAMPAIGN_ONLY',
           impression_target:
             executionMode === 'OPEN_BUDGET'
-              ? impressionTarget
-              : body.impression_target ?? impressionTarget,
+              ? budgetImpressionTarget
+              : requestedViewerTarget,
         });
         await paymentRepo.createEscrow(client, root.id, root.budget_total);
 
         if (executionMode === 'PRIVATE_CONTRACT') {
-          const splitDistributable = Math.floor(distributableBudget / beneficiaryContacts.length);
-          const splitGrossBudget = Math.floor(rootBudget / beneficiaryContacts.length);
-          const budgetRemainder = rootBudget - splitGrossBudget * beneficiaryContacts.length;
-          const distributableRemainder =
-            distributableBudget - splitDistributable * beneficiaryContacts.length;
-          let beneficiaryIndex = 0;
-          for (const phone of beneficiaryContacts) {
-            const distributor = await findDistributorByPhone(client, phone);
-            if (!distributor) {
-              throw new Error(`beneficiary_not_found:${phone}`);
-            }
-            const grossBudgetShare =
-              splitGrossBudget + (beneficiaryIndex < budgetRemainder ? 1 : 0);
-            const distributableShare =
-              splitDistributable + (beneficiaryIndex < distributableRemainder ? 1 : 0);
+          const shares = await resolvePrivateDistributorShares(
+            client,
+            beneficiaryContacts,
+            requestedViewerTarget,
+            rootBudget,
+            distributableBudget
+          );
+          for (const share of shares) {
             await campaignRepo.createCampaign(client, {
               ...body,
               advertiser_id: authUser,
               parent_campaign_id: root.id,
-              assigned_distributor_id: distributor.id,
-              assigned_phone: distributor.phone,
+              assigned_distributor_id: share.distributor.id,
+              assigned_phone: share.distributor.phone,
               visibility: 'PRIVATE',
               execution_mode: 'PRIVATE_CONTRACT',
-              payout_amount: distributableShare,
-              budget_total: grossBudgetShare,
+              payout_amount: share.payout_amount,
+              budget_total: share.budget_total,
               platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
               advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-              impression_target: Math.max(1, Math.floor(distributableShare / PRIVATE_RATE_UGX)),
+              impression_target: share.allocated_views,
             });
-            beneficiaryIndex += 1;
           }
         }
 
@@ -1159,7 +1245,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           beneficiary_count: beneficiaryContacts.length,
           platform_fee_percent: platformFeePercent,
           distributable_budget: distributableBudget,
-          estimated_minimum_users: impressionTarget,
+          estimated_minimum_users: budgetImpressionTarget,
         };
       });
     } catch (error: any) {
@@ -1168,6 +1254,10 @@ export async function campaignRoutes(app: FastifyInstance) {
       return {
         error: message.startsWith('beneficiary_not_found')
           ? 'beneficiary_not_found'
+          : message.startsWith('beneficiary_capacity_not_set')
+            ? 'beneficiary_capacity_not_set'
+            : message.startsWith('beneficiary_capacity_insufficient')
+              ? 'beneficiary_capacity_insufficient'
           : message,
         detail: message,
       };
@@ -1207,8 +1297,15 @@ export async function campaignRoutes(app: FastifyInstance) {
           visibility,
           distributableBudget,
           normalizedPayout: rootPayout,
-          impressionTarget,
+          impressionTarget: budgetImpressionTarget,
         } = deriveCampaignBudget(executionMode, body.budget_total, body.payout_amount);
+        const requestedViewerTarget =
+          executionMode === 'OPEN_BUDGET'
+            ? budgetImpressionTarget
+            : Number(body.impression_target ?? budgetImpressionTarget);
+        if (executionMode === 'PRIVATE_CONTRACT' && requestedViewerTarget > budgetImpressionTarget) {
+          throw new Error('private_target_exceeds_budget');
+        }
         const escrowStatus = String(editable.escrow.status ?? 'PENDING').toUpperCase();
         if (
           escrowStatus !== 'PENDING' &&
@@ -1247,8 +1344,8 @@ export async function campaignRoutes(app: FastifyInstance) {
             rootPayout,
             body.budget_total,
             executionMode === 'OPEN_BUDGET'
-              ? impressionTarget
-              : body.impression_target ?? impressionTarget,
+              ? budgetImpressionTarget
+              : requestedViewerTarget,
             platformFeePercent,
             body.media_type,
             body.media_url,
@@ -1276,36 +1373,28 @@ export async function campaignRoutes(app: FastifyInstance) {
         ]);
 
         if (executionMode === 'PRIVATE_CONTRACT') {
-          const splitDistributable = Math.floor(distributableBudget / beneficiaryContacts.length);
-          const splitGrossBudget = Math.floor(body.budget_total / beneficiaryContacts.length);
-          const budgetRemainder = body.budget_total - splitGrossBudget * beneficiaryContacts.length;
-          const distributableRemainder =
-            distributableBudget - splitDistributable * beneficiaryContacts.length;
-          let beneficiaryIndex = 0;
-          for (const phone of beneficiaryContacts) {
-            const distributor = await findDistributorByPhone(client, phone);
-            if (!distributor) {
-              throw new Error(`beneficiary_not_found:${phone}`);
-            }
-            const grossBudgetShare =
-              splitGrossBudget + (beneficiaryIndex < budgetRemainder ? 1 : 0);
-            const distributableShare =
-              splitDistributable + (beneficiaryIndex < distributableRemainder ? 1 : 0);
+          const shares = await resolvePrivateDistributorShares(
+            client,
+            beneficiaryContacts,
+            requestedViewerTarget,
+            body.budget_total,
+            distributableBudget
+          );
+          for (const share of shares) {
             await campaignRepo.createCampaign(client, {
               ...body,
               advertiser_id: authUser,
               parent_campaign_id: editable.root.id,
-              assigned_distributor_id: distributor.id,
-              assigned_phone: distributor.phone,
+              assigned_distributor_id: share.distributor.id,
+              assigned_phone: share.distributor.phone,
               visibility: 'PRIVATE',
               execution_mode: 'PRIVATE_CONTRACT',
-              payout_amount: distributableShare,
-              budget_total: grossBudgetShare,
+              payout_amount: share.payout_amount,
+              budget_total: share.budget_total,
               platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
               advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-              impression_target: Math.max(1, Math.floor(distributableShare / PRIVATE_RATE_UGX)),
+              impression_target: share.allocated_views,
             });
-            beneficiaryIndex += 1;
           }
         }
 
@@ -1314,7 +1403,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           beneficiary_count: beneficiaryContacts.length,
           platform_fee_percent: platformFeePercent,
           distributable_budget: distributableBudget,
-          estimated_minimum_users: impressionTarget,
+          estimated_minimum_users: budgetImpressionTarget,
           status_summary: await buildCampaignStatusSummary(client, editable.root.id, authUser),
         };
       });
@@ -1344,6 +1433,10 @@ export async function campaignRoutes(app: FastifyInstance) {
       return {
         error: message.startsWith('beneficiary_not_found')
           ? 'beneficiary_not_found'
+          : message.startsWith('beneficiary_capacity_not_set')
+            ? 'beneficiary_capacity_not_set'
+            : message.startsWith('beneficiary_capacity_insufficient')
+              ? 'beneficiary_capacity_insufficient'
           : message,
         detail: message,
       };
@@ -1608,11 +1701,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         return { error: 'campaign_already_claimed' } as any;
       }
 
-      const latestConfirmedViewers = await getLatestConfirmedViewers(client, authUser);
-      const allocatedViews =
-        campaign.execution_mode === 'OPEN_BUDGET'
-          ? Math.max(1, latestConfirmedViewers || Math.floor(Number(campaign.impression_target ?? 1) / 10) || 1)
-          : Number(campaign.impression_target ?? 0);
+      const allocatedViews = Math.max(1, Number(campaign.impression_target ?? 0));
       const contractRes = await client.query(
         `INSERT INTO contracts (
           campaign_id,

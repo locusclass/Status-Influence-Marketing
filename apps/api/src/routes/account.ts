@@ -24,6 +24,7 @@ import { config } from '../config.js';
 const accountProfileSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
   country: z.string().trim().min(2).max(3).optional(),
+  current_advertiser_viewers: z.number().int().min(0).optional(),
 });
 
 const accountPasswordSchema = z.object({
@@ -37,6 +38,11 @@ const accountAvatarSchema = z.object({
 
 const accountRoleSchema = z.object({
   role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+  max_status_viewers_12h: z.number().int().positive().optional(),
+});
+
+const distributorCapacitySchema = z.object({
+  max_status_viewers_12h: z.number().int().positive(),
 });
 
 const accountWhatsappVerifySchema = z.object({
@@ -304,6 +310,14 @@ async function ensureAccountSchema(client: any) {
       ADD COLUMN IF NOT EXISTS active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
   `);
   await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS max_status_viewers_12h INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS current_advertiser_viewers INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check
   `);
   await client.query(`
@@ -440,6 +454,8 @@ export async function accountRoutes(app: FastifyInstance) {
           COALESCE(u.whatsapp_verified, FALSE) AS whatsapp_verified,
           u.country,
           u.preferred_currency AS currency,
+          COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+          COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
           ${fullNameSelect} AS full_name,
           p.avatar_url,
           p.updated_at
@@ -483,6 +499,31 @@ export async function accountRoutes(app: FastifyInstance) {
             userId,
             body.country.trim().toUpperCase(),
           ]);
+        }
+
+        if (typeof body.current_advertiser_viewers === 'number') {
+          const roleRes = await client.query(
+            `
+            SELECT role, active_role
+            FROM users
+            WHERE id=$1
+            LIMIT 1
+            `,
+            [userId]
+          );
+          const user = roleRes.rows[0];
+          const activeRole = normalizeActiveRole(
+            user?.active_role,
+            user?.role
+          );
+          if (!canAccessAdvertiserFeatures(user?.role) || activeRole !== ACCOUNT_ROLE_ADVERTISER) {
+            reply.code(403);
+            return { error: 'advertiser_profile_required' };
+          }
+          await client.query(
+            'UPDATE users SET current_advertiser_viewers=$2 WHERE id=$1',
+            [userId, Math.max(0, body.current_advertiser_viewers)]
+          );
         }
 
         return { ok: true };
@@ -655,6 +696,7 @@ export async function accountRoutes(app: FastifyInstance) {
         return { error: 'validation_failed', issues: parsed.error.issues };
       }
       const body = parsed.data;
+      const nextCapacity = Number(body.max_status_viewers_12h ?? 0);
 
       return withTransaction(async (client) => {
         const currentRes = await client.query(
@@ -677,6 +719,10 @@ export async function accountRoutes(app: FastifyInstance) {
 
         const currentRole = normalizeAccountRole(currentUser.role);
         const nextActiveRole = normalizeActiveRole(body.role, body.role);
+        if (nextActiveRole === 'DISTRIBUTOR' && nextCapacity <= 0) {
+          reply.code(400);
+          return { error: 'max_status_viewers_required' };
+        }
         const nextRole =
           currentRole === 'ADMIN'
             ? 'ADMIN'
@@ -687,8 +733,17 @@ export async function accountRoutes(app: FastifyInstance) {
                 : 'DUAL_USER';
 
         await client.query(
-          'UPDATE users SET role=$2, active_role=$3 WHERE id=$1',
-          [userId, nextRole, nextActiveRole]
+          `
+          UPDATE users
+          SET role=$2,
+              active_role=$3,
+              max_status_viewers_12h = CASE
+                WHEN $3='DISTRIBUTOR' THEN $4
+                ELSE max_status_viewers_12h
+              END
+          WHERE id=$1
+          `,
+          [userId, nextRole, nextActiveRole, Math.max(0, nextCapacity)]
         );
 
         const hasCanMultiContract = await usersHasColumn(
@@ -710,7 +765,8 @@ export async function accountRoutes(app: FastifyInstance) {
             phone,
             country,
             preferred_currency AS currency,
-            ${canMultiSelect}
+            ${canMultiSelect},
+            COALESCE(max_status_viewers_12h, 0)::int AS max_status_viewers_12h
           FROM users
           WHERE id=$1
           LIMIT 1
@@ -725,6 +781,42 @@ export async function accountRoutes(app: FastifyInstance) {
 
         const token = app.jwt.sign(buildAuthClaims(user));
 
+        return {
+          ok: true,
+          token,
+          user: buildUserSession(user),
+        };
+      });
+    }
+  );
+
+  app.patch(
+    '/account/distributor-capacity',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const parsed = distributorCapacitySchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+
+      return withTransaction(async (client) => {
+        const updated = await client.query(
+          `
+          UPDATE users
+          SET max_status_viewers_12h=$2
+          WHERE id=$1
+          RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h
+          `,
+          [userId, parsed.data.max_status_viewers_12h]
+        );
+        const user = updated.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+        const token = app.jwt.sign(buildAuthClaims(user));
         return {
           ok: true,
           token,
