@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { requestPayout } from '../services/pesapal.js';
+import { requestPayout, submitOrder } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
@@ -19,6 +19,7 @@ import {
   normalizeAccountRole,
   normalizeActiveRole,
 } from '../services/roles.js';
+import { config } from '../config.js';
 
 const accountProfileSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -47,6 +48,12 @@ const walletWithdrawSchema = z.object({
   phone: z.string().trim().min(7).max(20).optional(),
 });
 
+const walletDepositSchema = z.object({
+  amount: z.number().int().positive(),
+  return_url: z.string().trim().min(1).optional(),
+  cancel_url: z.string().trim().min(1).optional(),
+});
+
 const MIN_WALLET_WITHDRAW_UGX = 10_000;
 
 type WalletPayoutPayload = {
@@ -56,6 +63,78 @@ type WalletPayoutPayload = {
   receiverName: string;
   receiverPhone: string;
 };
+
+function normalizeUrlOrigin(value?: string) {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function getForwardedHeader(value: string | string[] | undefined) {
+  if (Array.isArray(value)) {
+    return value[0]?.trim() || undefined;
+  }
+  return value?.split(',')[0]?.trim() || undefined;
+}
+
+function getRequestBaseUrl(request: any) {
+  const explicit = config.apiBaseUrl.trim();
+  if (explicit) {
+    try {
+      return new URL(explicit).origin;
+    } catch {
+      // Ignore invalid configuration and fall through.
+    }
+  }
+
+  const forwardedProto = getForwardedHeader(request.headers['x-forwarded-proto']);
+  const forwardedHost = getForwardedHeader(request.headers['x-forwarded-host']);
+  const host = forwardedHost || getForwardedHeader(request.headers.host);
+  if (!host) return null;
+
+  const protocol = forwardedProto || request.protocol || 'https';
+  return `${protocol}://${host}`;
+}
+
+function getBrowserOrigin(request: any) {
+  const origin = normalizeUrlOrigin(getForwardedHeader(request.headers.origin));
+  if (origin) return origin;
+
+  const referer = getForwardedHeader(request.headers.referer) ?? getForwardedHeader(request.headers.referrer);
+  return normalizeUrlOrigin(referer);
+}
+
+function resolveWebRedirectUrl(rawUrl: unknown, browserOrigin: string | null, fallbackPath: string) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (value) {
+    try {
+      return new URL(value, browserOrigin ?? undefined).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  if (!browserOrigin) return null;
+  return new URL(fallbackPath, browserOrigin).toString();
+}
+
+function buildPaymentCallbackUrl(
+  request: any,
+  routePath: '/payments/return' | '/payments/cancel',
+  targetUrl: string | null
+) {
+  const baseUrl = getRequestBaseUrl(request);
+  if (!baseUrl) return null;
+
+  const url = new URL(routePath, `${baseUrl}/`);
+  if (targetUrl) {
+    url.searchParams.set('target', targetUrl);
+  }
+  return url.toString();
+}
 
 type DeleteAccountResult = {
   ok: true;
@@ -903,8 +982,8 @@ export async function accountRoutes(app: FastifyInstance) {
                 wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
                 wallet_notice:
                   activeRole === ACCOUNT_ROLE_ADVERTISER
-                    ? 'Advertiser wallet funds campaigns and receives escrow returns. Withdrawals are allowed from UGX 10,000.'
-                    : 'Distributor wallet supports withdrawals from UGX 10,000.',
+                    ? 'Use wallet balance for deposits, campaign funding, and withdrawals.'
+                    : 'Withdraw from UGX 10,000.',
               }
             : wallet,
         txns: txnsRes.rows,
@@ -912,6 +991,125 @@ export async function accountRoutes(app: FastifyInstance) {
       };
     });
     return data;
+  });
+
+  app.post('/wallet/deposit', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const parsed = walletDepositSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+
+    const browserOrigin = getBrowserOrigin(request);
+    const webReturnUrl = resolveWebRedirectUrl(parsed.data.return_url, browserOrigin, '/payment/success');
+    const webCancelUrl = resolveWebRedirectUrl(parsed.data.cancel_url, browserOrigin, '/payment/cancel');
+    const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
+    const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
+
+    if (!callbackUrl || !cancellationUrl) {
+      reply.code(400);
+      return { error: 'payment_redirect_urls_missing' };
+    }
+    if ((parsed.data.return_url && !webReturnUrl) || (parsed.data.cancel_url && !webCancelUrl)) {
+      reply.code(400);
+      return { error: 'payment_redirect_urls_invalid' };
+    }
+    if (!config.pesapal.ipnId) {
+      reply.code(503);
+      return { error: 'pesapal_ipn_not_configured' };
+    }
+
+    const result = await withTransaction(async (client) => {
+      const userRes = await client.query(
+        'SELECT email, preferred_currency FROM users WHERE id=$1 LIMIT 1',
+        [userId]
+      );
+      const user = userRes.rows[0];
+      if (!user?.email) {
+        reply.code(400);
+        return { error: 'user_email_missing' };
+      }
+
+      const wallet = await ensureWalletForUser(client, userId);
+      const reference = `WDP-${uuid()}`;
+      const txn = await client.query(
+        `
+        INSERT INTO pesapal_transactions (
+          escrow_id,
+          type,
+          amount,
+          status,
+          merchant_reference,
+          raw_payload
+        )
+        VALUES ($1,'FUNDING',$2,'PENDING',$3,$4)
+        RETURNING *
+        `,
+        [
+          null,
+          parsed.data.amount,
+          reference,
+          {
+            kind: 'WALLET_DEPOSIT',
+            user_id: userId,
+            wallet_id: wallet.id,
+          },
+        ]
+      );
+
+      const order = await submitOrder({
+        amount: parsed.data.amount,
+        description: 'Wallet deposit',
+        type: 'MERCHANT',
+        reference,
+        firstName: String(user.email).split('@')[0] || 'User',
+        lastName: 'User',
+        email: String(user.email),
+        currency: 'UGX',
+        callback_url: callbackUrl,
+        cancellation_url: cancellationUrl,
+      });
+
+      return { order, txn: txn.rows[0] };
+    });
+
+    if ((result as any)?.error) {
+      return result;
+    }
+
+    const orderAny = (result as any).order as any;
+    const status = orderAny?.status;
+    const pesapalError = orderAny?.error ?? orderAny?.errro;
+    if (pesapalError || (status && status !== '200' && status !== 200)) {
+      app.log.error(
+        {
+          order: result,
+          status,
+          pesapalError,
+          callbackUrl,
+          cancellationUrl,
+          userId,
+        },
+        'wallet_deposit_submit_failed'
+      );
+      reply.code(502);
+      return { error: 'pesapal_submit_failed', pesapal_response: orderAny };
+    }
+
+    const redirectUrl = orderAny?.redirect_url;
+    if (!redirectUrl) {
+      reply.code(502);
+      return { error: 'pesapal_missing_redirect_url', pesapal_response: orderAny };
+    }
+
+    return {
+      redirect_url: redirectUrl,
+      deposit: {
+        amount: parsed.data.amount,
+        reference: result.txn.merchant_reference,
+      },
+    };
   });
 
   app.post('/wallet/withdraw', { preHandler: [app.authenticate] }, async (request, reply) => {

@@ -142,6 +142,50 @@ export async function paymentRoutes(app: FastifyInstance) {
           const txn = txnRows.rows[0];
           if (!txn) return { ok: false, error: 'txn_not_found' };
 
+          const rawPayload = txn.raw_payload as Record<string, unknown> | null;
+          if (rawPayload?.kind === 'WALLET_DEPOSIT') {
+            const statusRaw = statusInfo.payment_status_description ?? statusInfo.status;
+            const status = typeof statusRaw === 'string' ? statusRaw.toUpperCase() : '';
+            if (txn.status === 'COMPLETED') {
+              return { ok: true, duplicate: true };
+            }
+
+            if (status.includes('COMPLETED') || status.includes('SUCCESS')) {
+              const walletId = String(rawPayload.wallet_id ?? '');
+              const amount = Number(txn.amount ?? 0);
+              await client.query(
+                `
+                UPDATE wallets
+                SET balance_available = balance_available + $2,
+                    balance = balance + $2
+                WHERE id=$1
+                `,
+                [walletId, amount]
+              );
+              await client.query(
+                `
+                INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+                VALUES ($1,$2,'CREDIT',$3)
+                `,
+                [walletId, amount, `WALLET_DEPOSIT:${merchantReference}`]
+              );
+              await paymentRepo.updatePesaPalTxnStatus(
+                client,
+                merchantReference,
+                'COMPLETED',
+                String(eventId)
+              );
+            } else if (status.includes('FAILED')) {
+              await paymentRepo.updatePesaPalTxnStatus(
+                client,
+                merchantReference,
+                'FAILED',
+                String(eventId)
+              );
+            }
+            return { ok: true, type: 'wallet_deposit' };
+          }
+
           const amountRaw = statusInfo.amount ?? statusInfo.Amount;
           const amount = typeof amountRaw === 'string' ? parseInt(amountRaw, 10) : Number(amountRaw ?? 0);
           const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
