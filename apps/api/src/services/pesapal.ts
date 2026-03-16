@@ -1,103 +1,28 @@
-// apps/api/src/services/pesapal.js
-
 import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config } from '../config.js';
 
-interface TokenResponse {
-  token: string;
-  expires_in?: number | string;
-  expiryDate?: number | string;
-}
-
-let cachedToken: { token: string; expiresAt: number } | null = null;
-
-function parseTokenLifetimeSeconds(data: TokenResponse): number {
-  const raw = data.expires_in ?? data.expiryDate;
-  const parsed = typeof raw === 'string' ? Number(raw) : raw;
-  if (Number.isFinite(parsed) && parsed! > 0) {
-    return Number(parsed);
-  }
-  return 300;
-}
-
-async function getToken(): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 30_000) {
-    return cachedToken.token;
-  }
-
-  const res = await fetch(`${config.pesapal.baseUrl}/api/Auth/RequestToken`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      consumer_key: config.pesapal.consumerKey,
-      consumer_secret: config.pesapal.consumerSecret
-    })
-  });
-
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`PesaPal token error: ${res.status} ${res.statusText} ${errorText}`);
-  }
-
-  const data = (await res.json()) as TokenResponse;
-  const lifetimeSeconds = parseTokenLifetimeSeconds(data);
-
-  cachedToken = {
-    token: data.token,
-    expiresAt: Date.now() + lifetimeSeconds * 1000
+function getAuthHeaders() {
+  return {
+    Authorization: `Bearer ${config.flutterwave.secretKey}`,
+    'Content-Type': 'application/json',
   };
-
-  console.info('[pesapal] OAuth token acquired', {
-    expiresIn: data.expires_in,
-    effectiveExpiresIn: lifetimeSeconds
-  });
-
-  return data.token;
 }
 
 export async function registerIpnUrl(): Promise<any> {
-  const token = await getToken();
-
-  const res = await fetch(`${config.pesapal.baseUrl}/api/URLSetup/RegisterIPN`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      url: config.pesapal.callbackUrl,
-      ipn_notification_type: 'POST'
-    })
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`PesaPal IPN register failed: ${res.status} ${text}`);
-  }
-
-  return res.json();
+  return {
+    ok: true,
+    provider: 'FLUTTERWAVE',
+    note: 'Flutterwave webhooks are configured from the dashboard.',
+  };
 }
 
 export async function getIpnList(): Promise<any> {
-  const token = await getToken();
-
-  const res = await fetch(`${config.pesapal.baseUrl}/api/URLSetup/GetIpnList`, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${token}`
-    }
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`PesaPal get IPN list failed: ${res.status} ${text}`);
-  }
-
-  return res.json();
+  return {
+    ok: true,
+    provider: 'FLUTTERWAVE',
+    note: 'Flutterwave webhook endpoints are managed from the dashboard.',
+  };
 }
 
 export async function submitOrder(input: {
@@ -112,53 +37,68 @@ export async function submitOrder(input: {
   callback_url: string;
   cancellation_url: string;
 }) {
-  const token = await getToken();
-
-  const res = await fetch(`${config.pesapal.baseUrl}/api/Transactions/SubmitOrderRequest`, {
+  const res = await fetch(`${config.flutterwave.baseUrl}/payments`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
+    headers: getAuthHeaders(),
     body: JSON.stringify({
-      id: input.reference,
-      currency: input.currency,
+      tx_ref: input.reference,
       amount: input.amount,
-      description: input.description,
-      callback_url: input.callback_url,
-      cancellation_url: input.cancellation_url,
-      notification_id: config.pesapal.ipnId,
-      billing_address: {
-        email_address: input.email,
-        first_name: input.firstName,
-        last_name: input.lastName
-      }
-    })
+      currency: input.currency,
+      redirect_url: input.callback_url,
+      customer: {
+        email: input.email,
+        name: `${input.firstName} ${input.lastName}`.trim(),
+      },
+      customizations: {
+        title: 'Prime Checkout',
+        description: input.description,
+      },
+      meta: {
+        cancellation_url: input.cancellation_url,
+      },
+    }),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`PesaPal submit order failed: ${res.status} ${text}`);
+    throw new Error(`Flutterwave checkout failed: ${res.status} ${text}`);
   }
 
   return res.json();
 }
 
-export async function getTransactionStatus(orderTrackingId: string, merchantReference: string) {
-  const token = await getToken();
+export function buildInlinePayloadHash(input: {
+  amount: number;
+  currency: string;
+  customerEmail: string;
+  txRef: string;
+}) {
+  const hashedSecret = crypto
+    .createHash('sha256')
+    .update(config.flutterwave.secretKey)
+    .digest('hex');
+  return crypto
+    .createHash('sha256')
+    .update(
+      `${input.amount}${input.currency}${input.customerEmail}${input.txRef}${hashedSecret}`
+    )
+    .digest('hex');
+}
 
-  const url = `${config.pesapal.baseUrl}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}&merchantReference=${encodeURIComponent(merchantReference)}`;
-
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${token}`
+export async function getTransactionStatus(transactionId: string, _merchantReference?: string) {
+  const res = await fetch(
+    `${config.flutterwave.baseUrl}/transactions/${encodeURIComponent(transactionId)}/verify`,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${config.flutterwave.secretKey}`,
+      },
     }
-  });
+  );
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`PesaPal status failed: ${res.status} ${text}`);
+    throw new Error(`Flutterwave verify failed: ${res.status} ${text}`);
   }
 
   return res.json();
@@ -171,38 +111,44 @@ export async function requestPayout(input: {
   reference: string;
   receiverName: string;
   receiverPhone: string;
+  receiverNetwork?: string;
 }) {
-  const token = await getToken();
-
-  const res = await fetch(`${config.pesapal.baseUrl}/api/Transactions/SubmitB2C`, {
+  const res = await fetch(`${config.flutterwave.baseUrl}/transfers`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
+    headers: getAuthHeaders(),
     body: JSON.stringify({
+      account_bank: (input.receiverNetwork ?? 'MTN').trim().toUpperCase(),
+      account_number: input.receiverPhone,
       amount: input.amount,
-      currency: input.currency,
       narration: input.narration,
-      source: 'MERCHANT',
+      currency: input.currency,
       reference: input.reference,
-      callback_url: config.pesapal.payoutCallbackUrl,
-      receiver: {
-        name: input.receiverName,
-        phone_number: input.receiverPhone
-      }
-    })
+      debit_currency: input.currency,
+      beneficiary_name: input.receiverName,
+    }),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`PesaPal payout failed: ${res.status} ${text}`);
+    throw new Error(`Flutterwave transfer failed: ${res.status} ${text}`);
   }
 
   return res.json();
 }
 
 export function verifyWebhookSignature(rawBody: string, signature: string, secret: string): boolean {
-  const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
+  if (!signature || !secret) {
+    return false;
+  }
+  if (signature === secret) {
+    return true;
+  }
+
+  const hmac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  if (signature === hmac) {
+    return true;
+  }
+
+  const hex = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  return signature === hex;
 }

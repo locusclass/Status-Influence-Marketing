@@ -174,19 +174,16 @@ export function buildServer() {
     // Routes
     registerRoutes(app);
     app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
-    // 🔒 Final stabilized PesaPal configuration
+    // Final payment-provider configuration
     app.addHook('onReady', async () => {
-        if (!config.pesapal.ipnId) {
-            app.log.warn('PESAPAL_IPN_ID is not set. Payments will fail.');
+        if (!config.flutterwave.secretKey) {
+            app.log.warn('FLUTTERWAVE_SECRET_KEY is not set. Payments will fail.');
         }
         else {
-            app.log.info({ ipnId: config.pesapal.ipnId }, 'PesaPal IPN locked');
+            app.log.info({ provider: 'FLUTTERWAVE' }, 'Flutterwave payments configured');
         }
-        if (!config.pesapal.callbackUrl) {
-            app.log.warn('PESAPAL_CALLBACK_URL is not set.');
-        }
-        if (!config.pesapal.consumerKey || !config.pesapal.consumerSecret) {
-            app.log.warn('PesaPal credentials are not fully configured.');
+        if (!config.flutterwave.webhookSecretHash) {
+            app.log.warn('FLUTTERWAVE_WEBHOOK_SECRET_HASH is not set. Webhook verification is disabled.');
         }
     });
     return app;

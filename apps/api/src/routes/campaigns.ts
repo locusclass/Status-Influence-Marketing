@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
-import { submitOrder } from '../services/pesapal.js';
 import { v4 as uuid } from 'uuid';
 import { config } from '../config.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
@@ -1448,8 +1447,11 @@ export async function campaignRoutes(app: FastifyInstance) {
       campaign_id: params.id,
       ...(request.body as any),
     }) as z.infer<typeof FundCampaignSchema>;
-    const fundSource = body.fund_source ?? 'PESAPAL';
-    const pesapalCurrency = 'UGX';
+    const fundSource =
+      (body.fund_source ?? 'FLUTTERWAVE') === 'PESAPAL'
+        ? 'FLUTTERWAVE'
+        : (body.fund_source ?? 'FLUTTERWAVE');
+    const paymentCurrency = 'UGX';
     const browserOrigin = getBrowserOrigin(request);
     const webReturnUrl = resolveWebRedirectUrl(body.return_url, browserOrigin, '/payment/success');
     const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
@@ -1461,26 +1463,16 @@ export async function campaignRoutes(app: FastifyInstance) {
       const role = (request.user as any)?.role as string | undefined;
       const userEmailRes = authUser
         ? await client.query(
-            'SELECT email, preferred_currency FROM users WHERE id=$1',
+            'SELECT email, phone, preferred_currency FROM users WHERE id=$1',
             [authUser]
           )
         : null;
       const userEmail = userEmailRes?.rows?.[0]?.email as string | undefined;
+      const userPhone = userEmailRes?.rows?.[0]?.phone as string | undefined;
       const preferredCurrency = userEmailRes?.rows?.[0]?.preferred_currency as string | undefined;
-      if (fundSource === 'PESAPAL' && !userEmail) {
+      if (fundSource === 'FLUTTERWAVE' && !userEmail) {
         reply.code(400);
         return { error: 'user_email_missing' } as any;
-      }
-      if (fundSource === 'PESAPAL' && (!callbackUrl || !cancellationUrl)) {
-        reply.code(400);
-        return { error: 'payment_redirect_urls_missing' } as any;
-      }
-      if (
-        fundSource === 'PESAPAL' &&
-        ((body.return_url && !webReturnUrl) || (body.cancel_url && !webCancelUrl))
-      ) {
-        reply.code(400);
-        return { error: 'payment_redirect_urls_invalid' } as any;
       }
       const firstName = (userEmail ?? 'user@example.com').split('@')[0] ?? 'User';
       const campaign = await campaignRepo.getCampaign(client, params.id);
@@ -1548,9 +1540,9 @@ export async function campaignRoutes(app: FastifyInstance) {
         };
       }
 
-      if (!config.pesapal.ipnId) {
+      if (!config.flutterwave.secretKey || !config.flutterwave.publicKey) {
         reply.code(503);
-        return { error: 'pesapal_ipn_not_configured' } as any;
+        return { error: 'flutterwave_not_configured' } as any;
       }
 
       const merchantReference = uuid();
@@ -1561,20 +1553,31 @@ export async function campaignRoutes(app: FastifyInstance) {
         merchant_reference: merchantReference
       });
 
-      const order = await submitOrder({
+      const checkoutPayload = {
+        public_key: config.flutterwave.publicKey,
+        tx_ref: merchantReference,
         amount: body.amount,
-        description: `Campaign funding: ${campaign.title}`,
-        type: 'MERCHANT',
-        reference: merchantReference,
-        firstName,
-        lastName: 'User',
-        email: userEmail!,
-        currency: pesapalCurrency,
-        callback_url: callbackUrl!,
-        cancellation_url: cancellationUrl!
-      });
+        currency: paymentCurrency,
+        payment_options: 'card,banktransfer,ussd,mobilemoneyuganda',
+        customer: {
+          email: userEmail!,
+          name: `${firstName} User`.trim(),
+          phone_number: userPhone ?? undefined,
+        },
+        customizations: {
+          title: 'Prime Checkout',
+          description: `Campaign funding: ${campaign.title}`,
+        },
+        meta: {
+          merchant_reference: merchantReference,
+          kind: 'CAMPAIGN_FUNDING',
+          campaign_id: campaign.id,
+          return_url: callbackUrl,
+          cancel_url: cancellationUrl,
+        },
+      };
 
-      return { fund_source: fundSource, order, pesapalTxn, campaign };
+      return { fund_source: fundSource, checkout_payload: checkoutPayload, pesapalTxn };
     });
 
     if ((result as any)?.error) {
@@ -1583,44 +1586,10 @@ export async function campaignRoutes(app: FastifyInstance) {
     if ((result as any)?.funded) {
       return result;
     }
-    const { order, campaign, pesapalTxn } = result as any;
-    const orderAny = order as any;
-    const pesapalError = orderAny?.error ?? orderAny?.errro;
-    const status = orderAny?.status;
-    if (pesapalError || (status && status !== '200' && status !== 200)) {
-      const providerDetails = {
-        status,
-        error: pesapalError,
-        message: orderAny?.message ?? orderAny?.error_message ?? null,
-        response_code: orderAny?.response_code ?? null,
-        redirect_url: orderAny?.redirect_url ?? null,
-        merchant_reference: pesapalTxn?.merchant_reference ?? null,
-      };
-      app.log.error(
-        {
-          order,
-          providerDetails,
-          campaignId: campaign.public_id ?? campaign.id,
-          amount: body.amount,
-          currency: pesapalCurrency,
-          callbackUrl,
-          cancellationUrl,
-          ipnId: config.pesapal.ipnId,
-        },
-        'pesapal_submit_order_failed'
-      );
-      reply.code(502);
-      return { error: 'pesapal_submit_failed', pesapal_response: order };
-    }
-    const redirectUrl = orderAny?.redirect_url;
-    if (!redirectUrl) {
-      app.log.error({ order }, 'pesapal_submit_order_missing_redirect_url');
-      reply.code(502);
-      return { error: 'pesapal_missing_redirect_url', pesapal_response: order };
-    }
+    const { checkout_payload: checkoutPayload, pesapalTxn } = result as any;
     return {
-      redirect_url: redirectUrl,
-      pesapal_txn: pesapalTxn,
+      checkout_payload: checkoutPayload,
+      flutterwave_txn: pesapalTxn,
       fund_source: fundSource,
       funded: false,
     };

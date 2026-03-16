@@ -1,34 +1,5 @@
-﻿import { fetch } from 'undici';
+import { fetch } from 'undici';
 import { config } from '../config.js';
-
-interface TokenResponse {
-  token: string;
-  expires_in: number;
-}
-
-let cachedToken: { token: string; expiresAt: number } | null = null;
-
-async function getToken(): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 30_000) {
-    return cachedToken.token;
-  }
-  const res = await fetch(`${config.pesapal.baseUrl}/api/Auth/RequestToken`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      consumer_key: config.pesapal.consumerKey,
-      consumer_secret: config.pesapal.consumerSecret
-    })
-  });
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`PesaPal token error: ${res.status} ${res.statusText} ${errorText}`);
-  }
-  const data = (await res.json()) as TokenResponse;
-  cachedToken = { token: data.token, expiresAt: Date.now() + data.expires_in * 1000 };
-  console.info('[pesapal] OAuth token acquired', { expiresIn: data.expires_in });
-  return data.token;
-}
 
 export async function requestPayout(input: {
   amount: number;
@@ -37,27 +8,30 @@ export async function requestPayout(input: {
   reference: string;
   receiverName: string;
   receiverPhone: string;
+  receiverNetwork?: string;
 }) {
-  const token = await getToken();
-  const res = await fetch(`${config.pesapal.baseUrl}/api/Transactions/SubmitB2C`, {
+  const res = await fetch(`${config.flutterwave.baseUrl}/transfers`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
+      Authorization: `Bearer ${config.flutterwave.secretKey}`,
+      'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      account_bank: (input.receiverNetwork ?? 'MTN').trim().toUpperCase(),
+      account_number: input.receiverPhone,
       amount: input.amount,
-      currency: input.currency,
       narration: input.narration,
-      source: 'MERCHANT',
+      currency: input.currency,
       reference: input.reference,
-      callback_url: config.pesapal.payoutCallbackUrl,
-      receiver: {
-        name: input.receiverName,
-        phone_number: input.receiverPhone
-      }
-    })
+      debit_currency: input.currency,
+      beneficiary_name: input.receiverName,
+    }),
   });
-  if (!res.ok) throw new Error(`PesaPal payout failed: ${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Flutterwave transfer failed: ${res.status} ${text}`);
+  }
+
   return res.json();
 }

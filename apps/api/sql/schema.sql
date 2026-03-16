@@ -569,6 +569,7 @@ CREATE TABLE IF NOT EXISTS wallet_withdrawals (
   amount INTEGER NOT NULL,
   currency TEXT NOT NULL DEFAULT 'UGX',
   receiver_phone TEXT NOT NULL,
+  mobile_money_network TEXT,
   status payout_status NOT NULL DEFAULT 'PROCESSING',
   pesapal_reference TEXT UNIQUE,
   failure_reason TEXT,

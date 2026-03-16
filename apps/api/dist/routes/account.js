@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { requestPayout, submitOrder } from '../services/pesapal.js';
+import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
@@ -33,6 +33,7 @@ const accountWhatsappVerifySchema = z.object({
 const walletWithdrawSchema = z.object({
     amount: z.number().int().positive(),
     phone: z.string().trim().min(7).max(20).optional(),
+    network: z.enum(['MTN', 'AIRTEL']).optional(),
 });
 const walletDepositSchema = z.object({
     amount: z.number().int().positive(),
@@ -216,6 +217,7 @@ async function ensureWalletTables(client) {
       amount INTEGER NOT NULL,
       currency TEXT NOT NULL DEFAULT 'UGX',
       receiver_phone TEXT NOT NULL,
+      mobile_money_network TEXT,
       status payout_status NOT NULL DEFAULT 'PROCESSING',
       pesapal_reference TEXT UNIQUE,
       failure_reason TEXT,
@@ -223,6 +225,10 @@ async function ensureWalletTables(client) {
       failed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
+  `);
+    await client.query(`
+    ALTER TABLE wallet_withdrawals
+      ADD COLUMN IF NOT EXISTS mobile_money_network TEXT
   `);
 }
 async function ensureAccountSchema(client) {
@@ -792,7 +798,7 @@ export async function accountRoutes(app) {
                         minimum_withdrawal_amount: MIN_WALLET_WITHDRAW_UGX,
                         wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
                         wallet_notice: activeRole === ACCOUNT_ROLE_ADVERTISER
-                            ? 'Use wallet balance for deposits, campaign funding, and withdrawals.'
+                            ? 'Use wallet balance for Flutterwave deposits, campaign funding, and withdrawals.'
                             : 'Withdraw from UGX 10,000.',
                     }
                     : wallet,
@@ -814,20 +820,12 @@ export async function accountRoutes(app) {
         const webCancelUrl = resolveWebRedirectUrl(parsed.data.cancel_url, browserOrigin, '/payment/cancel');
         const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
         const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
-        if (!callbackUrl || !cancellationUrl) {
-            reply.code(400);
-            return { error: 'payment_redirect_urls_missing' };
-        }
-        if ((parsed.data.return_url && !webReturnUrl) || (parsed.data.cancel_url && !webCancelUrl)) {
-            reply.code(400);
-            return { error: 'payment_redirect_urls_invalid' };
-        }
-        if (!config.pesapal.ipnId) {
+        if (!config.flutterwave.secretKey || !config.flutterwave.publicKey) {
             reply.code(503);
-            return { error: 'pesapal_ipn_not_configured' };
+            return { error: 'flutterwave_not_configured' };
         }
         const result = await withTransaction(async (client) => {
-            const userRes = await client.query('SELECT email, preferred_currency FROM users WHERE id=$1 LIMIT 1', [userId]);
+            const userRes = await client.query('SELECT email, phone, preferred_currency FROM users WHERE id=$1 LIMIT 1', [userId]);
             const user = userRes.rows[0];
             if (!user?.email) {
                 reply.code(400);
@@ -856,45 +854,37 @@ export async function accountRoutes(app) {
                     wallet_id: wallet.id,
                 },
             ]);
-            const order = await submitOrder({
+            const firstName = String(user.email).split('@')[0] || 'User';
+            const checkoutPayload = {
+                public_key: config.flutterwave.publicKey,
+                tx_ref: reference,
                 amount: parsed.data.amount,
-                description: 'Wallet deposit',
-                type: 'MERCHANT',
-                reference,
-                firstName: String(user.email).split('@')[0] || 'User',
-                lastName: 'User',
-                email: String(user.email),
                 currency: 'UGX',
-                callback_url: callbackUrl,
-                cancellation_url: cancellationUrl,
-            });
-            return { order, txn: txn.rows[0] };
+                payment_options: 'card,banktransfer,ussd,mobilemoneyuganda',
+                customer: {
+                    email: String(user.email),
+                    name: `${firstName} User`.trim(),
+                    phone_number: user.phone?.toString() || undefined,
+                },
+                customizations: {
+                    title: 'Prime Checkout',
+                    description: 'Wallet deposit',
+                },
+                meta: {
+                    merchant_reference: reference,
+                    kind: 'WALLET_DEPOSIT',
+                    wallet_id: wallet.id,
+                    return_url: callbackUrl,
+                    cancel_url: cancellationUrl,
+                },
+            };
+            return { checkout_payload: checkoutPayload, txn: txn.rows[0] };
         });
         if (result?.error) {
             return result;
         }
-        const orderAny = result.order;
-        const status = orderAny?.status;
-        const pesapalError = orderAny?.error ?? orderAny?.errro;
-        if (pesapalError || (status && status !== '200' && status !== 200)) {
-            app.log.error({
-                order: result,
-                status,
-                pesapalError,
-                callbackUrl,
-                cancellationUrl,
-                userId,
-            }, 'wallet_deposit_submit_failed');
-            reply.code(502);
-            return { error: 'pesapal_submit_failed', pesapal_response: orderAny };
-        }
-        const redirectUrl = orderAny?.redirect_url;
-        if (!redirectUrl) {
-            reply.code(502);
-            return { error: 'pesapal_missing_redirect_url', pesapal_response: orderAny };
-        }
         return {
-            redirect_url: redirectUrl,
+            checkout_payload: result.checkout_payload,
             deposit: {
                 amount: parsed.data.amount,
                 reference: result.txn.merchant_reference,
@@ -919,9 +909,15 @@ export async function accountRoutes(app) {
                 return { error: 'user_not_found' };
             }
             const receiverPhone = (parsed.data.phone?.trim() || String(user.phone ?? '').trim());
+            const receiverNetwork = parsed.data.network?.trim().toUpperCase() ??
+                undefined;
             if (!receiverPhone) {
                 reply.code(400);
                 return { error: 'missing_payout_phone' };
+            }
+            if (!receiverNetwork) {
+                reply.code(400);
+                return { error: 'missing_mobile_money_network' };
             }
             const amount = parsed.data.amount;
             if (amount < MIN_WALLET_WITHDRAW_UGX) {
@@ -965,18 +961,20 @@ export async function accountRoutes(app) {
           amount,
           currency,
           receiver_phone,
+          mobile_money_network,
           status,
           pesapal_reference
         )
-        VALUES ($1,$2,$3,$4,$5,'PROCESSING',$6)
+        VALUES ($1,$2,$3,$4,$5,$6,'PROCESSING',$7)
         RETURNING *
-        `, [wallet.id, userId, amount, currency, receiverPhone, reference]);
+        `, [wallet.id, userId, amount, currency, receiverPhone, receiverNetwork, reference]);
             payoutPayload = {
                 amount,
                 currency,
                 reference,
                 receiverName: user.email?.split('@')[0] ?? 'User',
                 receiverPhone,
+                receiverNetwork,
             };
             return {
                 ok: true,
@@ -996,6 +994,7 @@ export async function accountRoutes(app) {
                 reference: payout.reference,
                 receiverName: payout.receiverName,
                 receiverPhone: payout.receiverPhone,
+                receiverNetwork: payout.receiverNetwork,
             });
         }
         catch (error) {

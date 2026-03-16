@@ -1,16 +1,13 @@
+const flutterwaveConfig = {
+    baseUrl: process.env.FLUTTERWAVE_BASE_URL ?? 'https://api.flutterwave.com/v3',
+    secretKey: process.env.FLUTTERWAVE_SECRET_KEY ?? '',
+    publicKey: process.env.FLUTTERWAVE_PUBLIC_KEY ?? '',
+    webhookSecretHash: process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? '',
+};
 export const config = {
     port: parseInt(process.env.PORT ?? '3001', 10),
     databaseUrl: process.env.DATABASE_URL ?? '',
     fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
-    pesapal: {
-        env: process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox',
-        baseUrl: process.env.PESAPAL_BASE_URL ??
-            ((process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox') === 'live'
-                ? 'https://pay.pesapal.com/v3'
-                : 'https://cybqa.pesapal.com/pesapalv3'),
-        consumerKey: process.env.PESAPAL_CONSUMER_KEY ?? '',
-        consumerSecret: process.env.PESAPAL_CONSUMER_SECRET ?? '',
-        payoutCallbackUrl: process.env.PESAPAL_PAYOUT_CALLBACK_URL ?? '',
-        payoutWebhookSecret: process.env.PESAPAL_PAYOUT_WEBHOOK_SECRET ?? ''
-    }
+    flutterwave: flutterwaveConfig,
+    pesapal: flutterwaveConfig,
 };

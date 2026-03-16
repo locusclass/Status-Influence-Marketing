@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { requestPayout, submitOrder } from '../services/pesapal.js';
+import { requestPayout } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
@@ -52,6 +52,7 @@ const accountWhatsappVerifySchema = z.object({
 const walletWithdrawSchema = z.object({
   amount: z.number().int().positive(),
   phone: z.string().trim().min(7).max(20).optional(),
+  network: z.enum(['MTN', 'AIRTEL']).optional(),
 });
 
 const walletDepositSchema = z.object({
@@ -68,6 +69,7 @@ type WalletPayoutPayload = {
   reference: string;
   receiverName: string;
   receiverPhone: string;
+  receiverNetwork: 'MTN' | 'AIRTEL';
 };
 
 function normalizeUrlOrigin(value?: string) {
@@ -275,6 +277,7 @@ async function ensureWalletTables(client: any) {
       amount INTEGER NOT NULL,
       currency TEXT NOT NULL DEFAULT 'UGX',
       receiver_phone TEXT NOT NULL,
+      mobile_money_network TEXT,
       status payout_status NOT NULL DEFAULT 'PROCESSING',
       pesapal_reference TEXT UNIQUE,
       failure_reason TEXT,
@@ -282,6 +285,10 @@ async function ensureWalletTables(client: any) {
       failed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
+  `);
+  await client.query(`
+    ALTER TABLE wallet_withdrawals
+      ADD COLUMN IF NOT EXISTS mobile_money_network TEXT
   `);
 }
 
@@ -1074,7 +1081,7 @@ export async function accountRoutes(app: FastifyInstance) {
                 wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
                 wallet_notice:
                   activeRole === ACCOUNT_ROLE_ADVERTISER
-                    ? 'Use wallet balance for deposits, campaign funding, and withdrawals.'
+                    ? 'Use wallet balance for Flutterwave deposits, campaign funding, and withdrawals.'
                     : 'Withdraw from UGX 10,000.',
               }
             : wallet,
@@ -1099,22 +1106,14 @@ export async function accountRoutes(app: FastifyInstance) {
     const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
     const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
 
-    if (!callbackUrl || !cancellationUrl) {
-      reply.code(400);
-      return { error: 'payment_redirect_urls_missing' };
-    }
-    if ((parsed.data.return_url && !webReturnUrl) || (parsed.data.cancel_url && !webCancelUrl)) {
-      reply.code(400);
-      return { error: 'payment_redirect_urls_invalid' };
-    }
-    if (!config.pesapal.ipnId) {
+    if (!config.flutterwave.secretKey || !config.flutterwave.publicKey) {
       reply.code(503);
-      return { error: 'pesapal_ipn_not_configured' };
+      return { error: 'flutterwave_not_configured' };
     }
 
     const result = await withTransaction(async (client) => {
       const userRes = await client.query(
-        'SELECT email, preferred_currency FROM users WHERE id=$1 LIMIT 1',
+        'SELECT email, phone, preferred_currency FROM users WHERE id=$1 LIMIT 1',
         [userId]
       );
       const user = userRes.rows[0];
@@ -1150,53 +1149,40 @@ export async function accountRoutes(app: FastifyInstance) {
         ]
       );
 
-      const order = await submitOrder({
+      const firstName = String(user.email).split('@')[0] || 'User';
+      const checkoutPayload = {
+        public_key: config.flutterwave.publicKey,
+        tx_ref: reference,
         amount: parsed.data.amount,
-        description: 'Wallet deposit',
-        type: 'MERCHANT',
-        reference,
-        firstName: String(user.email).split('@')[0] || 'User',
-        lastName: 'User',
-        email: String(user.email),
         currency: 'UGX',
-        callback_url: callbackUrl,
-        cancellation_url: cancellationUrl,
-      });
+        payment_options: 'card,banktransfer,ussd,mobilemoneyuganda',
+        customer: {
+          email: String(user.email),
+          name: `${firstName} User`.trim(),
+          phone_number: user.phone?.toString() || undefined,
+        },
+        customizations: {
+          title: 'Prime Checkout',
+          description: 'Wallet deposit',
+        },
+        meta: {
+          merchant_reference: reference,
+          kind: 'WALLET_DEPOSIT',
+          wallet_id: wallet.id,
+          return_url: callbackUrl,
+          cancel_url: cancellationUrl,
+        },
+      };
 
-      return { order, txn: txn.rows[0] };
+      return { checkout_payload: checkoutPayload, txn: txn.rows[0] };
     });
 
     if ((result as any)?.error) {
       return result;
     }
 
-    const orderAny = (result as any).order as any;
-    const status = orderAny?.status;
-    const pesapalError = orderAny?.error ?? orderAny?.errro;
-    if (pesapalError || (status && status !== '200' && status !== 200)) {
-      app.log.error(
-        {
-          order: result,
-          status,
-          pesapalError,
-          callbackUrl,
-          cancellationUrl,
-          userId,
-        },
-        'wallet_deposit_submit_failed'
-      );
-      reply.code(502);
-      return { error: 'pesapal_submit_failed', pesapal_response: orderAny };
-    }
-
-    const redirectUrl = orderAny?.redirect_url;
-    if (!redirectUrl) {
-      reply.code(502);
-      return { error: 'pesapal_missing_redirect_url', pesapal_response: orderAny };
-    }
-
     return {
-      redirect_url: redirectUrl,
+      checkout_payload: result.checkout_payload,
       deposit: {
         amount: parsed.data.amount,
         reference: result.txn.merchant_reference,
@@ -1230,9 +1216,16 @@ export async function accountRoutes(app: FastifyInstance) {
       const receiverPhone = (
         parsed.data.phone?.trim() || String(user.phone ?? '').trim()
       );
+      const receiverNetwork =
+        (parsed.data.network?.trim().toUpperCase() as 'MTN' | 'AIRTEL' | undefined) ??
+        undefined;
       if (!receiverPhone) {
         reply.code(400);
         return { error: 'missing_payout_phone' };
+      }
+      if (!receiverNetwork) {
+        reply.code(400);
+        return { error: 'missing_mobile_money_network' };
       }
 
       const amount = parsed.data.amount;
@@ -1290,13 +1283,14 @@ export async function accountRoutes(app: FastifyInstance) {
           amount,
           currency,
           receiver_phone,
+          mobile_money_network,
           status,
           pesapal_reference
         )
-        VALUES ($1,$2,$3,$4,$5,'PROCESSING',$6)
+        VALUES ($1,$2,$3,$4,$5,$6,'PROCESSING',$7)
         RETURNING *
         `,
-        [wallet.id, userId, amount, currency, receiverPhone, reference]
+        [wallet.id, userId, amount, currency, receiverPhone, receiverNetwork, reference]
       );
 
       payoutPayload = {
@@ -1305,6 +1299,7 @@ export async function accountRoutes(app: FastifyInstance) {
         reference,
         receiverName: user.email?.split('@')[0] ?? 'User',
         receiverPhone,
+        receiverNetwork,
       };
 
       return {
@@ -1328,6 +1323,7 @@ export async function accountRoutes(app: FastifyInstance) {
         reference: payout.reference,
         receiverName: payout.receiverName,
         receiverPhone: payout.receiverPhone,
+        receiverNetwork: payout.receiverNetwork,
       });
     } catch (error: any) {
       await withTransaction(async (client) => {

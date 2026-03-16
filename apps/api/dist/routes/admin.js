@@ -293,7 +293,7 @@ export async function adminRoutes(app) {
         SELECT
           COALESCE(SUM(amount), 0)::bigint AS total_amount,
           COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS payout_amount,
-          COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS pesapal_amount
+          COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS provider_amount
         FROM filtered
         `, params);
             const escrowConditions = [];
@@ -360,7 +360,7 @@ export async function adminRoutes(app) {
             date_trunc('${groupBy}', created_at) AS bucket,
             COALESCE(SUM(amount), 0)::bigint AS total_amount,
             COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS payout_amount,
-            COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS pesapal_amount,
+          COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS provider_amount,
             ROUND(COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0) * 0.15)::bigint AS platform_fee
           FROM filtered
           GROUP BY bucket
@@ -377,7 +377,8 @@ export async function adminRoutes(app) {
                 summary: {
                     total_amount: Number(totals.total_amount ?? 0),
                     payout_amount: payoutAmount,
-                    pesapal_amount: Number(totals.pesapal_amount ?? 0),
+                    flutterwave_amount: Number(totals.provider_amount ?? 0),
+                    pesapal_amount: Number(totals.provider_amount ?? 0),
                     platform_fee: platformFee,
                     contracts_financed: contractsFinanced
                 },
@@ -393,14 +394,15 @@ export async function adminRoutes(app) {
             const proofs = await client.query('SELECT COUNT(*)::int AS count FROM proofs');
             const payouts = await client.query('SELECT COUNT(*)::int AS count FROM payout_requests');
             const escrows = await client.query('SELECT COUNT(*)::int AS count FROM escrow_ledger');
-            const pesapal = await client.query('SELECT COUNT(*)::int AS count FROM pesapal_transactions');
+            const providerTransactions = await client.query('SELECT COUNT(*)::int AS count FROM pesapal_transactions');
             return {
                 users: users.rows[0]?.count ?? 0,
                 campaigns: campaigns.rows[0]?.count ?? 0,
                 proofs: proofs.rows[0]?.count ?? 0,
                 payouts: payouts.rows[0]?.count ?? 0,
                 escrows: escrows.rows[0]?.count ?? 0,
-                pesapal_transactions: pesapal.rows[0]?.count ?? 0
+                flutterwave_transactions: providerTransactions.rows[0]?.count ?? 0,
+                pesapal_transactions: providerTransactions.rows[0]?.count ?? 0
             };
         });
     });
@@ -1054,7 +1056,7 @@ export async function adminRoutes(app) {
         }
         return { payout: res };
     });
-    app.get('/admin/pesapal/transactions', { preHandler: [app.adminOnly] }, async (request) => {
+    app.get('/admin/flutterwave/transactions', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const range = parseDateRange(query?.from, query?.to);
@@ -1102,7 +1104,7 @@ export async function adminRoutes(app) {
             return { transactions: res.rows };
         });
     });
-    app.get('/admin/pesapal/webhooks', { preHandler: [app.adminOnly] }, async (request) => {
+    app.get('/admin/flutterwave/webhooks', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const range = parseDateRange(query?.from, query?.to);
@@ -1130,7 +1132,7 @@ export async function adminRoutes(app) {
             return { webhooks: res.rows };
         });
     });
-    app.post('/admin/pesapal/webhooks/:eventId/replay', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    app.post('/admin/flutterwave/webhooks/:eventId/replay', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         return withTransaction(async (client) => {
             const res = await client.query('SELECT * FROM pesapal_webhook_events WHERE event_id=$1', [params.eventId]);

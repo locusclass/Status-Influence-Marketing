@@ -32,6 +32,12 @@ function resolveUploadDir() {
     }
     return './uploads';
 }
+const flutterwaveConfig = {
+    baseUrl: process.env.FLUTTERWAVE_BASE_URL ?? 'https://api.flutterwave.com/v3',
+    secretKey: process.env.FLUTTERWAVE_SECRET_KEY ?? '',
+    publicKey: process.env.FLUTTERWAVE_PUBLIC_KEY ?? '',
+    webhookSecretHash: process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? '',
+};
 export const config = {
     port: Number(process.env.PORT ?? 3000),
     databaseUrl: process.env.DATABASE_URL ?? '',
@@ -41,20 +47,8 @@ export const config = {
     uploadDir: resolveUploadDir(),
     uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
     fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
-    pesapal: {
-        env: process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox',
-        baseUrl: process.env.PESAPAL_BASE_URL ??
-            ((process.env.PESAPAL_ENVIRONMENT ?? process.env.PESAPAL_ENV ?? 'sandbox') === 'live'
-                ? 'https://pay.pesapal.com/v3'
-                : 'https://cybqa.pesapal.com/pesapalv3'),
-        consumerKey: process.env.PESAPAL_CONSUMER_KEY ?? '',
-        consumerSecret: process.env.PESAPAL_CONSUMER_SECRET ?? '',
-        ipnId: process.env.PESAPAL_IPN_ID ?? '',
-        callbackUrl: process.env.PESAPAL_CALLBACK_URL ?? '',
-        payoutCallbackUrl: process.env.PESAPAL_PAYOUT_CALLBACK_URL ?? '',
-        payoutWebhookSecret: process.env.PESAPAL_PAYOUT_WEBHOOK_SECRET ?? '',
-        ipnWebhookSecret: process.env.PESAPAL_IPN_WEBHOOK_SECRET ?? ''
-    },
+    flutterwave: flutterwaveConfig,
+    pesapal: flutterwaveConfig,
     adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? '',
     whatsappVerification: {
         mode: process.env.WHATSAPP_VERIFICATION_MODE ?? (process.env.NODE_ENV === 'test' ? 'mock' : 'baileys'),
