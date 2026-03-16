@@ -80,6 +80,59 @@ function buildPaymentCallbackUrl(request, routePath, targetUrl) {
     }
     return url.toString();
 }
+async function ensureWalletForUser(client, userId, preferredCurrency) {
+    const existing = await client.query('SELECT * FROM wallets WHERE user_id=$1 LIMIT 1', [userId]);
+    if (existing.rows[0]) {
+        return existing.rows[0];
+    }
+    const currency = preferredCurrency?.toString().trim().toUpperCase() ||
+        (await client.query('SELECT preferred_currency FROM users WHERE id=$1 LIMIT 1', [userId])).rows[0]?.preferred_currency?.toString().trim().toUpperCase() ||
+        'UGX';
+    const created = await client.query(`
+    INSERT INTO wallets (user_id, currency, balance_available, balance_escrow, balance)
+    VALUES ($1,$2,0,0,0)
+    RETURNING *
+    `, [userId, currency]);
+    return created.rows[0];
+}
+async function creditAdvertiserWallet(client, advertiserId, amount, reference, preferredCurrency) {
+    if (amount <= 0) {
+        return null;
+    }
+    const wallet = await ensureWalletForUser(client, advertiserId, preferredCurrency);
+    const updated = await client.query(`
+    UPDATE wallets
+    SET balance_available = balance_available + $2,
+        balance = balance + $2
+    WHERE id=$1
+    RETURNING *
+    `, [wallet.id, amount]);
+    await client.query(`
+    INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+    VALUES ($1,$2,'CREDIT',$3)
+    `, [wallet.id, amount, reference]);
+    return updated.rows[0] ?? wallet;
+}
+async function refundEscrowAmountToAdvertiser(client, escrowId, advertiserId, refundAmount, reference, preferredCurrency) {
+    if (refundAmount <= 0) {
+        return { refunded_amount: 0, wallet: null };
+    }
+    const escrowUpdate = await client.query(`
+    UPDATE escrow_ledger
+    SET amount_available = amount_available - $2,
+        status = CASE
+          WHEN amount_available - $2 <= 0 THEN 'COMPLETED'
+          ELSE 'PARTIALLY_DISBURSED'
+        END
+    WHERE id=$1 AND amount_available >= $2
+    RETURNING *
+    `, [escrowId, refundAmount]);
+    if (!escrowUpdate.rows[0]) {
+        return { refunded_amount: 0, wallet: null };
+    }
+    const wallet = await creditAdvertiserWallet(client, advertiserId, refundAmount, reference, preferredCurrency);
+    return { refunded_amount: refundAmount, wallet };
+}
 async function ensureCampaignColumns(client) {
     await ensurePublicIdColumns(client);
     await client.query(`
@@ -402,7 +455,9 @@ async function getContractForAdvertiserAction(client, contractId, advertiserId, 
     SELECT
       ctr.*,
       c.advertiser_id,
+      c.parent_campaign_id,
       c.platform,
+      c.budget_total,
       COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
@@ -969,37 +1024,39 @@ export async function campaignRoutes(app) {
     });
     app.post('/campaigns/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const body = FundCampaignSchema.parse({ campaign_id: params.id, ...request.body });
+        const body = FundCampaignSchema.parse({
+            campaign_id: params.id,
+            ...request.body,
+        });
+        const fundSource = body.fund_source ?? 'PESAPAL';
         const pesapalCurrency = 'UGX';
         const browserOrigin = getBrowserOrigin(request);
         const webReturnUrl = resolveWebRedirectUrl(body.return_url, browserOrigin, '/payment/success');
         const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
         const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
         const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
-        const { order, pesapalTxn, campaign } = await withTransaction(async (client) => {
-            if (!config.pesapal.ipnId) {
-                reply.code(503);
-                return { error: 'pesapal_ipn_not_configured' };
-            }
+        const result = await withTransaction(async (client) => {
             const authUser = request.user?.sub;
             const role = request.user?.role;
             const userEmailRes = authUser
-                ? await client.query('SELECT email FROM users WHERE id=$1', [authUser])
+                ? await client.query('SELECT email, preferred_currency FROM users WHERE id=$1', [authUser])
                 : null;
             const userEmail = userEmailRes?.rows?.[0]?.email;
-            if (!userEmail) {
+            const preferredCurrency = userEmailRes?.rows?.[0]?.preferred_currency;
+            if (fundSource === 'PESAPAL' && !userEmail) {
                 reply.code(400);
                 return { error: 'user_email_missing' };
             }
-            if (!callbackUrl || !cancellationUrl) {
+            if (fundSource === 'PESAPAL' && (!callbackUrl || !cancellationUrl)) {
                 reply.code(400);
                 return { error: 'payment_redirect_urls_missing' };
             }
-            if ((body.return_url && !webReturnUrl) || (body.cancel_url && !webCancelUrl)) {
+            if (fundSource === 'PESAPAL' &&
+                ((body.return_url && !webReturnUrl) || (body.cancel_url && !webCancelUrl))) {
                 reply.code(400);
                 return { error: 'payment_redirect_urls_invalid' };
             }
-            const firstName = userEmail.split('@')[0] ?? 'User';
+            const firstName = (userEmail ?? 'user@example.com').split('@')[0] ?? 'User';
             const campaign = await campaignRepo.getCampaign(client, params.id);
             if (!campaign) {
                 reply.code(404);
@@ -1018,6 +1075,42 @@ export async function campaignRoutes(app) {
             if (body.amount !== escrow.amount_total) {
                 reply.code(400);
                 return { error: 'amount_mismatch' };
+            }
+            if (fundSource === 'WALLET') {
+                const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
+                const lockedWalletRes = await client.query('SELECT * FROM wallets WHERE id=$1 FOR UPDATE', [wallet.id]);
+                const lockedWallet = lockedWalletRes.rows[0];
+                const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);
+                if (!lockedWallet || balanceAvailable < body.amount) {
+                    reply.code(400);
+                    return { error: 'insufficient_wallet_balance' };
+                }
+                const reference = `ESCROW_FUND:${campaign.id}`;
+                await client.query(`
+          UPDATE wallets
+          SET balance_available = balance_available - $2,
+              balance = GREATEST(balance - $2, 0)
+          WHERE id=$1
+          `, [wallet.id, body.amount]);
+                await client.query(`
+          INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+          VALUES ($1,$2,'DEBIT',$3)
+          `, [wallet.id, body.amount, reference]);
+                await client.query(`
+          UPDATE escrow_ledger
+          SET status='FUNDED'
+          WHERE id=$1
+          `, [escrow.id]);
+                return {
+                    fund_source: fundSource,
+                    funded: true,
+                    campaign,
+                    wallet_reference: reference,
+                };
+            }
+            if (!config.pesapal.ipnId) {
+                reply.code(503);
+                return { error: 'pesapal_ipn_not_configured' };
             }
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -1038,8 +1131,15 @@ export async function campaignRoutes(app) {
                 callback_url: callbackUrl,
                 cancellation_url: cancellationUrl
             });
-            return { order, pesapalTxn, campaign };
+            return { fund_source: fundSource, order, pesapalTxn, campaign };
         });
+        if (result?.error) {
+            return result;
+        }
+        if (result?.funded) {
+            return result;
+        }
+        const { order, campaign, pesapalTxn } = result;
         const orderAny = order;
         const pesapalError = orderAny?.error ?? orderAny?.errro;
         const status = orderAny?.status;
@@ -1059,7 +1159,12 @@ export async function campaignRoutes(app) {
             reply.code(502);
             return { error: 'pesapal_missing_redirect_url', pesapal_response: order };
         }
-        return { redirect_url: redirectUrl, pesapal_txn: pesapalTxn };
+        return {
+            redirect_url: redirectUrl,
+            pesapal_txn: pesapalTxn,
+            fund_source: fundSource,
+            funded: false,
+        };
     });
     app.post('/campaigns/:id/accept', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
@@ -1210,7 +1315,19 @@ export async function campaignRoutes(app) {
          WHERE id=$1
            AND execution_mode='PRIVATE_CONTRACT'
            AND visibility='PRIVATE'`, [contract.campaign_id]);
-            return updated.rows[0];
+            let walletRefundedAmount = 0;
+            if (contract.parent_campaign_id) {
+                const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1', [contract.escrow_campaign_id]);
+                const escrow = escrowRes.rows[0];
+                if (escrow) {
+                    const refund = await refundEscrowAmountToAdvertiser(client, escrow.id, contract.advertiser_id, Number(contract.budget_total ?? 0), `ESCROW_RETURN:CONTRACT_CANCEL:${contract.id}`);
+                    walletRefundedAmount = refund.refunded_amount;
+                }
+            }
+            return {
+                ...updated.rows[0],
+                wallet_refunded_amount: walletRefundedAmount,
+            };
         });
         if (!result) {
             reply.code(404);
@@ -1334,9 +1451,17 @@ export async function campaignRoutes(app) {
             await client.query(`UPDATE campaigns
          SET status='CANCELLED'
          WHERE id = ANY($1::uuid[])`, [campaignIds]);
+            const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1', [scopeId]);
+            const escrow = escrowRes.rows[0];
+            let walletRefundedAmount = 0;
+            if (escrow) {
+                const refund = await refundEscrowAmountToAdvertiser(client, escrow.id, campaign.advertiser_id, Number(escrow.amount_available ?? 0), `ESCROW_RETURN:CAMPAIGN_CANCEL:${scopeId}`);
+                walletRefundedAmount = refund.refunded_amount;
+            }
             const refreshed = await campaignRepo.getCampaign(client, scopeId);
             return {
                 ...refreshed,
+                wallet_refunded_amount: walletRefundedAmount,
                 status_summary: await buildCampaignStatusSummary(client, scopeId, authUser),
             };
         });

@@ -36,6 +36,7 @@ export const CreateCampaignSchema = z
 export const FundCampaignSchema = z.object({
     campaign_id: z.string().trim().min(3),
     amount: z.number().int().positive(),
+    fund_source: z.enum(['PESAPAL', 'WALLET']).optional(),
     return_url: z.string().trim().min(1).optional(),
     cancel_url: z.string().trim().min(1).optional()
 });

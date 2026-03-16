@@ -635,6 +635,13 @@ export async function accountRoutes(app) {
             const walletRes = await client.query('SELECT * FROM wallets WHERE user_id=$1', [userId]);
             const wallet = walletRes.rows[0];
             const txnsRes = await client.query(`SELECT * FROM wallet_txns WHERE wallet_id=$1 ORDER BY created_at DESC LIMIT 20`, [wallet?.id]);
+            const withdrawalsRes = await client.query(`
+        SELECT *
+        FROM wallet_withdrawals
+        WHERE wallet_id=$1
+        ORDER BY created_at DESC
+        LIMIT 20
+        `, [wallet?.id]);
             return {
                 wallet: wallet
                     ? {
@@ -647,6 +654,7 @@ export async function accountRoutes(app) {
                     }
                     : wallet,
                 txns: txnsRes.rows,
+                withdrawals: withdrawalsRes.rows,
             };
         });
         return data;

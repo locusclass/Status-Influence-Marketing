@@ -94,6 +94,24 @@ export function buildServer() {
 
   app.register(multipart);
 
+  app.addContentTypeParser(
+    /^application\/([a-z0-9.+-]+\+)?json(?:;.*)?$/i,
+    { parseAs: 'string' },
+    (request: any, body: string, done) => {
+      request.rawBody = body;
+      if (!body) {
+        done(null, {});
+        return;
+      }
+
+      try {
+        done(null, JSON.parse(body));
+      } catch (error) {
+        done(error as Error, undefined);
+      }
+    }
+  );
+
   app.addHook('onRequest', async (request) => {
     request.log.info(
       {

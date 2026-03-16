@@ -91,16 +91,19 @@ export declare const CreateCampaignSchema: z.ZodObject<{
 export declare const FundCampaignSchema: z.ZodObject<{
     campaign_id: z.ZodString;
     amount: z.ZodNumber;
+    fund_source: z.ZodOptional<z.ZodEnum<["PESAPAL", "WALLET"]>>;
     return_url: z.ZodOptional<z.ZodString>;
     cancel_url: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     campaign_id: string;
     amount: number;
+    fund_source?: "PESAPAL" | "WALLET" | undefined;
     return_url?: string | undefined;
     cancel_url?: string | undefined;
 }, {
     campaign_id: string;
     amount: number;
+    fund_source?: "PESAPAL" | "WALLET" | undefined;
     return_url?: string | undefined;
     cancel_url?: string | undefined;
 }>;

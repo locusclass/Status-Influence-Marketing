@@ -520,7 +520,7 @@ async function preparePayoutRequest(client, proof, campaign) {
            ELSE 'PARTIALLY_DISBURSED'
          END
      WHERE id=$1 AND amount_available >= $2
-     RETURNING *`, [escrow.id, campaign.payout_amount]);
+     RETURNING *`, [escrow.id, campaign.budget_total]);
     if (!updatedEscrow.rows[0]) {
         throw new Error('insufficient_escrow');
     }
@@ -560,13 +560,15 @@ async function compensatePayoutFailure(proofId, campaignId) {
             return;
         }
         await client.query("UPDATE payout_requests SET status='FAILED' WHERE id=$1", [payout.id]);
+        const campaignRes = await client.query('SELECT budget_total FROM campaigns WHERE id=$1 LIMIT 1', [campaignId]);
+        const escrowRefundAmount = Number(campaignRes.rows[0]?.budget_total ?? payout.amount ?? 0);
         await client.query(`UPDATE escrow_ledger
        SET amount_available = amount_available + $2,
            status = CASE
              WHEN amount_available + $2 >= amount_total THEN 'FUNDED'
              ELSE 'PARTIALLY_DISBURSED'
            END
-       WHERE campaign_id=$1`, [campaignId, payout.amount]);
+       WHERE campaign_id=$1`, [campaignId, escrowRefundAmount]);
     });
 }
 async function processVerificationJob(job) {

@@ -79,6 +79,19 @@ export function buildServer() {
         secret: config.jwtSecret,
     });
     app.register(multipart);
+    app.addContentTypeParser(/^application\/([a-z0-9.+-]+\+)?json(?:;.*)?$/i, { parseAs: 'string' }, (request, body, done) => {
+        request.rawBody = body;
+        if (!body) {
+            done(null, {});
+            return;
+        }
+        try {
+            done(null, JSON.parse(body));
+        }
+        catch (error) {
+            done(error, undefined);
+        }
+    });
     app.addHook('onRequest', async (request) => {
         request.log.info({
             reqId: request.id,
