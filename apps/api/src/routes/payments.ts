@@ -201,7 +201,7 @@ export async function paymentRoutes(app: FastifyInstance) {
     rawPayload: any
   ) => {
     const txnRows = await client.query(
-      'SELECT * FROM pesapal_transactions WHERE merchant_reference=$1',
+      'SELECT * FROM pesapal_transactions WHERE merchant_reference=$1 FOR UPDATE',
       [paymentEvent.reference]
     );
     const txn = txnRows.rows[0];
@@ -223,6 +223,10 @@ export async function paymentRoutes(app: FastifyInstance) {
       }
       if (statusSuccess.has(statusText)) {
         const walletId = String(txnPayload.wallet_id ?? '');
+        if (!walletId) {
+          return { ok: false, error: 'wallet_not_found' };
+        }
+        await client.query('SELECT id FROM wallets WHERE id=$1 FOR UPDATE', [walletId]);
         await client.query(
           `
           UPDATE wallets
@@ -236,6 +240,7 @@ export async function paymentRoutes(app: FastifyInstance) {
           `
           INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
           VALUES ($1,$2,'CREDIT',$3)
+          ON CONFLICT DO NOTHING
           `,
           [walletId, amount, `WALLET_DEPOSIT:${paymentEvent.reference}`]
         );
@@ -260,6 +265,10 @@ export async function paymentRoutes(app: FastifyInstance) {
     const escrow = escrowRows.rows[0];
     if (!escrow || amount !== Number(escrow.amount_total ?? 0)) {
       return { ok: false, error: 'amount_mismatch' };
+    }
+
+    if (txn.status === 'COMPLETED') {
+      return { ok: true, duplicate: true, type: 'campaign_funding', escrow_id: escrow.id };
     }
 
     if (statusSuccess.has(statusText)) {

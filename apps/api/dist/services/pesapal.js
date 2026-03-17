@@ -156,7 +156,37 @@ export async function getTransactionStatus(transactionId, _merchantReference) {
     return flutterwaveRequest(`/charges/${encodeURIComponent(transactionId)}`);
 }
 export async function requestPayout(_input) {
-    throw new Error('Flutterwave V4 payouts are not yet implemented in this build');
+    if (!config.flutterwave.secretKey.trim()) {
+        throw new Error('Flutterwave transfer secret key is not configured');
+    }
+    const normalizedPhone = _input.receiverPhone.replace(/[^\d]/g, '');
+    const normalizedNetwork = (_input.receiverNetwork ?? 'MTN').trim().toUpperCase();
+    const transferRes = await fetch(`${buildBaseUrl().replace(/\/v\d+$/i, '')}/v3/transfers`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${config.flutterwave.secretKey}`,
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-Trace-Id': randomId(),
+        },
+        body: JSON.stringify({
+            account_bank: normalizedNetwork,
+            account_number: normalizedPhone.startsWith('256')
+                ? normalizedPhone
+                : `256${normalizedPhone.replace(/^0+/, '')}`,
+            amount: _input.amount,
+            narration: _input.narration,
+            currency: _input.currency,
+            reference: _input.reference,
+            debit_currency: _input.currency,
+            beneficiary_name: _input.receiverName,
+        }),
+    });
+    if (!transferRes.ok) {
+        const text = await transferRes.text();
+        throw new Error(`Flutterwave transfer failed: ${transferRes.status} ${text}`);
+    }
+    return (await transferRes.json());
 }
 export function verifyWebhookSignature(rawBody, signature, secret) {
     if (!signature || !secret) {
