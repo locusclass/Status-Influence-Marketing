@@ -94,12 +94,12 @@ export function getStartupConfigIssues() {
     issues.push('JWT_SECRET is missing or using the development default');
   }
 
-  if (config.flutterwave.clientId && !/^fw_/i.test(config.flutterwave.clientId)) {
-    issues.push('FLUTTERWAVE_CLIENT_ID does not look like a valid Flutterwave V4 client id');
+  if (config.flutterwave.clientId && !config.flutterwave.clientId.trim()) {
+    issues.push('FLUTTERWAVE_CLIENT_ID is empty');
   }
 
-  if (config.flutterwave.clientSecret && !/^fw_/i.test(config.flutterwave.clientSecret)) {
-    issues.push('FLUTTERWAVE_CLIENT_SECRET does not look like a valid Flutterwave V4 client secret');
+  if (config.flutterwave.clientSecret && !config.flutterwave.clientSecret.trim()) {
+    issues.push('FLUTTERWAVE_CLIENT_SECRET is empty');
   }
 
   if (
@@ -139,8 +139,8 @@ export function isFatalStartupIssue(issue: string) {
 
 export function hasValidFlutterwaveKeys() {
   return (
-    /^fw_/i.test(config.flutterwave.clientId) &&
-    /^fw_/i.test(config.flutterwave.clientSecret)
+    config.flutterwave.clientId.trim().length > 0 &&
+    config.flutterwave.clientSecret.trim().length > 0
   );
 }
 

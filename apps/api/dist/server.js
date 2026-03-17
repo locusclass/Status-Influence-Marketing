@@ -179,9 +179,6 @@ export function buildServer() {
         if (!config.flutterwave.clientId) {
             app.log.warn('FLUTTERWAVE_CLIENT_ID is not set. Payments will fail.');
         }
-        else if (!/^fw_/i.test(config.flutterwave.clientId)) {
-            app.log.warn('FLUTTERWAVE_CLIENT_ID format looks invalid. Payments will fail.');
-        }
         else {
             app.log.info({ provider: 'FLUTTERWAVE' }, 'Flutterwave payments configured');
         }
@@ -189,7 +186,7 @@ export function buildServer() {
             app.log.warn('FLUTTERWAVE_CLIENT_SECRET is not set. Payments will fail.');
         }
         else if (!hasValidFlutterwaveKeys()) {
-            app.log.warn('FLUTTERWAVE_CLIENT_SECRET format looks invalid. Payments will fail.');
+            app.log.warn('Flutterwave V4 credentials are incomplete. Payments will fail.');
         }
         if (!config.flutterwave.webhookSecretHash) {
             app.log.warn('FLUTTERWAVE_WEBHOOK_SECRET_HASH is not set. Webhook verification is disabled.');
