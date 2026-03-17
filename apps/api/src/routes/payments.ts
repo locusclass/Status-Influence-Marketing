@@ -587,16 +587,17 @@ export async function paymentRoutes(app: FastifyInstance) {
       }
       return result;
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
       app.log.error(
         {
           error,
-          message: error instanceof Error ? error.message : String(error),
+          detail,
           body: request.body,
         },
-        'flutterwave_initiate_failed'
+        `flutterwave_initiate_failed: ${detail}`
       );
       reply.code(502);
-      return { error: 'flutterwave_initiate_failed' };
+      return { error: 'flutterwave_initiate_failed', detail };
     }
   });
 
@@ -624,16 +625,17 @@ export async function paymentRoutes(app: FastifyInstance) {
         result,
       };
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
       app.log.error(
         {
           error,
-          message: error instanceof Error ? error.message : String(error),
+          detail,
           body: request.body,
         },
-        'flutterwave_verify_failed'
+        `flutterwave_verify_failed: ${detail}`
       );
       reply.code(502);
-      return { error: 'flutterwave_verify_failed' };
+      return { error: 'flutterwave_verify_failed', detail };
     }
   });
 
