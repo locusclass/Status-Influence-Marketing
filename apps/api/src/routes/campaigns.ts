@@ -6,7 +6,6 @@ import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import { config, hasValidFlutterwaveKeys } from '../config.js';
-import { createHostedPayment } from '../services/flutterwave.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
   canAccessAdvertiserFeatures,
@@ -1573,59 +1572,23 @@ export async function campaignRoutes(app: FastifyInstance) {
         cancel_url: cancellationUrl,
         network: body.network ?? 'MTN',
       };
-      let hostedCheckout;
-      try {
-        hostedCheckout = await createHostedPayment({
-          txRef: merchantReference,
-          amount: body.amount,
-          currency: paymentCurrency,
-          redirectUrl: callbackUrl,
-          customer: {
-            email: userEmail!,
-            name: `${firstName} User`.trim(),
-            phoneNumber: userPhone ?? undefined,
-          },
-          customizations: {
-            title: 'Prime Checkout',
-            description: `Campaign funding: ${campaign.title}`,
-          },
-          meta: checkoutMeta,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        request.log.error(
-          { error, detail, campaign: campaign.id, tx_ref: merchantReference },
-          `flutterwave_checkout_failed: ${detail}`
-        );
-        reply.code(502);
-        return { error: 'flutterwave_checkout_failed', detail };
-      }
-      if (!hostedCheckout.checkoutUrl) {
-        reply.code(502);
-        return { error: 'flutterwave_missing_checkout_link' } as any;
-      }
-
-      await client.query(
-        `UPDATE pesapal_transactions
-         SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
-         WHERE merchant_reference=$1`,
-        [
-          merchantReference,
-          JSON.stringify({
-            ...checkoutMeta,
-            checkout_url: hostedCheckout.checkoutUrl,
-          }),
-        ]
-      );
-
       const checkoutPayload = {
-        provider: 'FLUTTERWAVE_V3',
-        checkout_url: hostedCheckout.checkoutUrl,
+        provider: 'FLUTTERWAVE_V4',
         tx_ref: merchantReference,
         amount: body.amount,
         currency: paymentCurrency,
-        payment_options: 'card,mobilemoneyuganda',
+        payment_options: 'mobilemoneyuganda',
         redirect_url: callbackUrl,
+        supported_networks: ['MTN', 'AIRTEL'],
+        customer: {
+          email: userEmail!,
+          name: `${firstName} User`.trim(),
+          phone_number: userPhone ?? undefined,
+        },
+        customizations: {
+          title: 'Prime Checkout',
+          description: `Campaign funding: ${campaign.title}`,
+        },
         meta: checkoutMeta,
       };
 

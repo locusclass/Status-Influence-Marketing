@@ -1,36 +1,25 @@
 import { fetch } from 'undici';
 import crypto from 'crypto';
-import { config } from '../config.js';
+import { config, hasFlutterwaveClientCredentials, resolveFlutterwaveBaseUrl, } from '../config.js';
 let cachedAccessToken = null;
 function randomId() {
     return crypto.randomUUID();
 }
+function normalizeNamePart(value, fallback) {
+    const cleaned = (value ?? '')
+        .replace(/[^A-Za-z ,.'-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (cleaned.length >= 2 && cleaned.length <= 50) {
+        return cleaned;
+    }
+    return fallback;
+}
 function buildBaseUrl() {
-    const configured = config.flutterwave.baseUrl.trim();
-    if (configured) {
-        return configured.replace(/\/+$/, '');
-    }
-    return 'https://api.flutterwave.com/v3';
+    return resolveFlutterwaveBaseUrl();
 }
-function readCheckoutUrl(payload) {
-    const candidates = [
-        payload?.data?.link,
-        payload?.data?.checkout_url,
-        payload?.data?.checkoutLink,
-        payload?.link,
-        payload?.checkout_url,
-        payload?.checkoutLink,
-    ];
-    for (const candidate of candidates) {
-        const value = String(candidate ?? '').trim();
-        if (value) {
-            return value;
-        }
-    }
-    return null;
-}
-async function getOAuthToken() {
-    if (!config.flutterwave.clientId.trim() || !config.flutterwave.clientSecret.trim()) {
+async function getAccessToken() {
+    if (!hasFlutterwaveClientCredentials()) {
         throw new Error('Flutterwave client credentials are not configured');
     }
     const now = Date.now();
@@ -69,20 +58,22 @@ async function getOAuthToken() {
     };
     return token;
 }
-async function getAuth() {
+async function getRequestToken() {
+    if (hasFlutterwaveClientCredentials()) {
+        return getAccessToken();
+    }
     const secretKey = config.flutterwave.secretKey.trim();
     if (secretKey) {
-        return { type: 'secret', token: secretKey };
+        return secretKey;
     }
-    const oauthToken = await getOAuthToken();
-    return { type: 'oauth', token: oauthToken };
+    throw new Error('Flutterwave credentials are not configured');
 }
 async function flutterwaveRequest(path, init = {}) {
-    const auth = await getAuth();
+    const token = await getRequestToken();
     const res = await fetch(`${buildBaseUrl()}${path}`, {
         method: init.method ?? 'GET',
         headers: {
-            Authorization: `Bearer ${auth.token}`,
+            Authorization: `Bearer ${token}`,
             Accept: 'application/json',
             'Content-Type': 'application/json',
             'X-Trace-Id': randomId(),
@@ -99,45 +90,80 @@ async function flutterwaveRequest(path, init = {}) {
 export async function registerIpnUrl() {
     return {
         ok: true,
-        provider: 'FLUTTERWAVE_V3',
+        provider: 'FLUTTERWAVE_V4',
         note: 'Flutterwave webhooks are configured from the dashboard.',
     };
 }
 export async function getIpnList() {
     return {
         ok: true,
-        provider: 'FLUTTERWAVE_V3',
+        provider: 'FLUTTERWAVE_V4',
         note: 'Flutterwave webhook endpoints are managed from the dashboard.',
     };
 }
-export async function createHostedPayment(input) {
-    const response = await flutterwaveRequest('/payments', {
+export async function createCustomer(input) {
+    const parts = input.name.trim().split(/\s+/).filter(Boolean);
+    const first = normalizeNamePart(parts[0], 'Customer');
+    const last = normalizeNamePart(parts.slice(1).join(' '), 'User');
+    const normalizedPhone = (input.phoneNumber ?? '').replace(/[^\d]/g, '');
+    return flutterwaveRequest('/customers', {
         method: 'POST',
         body: {
-            tx_ref: input.txRef,
+            email: input.email,
+            name: {
+                first,
+                last,
+            },
+            ...(normalizedPhone
+                ? {
+                    phone: {
+                        country_code: '256',
+                        number: normalizedPhone.startsWith('256')
+                            ? normalizedPhone.slice(3)
+                            : normalizedPhone.replace(/^0+/, ''),
+                    },
+                }
+                : {}),
+        },
+        idempotencyKey: `customer:${input.email.toLowerCase()}`,
+    });
+}
+export async function createMobileMoneyPaymentMethod(input) {
+    const normalizedPhone = input.phoneNumber.replace(/[^\d]/g, '');
+    return flutterwaveRequest('/payment-methods', {
+        method: 'POST',
+        body: {
+            type: 'mobile_money',
+            mobile_money: {
+                phone_number: normalizedPhone.startsWith(input.countryCode)
+                    ? normalizedPhone.slice(input.countryCode.length)
+                    : normalizedPhone.replace(/^0+/, ''),
+                network: input.network,
+                country_code: input.countryCode,
+            },
+        },
+        idempotencyKey: `pm:${normalizedPhone}:${input.network}:${input.countryCode}`,
+    });
+}
+export async function createCharge(input) {
+    return flutterwaveRequest('/charges', {
+        method: 'POST',
+        body: {
             amount: input.amount,
             currency: input.currency,
-            redirect_url: input.redirectUrl,
-            payment_options: input.paymentOptions ?? 'card,mobilemoneyuganda',
-            customer: {
-                email: input.customer.email,
-                name: input.customer.name,
-                ...(input.customer.phoneNumber
-                    ? { phone_number: input.customer.phoneNumber }
-                    : {}),
-            },
-            ...(input.customizations ? { customizations: input.customizations } : {}),
-            ...(input.meta ? { meta: input.meta } : {}),
+            customer_id: input.customerId,
+            payment_method_id: input.paymentMethodId,
+            reference: input.txRef,
+            ...(input.redirectUrl ? { redirect_url: input.redirectUrl } : {}),
         },
-        idempotencyKey: `hosted_payment:${input.txRef}`,
+        idempotencyKey: `charge:${input.txRef}`,
     });
-    return {
-        checkoutUrl: readCheckoutUrl(response),
-        response,
-    };
+}
+export async function getTransactionStatus(transactionId, _merchantReference) {
+    return flutterwaveRequest(`/charges/${encodeURIComponent(transactionId)}`);
 }
 export async function verifyTransaction(transactionId) {
-    return flutterwaveRequest(`/transactions/${encodeURIComponent(String(transactionId))}/verify`);
+    return getTransactionStatus(String(transactionId));
 }
 export async function requestPayout(input) {
     const secretKey = config.flutterwave.secretKey.trim();
@@ -146,7 +172,8 @@ export async function requestPayout(input) {
     }
     const normalizedPhone = input.receiverPhone.replace(/[^\d]/g, '');
     const normalizedNetwork = (input.receiverNetwork ?? 'MTN').trim().toUpperCase();
-    const res = await fetch(`${buildBaseUrl()}/transfers`, {
+    const transferBaseUrl = buildBaseUrl().replace(/\/v\d+$/i, '');
+    const res = await fetch(`${transferBaseUrl}/v3/transfers`, {
         method: 'POST',
         headers: {
             Authorization: `Bearer ${secretKey}`,

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { createHostedPayment, requestPayout } from '../services/flutterwave.js';
+import { requestPayout } from '../services/flutterwave.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
@@ -1165,56 +1165,23 @@ export async function accountRoutes(app: FastifyInstance) {
         cancel_url: cancellationUrl,
         network: parsed.data.network ?? 'MTN',
       };
-      let hostedCheckout;
-      try {
-        hostedCheckout = await createHostedPayment({
-          txRef: reference,
-          amount: parsed.data.amount,
-          currency: 'UGX',
-          redirectUrl: callbackUrl,
-          customer: {
-            email: String(user.email),
-            name: `${firstName} User`.trim(),
-            phoneNumber: user.phone?.toString() || undefined,
-          },
-          customizations: {
-            title: 'Prime Checkout',
-            description: 'Wallet deposit',
-          },
-          meta: checkoutMeta,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        request.log.error({ error, detail, reference }, `flutterwave_checkout_failed: ${detail}`);
-        reply.code(502);
-        return { error: 'flutterwave_checkout_failed', detail };
-      }
-      if (!hostedCheckout.checkoutUrl) {
-        reply.code(502);
-        return { error: 'flutterwave_missing_checkout_link' };
-      }
-
-      await client.query(
-        `UPDATE pesapal_transactions
-         SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
-         WHERE merchant_reference=$1`,
-        [
-          reference,
-          JSON.stringify({
-            ...checkoutMeta,
-            checkout_url: hostedCheckout.checkoutUrl,
-          }),
-        ]
-      );
-
       const checkoutPayload = {
-        provider: 'FLUTTERWAVE_V3',
-        checkout_url: hostedCheckout.checkoutUrl,
+        provider: 'FLUTTERWAVE_V4',
         tx_ref: reference,
         amount: parsed.data.amount,
         currency: 'UGX',
-        payment_options: 'card,mobilemoneyuganda',
+        payment_options: 'mobilemoneyuganda',
         redirect_url: callbackUrl,
+        supported_networks: ['MTN', 'AIRTEL'],
+        customer: {
+          email: String(user.email),
+          name: `${firstName} User`.trim(),
+          phone_number: user.phone?.toString() || undefined,
+        },
+        customizations: {
+          title: 'Prime Checkout',
+          description: 'Wallet deposit',
+        },
         meta: checkoutMeta,
       };
 

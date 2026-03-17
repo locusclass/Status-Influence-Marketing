@@ -33,7 +33,7 @@ function resolveUploadDir() {
     return './uploads';
 }
 const flutterwaveConfig = {
-    baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? 'https://api.flutterwave.com/v3'),
+    baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? ''),
     secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
     clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? ''),
     clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
@@ -113,7 +113,30 @@ export function isFatalStartupIssue(issue) {
         issue.includes('FIREBASE_STORAGE_BUCKET is missing'));
 }
 export function hasValidFlutterwaveKeys() {
-    return (config.flutterwave.secretKey.trim().length > 0 ||
-        (config.flutterwave.clientId.trim().length > 0 &&
-            config.flutterwave.clientSecret.trim().length > 0));
+    return hasFlutterwaveSecretKey() || hasFlutterwaveClientCredentials();
+}
+export function hasFlutterwaveSecretKey() {
+    return config.flutterwave.secretKey.trim().length > 0;
+}
+export function hasFlutterwaveClientCredentials() {
+    return (config.flutterwave.clientId.trim().length > 0 &&
+        config.flutterwave.clientSecret.trim().length > 0);
+}
+export function resolveFlutterwaveBaseUrl() {
+    const configured = config.flutterwave.baseUrl.trim().replace(/\/+$/, '');
+    const hasClientCreds = hasFlutterwaveClientCredentials();
+    if (configured) {
+        if (hasClientCreds) {
+            if (/ravesandboxapi\.flutterwave\.com/i.test(configured)) {
+                return 'https://developersandbox-api.flutterwave.com';
+            }
+            if (/api\.flutterwave\.com\/v3$/i.test(configured)) {
+                return 'https://f4bexperience.flutterwave.com';
+            }
+        }
+        return configured;
+    }
+    return hasClientCreds
+        ? 'https://developersandbox-api.flutterwave.com'
+        : 'https://api.flutterwave.com/v3';
 }
