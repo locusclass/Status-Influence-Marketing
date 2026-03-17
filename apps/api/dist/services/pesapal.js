@@ -5,6 +5,16 @@ let cachedAccessToken = null;
 function randomId() {
     return crypto.randomUUID();
 }
+function normalizeNamePart(value, fallback) {
+    const cleaned = (value ?? '')
+        .replace(/[^A-Za-z ,.'-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (cleaned.length >= 2 && cleaned.length <= 50) {
+        return cleaned;
+    }
+    return fallback;
+}
 function buildBaseUrl() {
     const configured = config.flutterwave.baseUrl.trim();
     if (configured) {
@@ -86,8 +96,8 @@ export async function getIpnList() {
 }
 export async function createCustomer(input) {
     const parts = input.name.trim().split(/\s+/).filter(Boolean);
-    const first = parts[0] ?? 'Customer';
-    const last = parts.slice(1).join(' ') || 'User';
+    const first = normalizeNamePart(parts[0], 'Customer');
+    const last = normalizeNamePart(parts.slice(1).join(' '), 'User');
     const normalizedPhone = (input.phoneNumber ?? '').replace(/[^\d]/g, '');
     return flutterwaveRequest('/customers', {
         method: 'POST',
