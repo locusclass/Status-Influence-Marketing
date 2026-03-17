@@ -36,7 +36,7 @@ const flutterwaveConfig = {
     baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? 'https://developersandbox-api.flutterwave.com'),
     secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
     publicKey: stripWrappingQuotes(process.env.FLUTTERWAVE_PUBLIC_KEY ?? ''),
-    clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
+    clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? ''),
     clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
     webhookSecretHash: stripWrappingQuotes(process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? ''),
 };
@@ -99,6 +99,15 @@ export function getStartupConfigIssues() {
         }
     }
     return issues;
+}
+export function isFatalStartupIssue(issue) {
+    return (issue.includes('DATABASE_URL is missing') ||
+        issue.includes('JWT_SECRET is missing') ||
+        issue.includes('JWT_SECRET is missing or using the development default') ||
+        issue.includes('FIREBASE_PROJECT_ID is missing') ||
+        issue.includes('FIREBASE_CLIENT_EMAIL is missing') ||
+        issue.includes('FIREBASE_PRIVATE_KEY is missing') ||
+        issue.includes('FIREBASE_STORAGE_BUCKET is missing'));
 }
 export function hasValidFlutterwaveKeys() {
     return (/^fw_/i.test(config.flutterwave.clientId) &&
