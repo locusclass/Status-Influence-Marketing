@@ -44,6 +44,8 @@ const flutterwaveConfig = {
     process.env.FLUTTERWAVE_BASE_URL ?? 'https://api.flutterwave.com/v3'
   ),
   secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
+  clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? ''),
+  clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
   publicKey: stripWrappingQuotes(process.env.FLUTTERWAVE_PUBLIC_KEY ?? ''),
   webhookSecretHash: stripWrappingQuotes(process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? ''),
 };
@@ -91,6 +93,12 @@ export function getStartupConfigIssues() {
   if (config.flutterwave.secretKey && !config.flutterwave.secretKey.trim()) {
     issues.push('FLUTTERWAVE_SECRET_KEY is empty');
   }
+  if (config.flutterwave.clientId && !config.flutterwave.clientId.trim()) {
+    issues.push('FLUTTERWAVE_CLIENT_ID is empty');
+  }
+  if (config.flutterwave.clientSecret && !config.flutterwave.clientSecret.trim()) {
+    issues.push('FLUTTERWAVE_CLIENT_SECRET is empty');
+  }
 
   if (
     config.firebase.projectId ||
@@ -128,6 +136,10 @@ export function isFatalStartupIssue(issue: string) {
 }
 
 export function hasValidFlutterwaveKeys() {
-  return config.flutterwave.secretKey.trim().length > 0;
+  return (
+    config.flutterwave.secretKey.trim().length > 0 ||
+    (config.flutterwave.clientId.trim().length > 0 &&
+      config.flutterwave.clientSecret.trim().length > 0)
+  );
 }
 

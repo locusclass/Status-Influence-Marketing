@@ -1,6 +1,7 @@
 import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config } from '../config.js';
+let cachedAccessToken = null;
 function randomId() {
     return crypto.randomUUID();
 }
@@ -28,15 +29,60 @@ function readCheckoutUrl(payload) {
     }
     return null;
 }
-async function flutterwaveRequest(path, init = {}) {
-    const secretKey = config.flutterwave.secretKey.trim();
-    if (!secretKey) {
-        throw new Error('Flutterwave secret key is not configured');
+async function getOAuthToken() {
+    if (!config.flutterwave.clientId.trim() || !config.flutterwave.clientSecret.trim()) {
+        throw new Error('Flutterwave client credentials are not configured');
     }
+    const now = Date.now();
+    if (cachedAccessToken && cachedAccessToken.expiresAt > now + 30_000) {
+        return cachedAccessToken.token;
+    }
+    const tokenEndpoint = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token';
+    const tokenRequestBody = new URLSearchParams({
+        client_id: config.flutterwave.clientId,
+        client_secret: config.flutterwave.clientSecret,
+        grant_type: 'client_credentials',
+    });
+    const res = await fetch(tokenEndpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+            'X-Trace-Id': randomId(),
+        },
+        body: tokenRequestBody.toString(),
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Flutterwave auth failed: ${res.status} ${text}`);
+    }
+    const body = (await res.json());
+    const tokenPayload = (body.data ?? body);
+    const token = String(tokenPayload.access_token ?? tokenPayload.token ?? '').trim();
+    if (!token) {
+        throw new Error('Flutterwave auth did not return an access token');
+    }
+    const expiresIn = Number(tokenPayload.expires_in ?? 3600);
+    cachedAccessToken = {
+        token,
+        expiresAt: now + Math.max(60, expiresIn) * 1000,
+    };
+    return token;
+}
+async function getAuth() {
+    const secretKey = config.flutterwave.secretKey.trim();
+    if (secretKey) {
+        return { type: 'secret', token: secretKey };
+    }
+    const oauthToken = await getOAuthToken();
+    return { type: 'oauth', token: oauthToken };
+}
+async function flutterwaveRequest(path, init = {}) {
+    const auth = await getAuth();
     const res = await fetch(`${buildBaseUrl()}${path}`, {
         method: init.method ?? 'GET',
         headers: {
-            Authorization: `Bearer ${secretKey}`,
+            Authorization: `Bearer ${auth.token}`,
             Accept: 'application/json',
             'Content-Type': 'application/json',
             'X-Trace-Id': randomId(),
