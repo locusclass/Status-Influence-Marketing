@@ -22,17 +22,22 @@ async function getAccessToken() {
     return cachedAccessToken.token;
   }
 
-  const res = await fetch(`${buildBaseUrl()}/auth/token`, {
+  const tokenEndpoint =
+    'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token';
+  const tokenRequestBody = new URLSearchParams({
+    client_id: config.flutterwave.clientId,
+    client_secret: config.flutterwave.clientSecret,
+    grant_type: 'client_credentials',
+  });
+
+  const res = await fetch(tokenEndpoint, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
       Accept: 'application/json',
       'X-Trace-Id': randomId(),
     },
-    body: JSON.stringify({
-      client_id: config.flutterwave.clientId,
-      client_secret: config.flutterwave.clientSecret,
-    }),
+    body: tokenRequestBody.toString(),
   });
 
   if (!res.ok) {
@@ -41,13 +46,13 @@ async function getAccessToken() {
   }
 
   const body = (await res.json()) as Record<string, any>;
-  const payload = (body.data ?? body) as Record<string, any>;
-  const token = String(payload.access_token ?? payload.token ?? '').trim();
+  const tokenPayload = (body.data ?? body) as Record<string, any>;
+  const token = String(tokenPayload.access_token ?? tokenPayload.token ?? '').trim();
   if (!token) {
     throw new Error('Flutterwave auth did not return an access token');
   }
 
-  const expiresIn = Number(payload.expires_in ?? 3600);
+  const expiresIn = Number(tokenPayload.expires_in ?? 3600);
   cachedAccessToken = {
     token,
     expiresAt: now + Math.max(60, expiresIn) * 1000,
@@ -107,35 +112,53 @@ export async function createCustomer(input: {
   name: string;
   phoneNumber?: string;
 }) {
+  const parts = input.name.trim().split(/\s+/).filter(Boolean);
+  const first = parts[0] ?? 'Customer';
+  const last = parts.slice(1).join(' ') || 'User';
+  const normalizedPhone = (input.phoneNumber ?? '').replace(/[^\d]/g, '');
+
   return flutterwaveRequest<Record<string, any>>('/customers', {
     method: 'POST',
     body: {
-      name: input.name,
       email: input.email,
-      phone_number: input.phoneNumber,
+      name: {
+        first,
+        last,
+      },
+      ...(normalizedPhone
+        ? {
+            phone: {
+              country_code: '256',
+              number: normalizedPhone.startsWith('256')
+                ? normalizedPhone.slice(3)
+                : normalizedPhone.replace(/^0+/, ''),
+            },
+          }
+        : {}),
     },
     idempotencyKey: `customer:${input.email.toLowerCase()}`,
   });
 }
 
 export async function createMobileMoneyPaymentMethod(input: {
-  customerId: string;
   phoneNumber: string;
   network: 'MTN' | 'AIRTEL';
-  country: 'UG';
+  countryCode: string;
 }) {
+  const normalizedPhone = input.phoneNumber.replace(/[^\d]/g, '');
   return flutterwaveRequest<Record<string, any>>('/payment-methods', {
     method: 'POST',
     body: {
       type: 'mobile_money',
-      customer_id: input.customerId,
       mobile_money: {
-        phone_number: input.phoneNumber,
+        phone_number: normalizedPhone.startsWith(input.countryCode)
+          ? normalizedPhone.slice(input.countryCode.length)
+          : normalizedPhone.replace(/^0+/, ''),
         network: input.network,
-        country: input.country,
+        country_code: input.countryCode,
       },
     },
-    idempotencyKey: `pm:${input.customerId}:${input.phoneNumber}:${input.network}`,
+    idempotencyKey: `pm:${normalizedPhone}:${input.network}:${input.countryCode}`,
   });
 }
 

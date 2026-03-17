@@ -398,10 +398,9 @@ export async function paymentRoutes(app) {
                     throw new Error('Flutterwave customer creation did not return an id');
                 }
                 const methodResponse = await createMobileMoneyPaymentMethod({
-                    customerId,
                     phoneNumber,
                     network,
-                    country: 'UG',
+                    countryCode: '256',
                 });
                 const paymentMethodId = readId(methodResponse);
                 if (!paymentMethodId) {
@@ -444,7 +443,11 @@ export async function paymentRoutes(app) {
             return result;
         }
         catch (error) {
-            app.log.error({ error, body: request.body }, 'flutterwave_initiate_failed');
+            app.log.error({
+                error,
+                message: error instanceof Error ? error.message : String(error),
+                body: request.body,
+            }, 'flutterwave_initiate_failed');
             reply.code(502);
             return { error: 'flutterwave_initiate_failed' };
         }
@@ -470,7 +473,11 @@ export async function paymentRoutes(app) {
             };
         }
         catch (error) {
-            app.log.error({ error, body: request.body }, 'flutterwave_verify_failed');
+            app.log.error({
+                error,
+                message: error instanceof Error ? error.message : String(error),
+                body: request.body,
+            }, 'flutterwave_verify_failed');
             reply.code(502);
             return { error: 'flutterwave_verify_failed' };
         }
