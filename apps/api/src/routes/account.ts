@@ -1185,7 +1185,7 @@ export async function accountRoutes(app: FastifyInstance) {
         });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        request.log.error({ error, reference }, 'flutterwave_checkout_failed');
+        request.log.error({ error, detail, reference }, 'flutterwave_checkout_failed');
         reply.code(502);
         return { error: 'flutterwave_checkout_failed', detail };
       }

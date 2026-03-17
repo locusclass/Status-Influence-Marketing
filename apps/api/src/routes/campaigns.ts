@@ -1594,7 +1594,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         request.log.error(
-          { error, campaign: campaign.id, tx_ref: merchantReference },
+          { error, detail, campaign: campaign.id, tx_ref: merchantReference },
           'flutterwave_checkout_failed'
         );
         reply.code(502);
