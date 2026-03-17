@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
-import { createCharge, createCustomer, createMobileMoneyPaymentMethod, getTransactionStatus, verifyWebhookSignature, } from '../services/flutterwave.js';
+import { createCharge, createCustomer, createMobileMoneyPaymentMethod, verifyTransaction, verifyWebhookSignature, } from '../services/flutterwave.js';
 import { config } from '../config.js';
 async function ensureWalletWithdrawalsTable(client) {
     await client.query(`
@@ -173,7 +173,7 @@ export async function paymentRoutes(app) {
     };
     const normalizeTransactionStatus = (payload) => String(payload.status ?? payload.payment_status ?? '').trim().toUpperCase();
     const settleCharge = async (transactionId, reference, rawPayload) => {
-        const verifiedResponse = (await getTransactionStatus(String(transactionId), String(reference)));
+        const verifiedResponse = (await verifyTransaction(String(transactionId)));
         const verified = (verifiedResponse.data ?? verifiedResponse);
         const result = await withTransaction(async (client) => applyVerifiedCharge(client, {
             transactionId,

@@ -124,8 +124,20 @@ export function hasFlutterwaveClientCredentials() {
 }
 export function resolveFlutterwaveBaseUrl() {
     const configured = config.flutterwave.baseUrl.trim().replace(/\/+$/, '');
+    const hasSecret = hasFlutterwaveSecretKey();
     const hasClientCreds = hasFlutterwaveClientCredentials();
     if (configured) {
+        if (hasSecret) {
+            if (/developersandbox-api\.flutterwave\.com/i.test(configured)) {
+                return 'https://ravesandboxapi.flutterwave.com/v3';
+            }
+            if (/^https:\/\/ravesandboxapi\.flutterwave\.com$/i.test(configured)) {
+                return 'https://ravesandboxapi.flutterwave.com/v3';
+            }
+            if (/^https:\/\/api\.flutterwave\.com$/i.test(configured)) {
+                return 'https://api.flutterwave.com/v3';
+            }
+        }
         if (hasClientCreds) {
             if (/ravesandboxapi\.flutterwave\.com/i.test(configured)) {
                 return 'https://developersandbox-api.flutterwave.com';

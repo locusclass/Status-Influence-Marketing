@@ -18,6 +18,23 @@ function normalizeNamePart(value, fallback) {
 function buildBaseUrl() {
     return resolveFlutterwaveBaseUrl();
 }
+function readCheckoutUrl(payload) {
+    const candidates = [
+        payload?.data?.link,
+        payload?.data?.checkout_url,
+        payload?.data?.checkoutLink,
+        payload?.link,
+        payload?.checkout_url,
+        payload?.checkoutLink,
+    ];
+    for (const candidate of candidates) {
+        const value = String(candidate ?? '').trim();
+        if (value) {
+            return value;
+        }
+    }
+    return null;
+}
 async function getAccessToken() {
     if (!hasFlutterwaveClientCredentials()) {
         throw new Error('Flutterwave client credentials are not configured');
@@ -59,12 +76,12 @@ async function getAccessToken() {
     return token;
 }
 async function getRequestToken() {
-    if (hasFlutterwaveClientCredentials()) {
-        return getAccessToken();
-    }
     const secretKey = config.flutterwave.secretKey.trim();
     if (secretKey) {
         return secretKey;
+    }
+    if (hasFlutterwaveClientCredentials()) {
+        return getAccessToken();
     }
     throw new Error('Flutterwave credentials are not configured');
 }
@@ -99,6 +116,32 @@ export async function getIpnList() {
         ok: true,
         provider: 'FLUTTERWAVE_V4',
         note: 'Flutterwave webhook endpoints are managed from the dashboard.',
+    };
+}
+export async function createHostedPayment(input) {
+    const response = await flutterwaveRequest('/payments', {
+        method: 'POST',
+        body: {
+            tx_ref: input.txRef,
+            amount: input.amount,
+            currency: input.currency,
+            redirect_url: input.redirectUrl,
+            payment_options: input.paymentOptions ?? 'card,mobilemoneyuganda',
+            customer: {
+                email: input.customer.email,
+                name: input.customer.name,
+                ...(input.customer.phoneNumber
+                    ? { phone_number: input.customer.phoneNumber }
+                    : {}),
+            },
+            ...(input.customizations ? { customizations: input.customizations } : {}),
+            ...(input.meta ? { meta: input.meta } : {}),
+        },
+        idempotencyKey: `hosted_payment:${input.txRef}`,
+    });
+    return {
+        checkoutUrl: readCheckoutUrl(response),
+        response,
     };
 }
 export async function createCustomer(input) {
@@ -163,7 +206,7 @@ export async function getTransactionStatus(transactionId, _merchantReference) {
     return flutterwaveRequest(`/charges/${encodeURIComponent(transactionId)}`);
 }
 export async function verifyTransaction(transactionId) {
-    return getTransactionStatus(String(transactionId));
+    return flutterwaveRequest(`/transactions/${encodeURIComponent(String(transactionId))}/verify`);
 }
 export async function requestPayout(input) {
     const secretKey = config.flutterwave.secretKey.trim();

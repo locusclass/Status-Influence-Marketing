@@ -29,6 +29,26 @@ function buildBaseUrl() {
   return resolveFlutterwaveBaseUrl();
 }
 
+function readCheckoutUrl(payload: Record<string, any>) {
+  const candidates = [
+    payload?.data?.link,
+    payload?.data?.checkout_url,
+    payload?.data?.checkoutLink,
+    payload?.link,
+    payload?.checkout_url,
+    payload?.checkoutLink,
+  ];
+
+  for (const candidate of candidates) {
+    const value = String(candidate ?? '').trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 async function getAccessToken() {
   if (!hasFlutterwaveClientCredentials()) {
     throw new Error('Flutterwave client credentials are not configured');
@@ -78,13 +98,13 @@ async function getAccessToken() {
 }
 
 async function getRequestToken() {
-  if (hasFlutterwaveClientCredentials()) {
-    return getAccessToken();
-  }
-
   const secretKey = config.flutterwave.secretKey.trim();
   if (secretKey) {
     return secretKey;
+  }
+
+  if (hasFlutterwaveClientCredentials()) {
+    return getAccessToken();
   }
 
   throw new Error('Flutterwave credentials are not configured');
@@ -132,6 +152,51 @@ export async function getIpnList(): Promise<any> {
     ok: true,
     provider: 'FLUTTERWAVE_V4',
     note: 'Flutterwave webhook endpoints are managed from the dashboard.',
+  };
+}
+
+export async function createHostedPayment(input: {
+  txRef: string;
+  amount: number;
+  currency: string;
+  redirectUrl: string;
+  paymentOptions?: string;
+  customer: {
+    email: string;
+    name: string;
+    phoneNumber?: string;
+  };
+  customizations?: {
+    title?: string;
+    description?: string;
+    logo?: string;
+  };
+  meta?: Record<string, any>;
+}) {
+  const response = await flutterwaveRequest<Record<string, any>>('/payments', {
+    method: 'POST',
+    body: {
+      tx_ref: input.txRef,
+      amount: input.amount,
+      currency: input.currency,
+      redirect_url: input.redirectUrl,
+      payment_options: input.paymentOptions ?? 'card,mobilemoneyuganda',
+      customer: {
+        email: input.customer.email,
+        name: input.customer.name,
+        ...(input.customer.phoneNumber
+          ? { phone_number: input.customer.phoneNumber }
+          : {}),
+      },
+      ...(input.customizations ? { customizations: input.customizations } : {}),
+      ...(input.meta ? { meta: input.meta } : {}),
+    },
+    idempotencyKey: `hosted_payment:${input.txRef}`,
+  });
+
+  return {
+    checkoutUrl: readCheckoutUrl(response),
+    response,
   };
 }
 
@@ -219,7 +284,9 @@ export async function getTransactionStatus(transactionId: string, _merchantRefer
 }
 
 export async function verifyTransaction(transactionId: string | number) {
-  return getTransactionStatus(String(transactionId));
+  return flutterwaveRequest<Record<string, any>>(
+    `/transactions/${encodeURIComponent(String(transactionId))}/verify`
+  );
 }
 
 export async function requestPayout(input: {

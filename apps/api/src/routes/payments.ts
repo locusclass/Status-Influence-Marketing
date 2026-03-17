@@ -7,6 +7,7 @@ import {
   createCustomer,
   createMobileMoneyPaymentMethod,
   getTransactionStatus,
+  verifyTransaction,
   verifyWebhookSignature,
 } from '../services/flutterwave.js';
 import { config } from '../config.js';
@@ -215,9 +216,8 @@ export async function paymentRoutes(app: FastifyInstance) {
     reference: string,
     rawPayload?: any
   ) => {
-    const verifiedResponse = (await getTransactionStatus(
-      String(transactionId),
-      String(reference)
+    const verifiedResponse = (await verifyTransaction(
+      String(transactionId)
     )) as Record<string, any>;
     const verified = (verifiedResponse.data ?? verifiedResponse) as Record<string, any>;
     const result = await withTransaction(async (client) =>

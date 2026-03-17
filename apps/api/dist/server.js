@@ -181,7 +181,7 @@ export function buildServer() {
         app.log.info({
             provider: 'FLUTTERWAVE',
             base_url: resolveFlutterwaveBaseUrl(),
-            auth_mode: hasClientCreds ? 'client_credentials' : hasSecret ? 'secret_key' : 'none',
+            auth_mode: hasSecret ? 'secret_key' : hasClientCreds ? 'client_credentials' : 'none',
             has_secret: hasSecret,
             has_client_creds: hasClientCreds,
         }, 'flutterwave_config');
