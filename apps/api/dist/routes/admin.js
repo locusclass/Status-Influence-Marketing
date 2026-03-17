@@ -3,7 +3,7 @@ import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
-import { getTransactionStatus } from '../services/pesapal.js';
+import { verifyTransaction } from '../services/flutterwave.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, normalizeActiveRole, } from '../services/roles.js';
@@ -1164,7 +1164,8 @@ export async function adminRoutes(app) {
                 return { ok: true, type: 'PAYOUT' };
             }
             if (trackingId && reference) {
-                const statusInfo = (await getTransactionStatus(String(trackingId), String(reference)));
+                const statusResponse = (await verifyTransaction(String(trackingId)));
+                const statusInfo = (statusResponse.data ?? statusResponse);
                 const txnRows = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1', [reference]);
                 const txn = txnRows.rows[0];
                 if (!txn) {
@@ -1179,7 +1180,7 @@ export async function adminRoutes(app) {
                     reply.code(400);
                     return { error: 'amount_mismatch' };
                 }
-                const statusText = (statusInfo.payment_status_description ?? statusInfo.status ?? '')
+                const statusText = ((statusInfo.status ?? statusInfo.payment_status_description) ?? '')
                     .toString()
                     .toUpperCase();
                 if (statusText.includes('COMPLETED') || statusText.includes('SUCCESS')) {

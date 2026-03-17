@@ -3,8 +3,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { requestPayout } from '../services/pesapal.js';
-import { buildCheckoutPayloadHash } from '../services/pesapal.js';
+import { createHostedPayment, requestPayout } from '../services/flutterwave.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
@@ -1107,6 +1106,10 @@ export async function accountRoutes(app: FastifyInstance) {
     const webCancelUrl = resolveWebRedirectUrl(parsed.data.cancel_url, browserOrigin, '/payment/cancel');
     const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
     const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
+    if (!webReturnUrl || !webCancelUrl || !callbackUrl || !cancellationUrl) {
+      reply.code(400);
+      return { error: 'payment_redirect_urls_invalid' };
+    }
 
     if (!hasValidFlutterwaveKeys()) {
       reply.code(503);
@@ -1154,37 +1157,57 @@ export async function accountRoutes(app: FastifyInstance) {
       );
 
       const firstName = String(user.email).split('@')[0] || 'User';
-      const checkoutPayload = {
-        provider: 'FLUTTERWAVE',
-        public_key: config.flutterwave.publicKey,
-        tx_ref: reference,
+      const checkoutMeta = {
+        merchant_reference: reference,
+        kind: 'WALLET_DEPOSIT',
+        wallet_id: wallet.id,
+        return_url: callbackUrl,
+        cancel_url: cancellationUrl,
+        network: parsed.data.network ?? 'MTN',
+      };
+      const hostedCheckout = await createHostedPayment({
+        txRef: reference,
         amount: parsed.data.amount,
         currency: 'UGX',
-        payment_options: 'card,mobilemoneyuganda',
-        redirect_url: callbackUrl,
-        payload_hash: buildCheckoutPayloadHash({
-          amount: parsed.data.amount,
-          currency: 'UGX',
-          customerEmail: String(user.email),
-          txRef: reference,
-        }),
+        redirectUrl: callbackUrl,
         customer: {
           email: String(user.email),
           name: `${firstName} User`.trim(),
-          phone_number: user.phone?.toString() || undefined,
+          phoneNumber: user.phone?.toString() || undefined,
         },
         customizations: {
           title: 'Prime Checkout',
           description: 'Wallet deposit',
         },
-        meta: {
-          merchant_reference: reference,
-          kind: 'WALLET_DEPOSIT',
-          wallet_id: wallet.id,
-          return_url: callbackUrl,
-          cancel_url: cancellationUrl,
-          network: parsed.data.network ?? 'MTN',
-        },
+        meta: checkoutMeta,
+      });
+      if (!hostedCheckout.checkoutUrl) {
+        reply.code(502);
+        return { error: 'flutterwave_missing_checkout_link' };
+      }
+
+      await client.query(
+        `UPDATE pesapal_transactions
+         SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
+         WHERE merchant_reference=$1`,
+        [
+          reference,
+          JSON.stringify({
+            ...checkoutMeta,
+            checkout_url: hostedCheckout.checkoutUrl,
+          }),
+        ]
+      );
+
+      const checkoutPayload = {
+        provider: 'FLUTTERWAVE_V3',
+        checkout_url: hostedCheckout.checkoutUrl,
+        tx_ref: reference,
+        amount: parsed.data.amount,
+        currency: 'UGX',
+        payment_options: 'card,mobilemoneyuganda',
+        redirect_url: callbackUrl,
+        meta: checkoutMeta,
       };
 
       return { checkout_payload: checkoutPayload, txn: txn.rows[0] };

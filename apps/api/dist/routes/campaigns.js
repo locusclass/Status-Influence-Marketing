@@ -5,7 +5,7 @@ import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import { config, hasValidFlutterwaveKeys } from '../config.js';
-import { buildCheckoutPayloadHash } from '../services/pesapal.js';
+import { createHostedPayment } from '../services/flutterwave.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
 const PRIVATE_RATE_UGX = 25;
@@ -1142,6 +1142,10 @@ export async function campaignRoutes(app) {
         const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
         const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
         const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
+        if (!webReturnUrl || !webCancelUrl || !callbackUrl || !cancellationUrl) {
+            reply.code(400);
+            return { error: 'payment_redirect_urls_invalid' };
+        }
         const result = await withTransaction(async (client) => {
             const authUser = request.user?.sub;
             const role = request.user?.role;
@@ -1225,37 +1229,52 @@ export async function campaignRoutes(app) {
                     network: body.network ?? 'MTN',
                 },
             });
-            const checkoutPayload = {
-                provider: 'FLUTTERWAVE',
-                public_key: config.flutterwave.publicKey,
-                tx_ref: merchantReference,
+            const checkoutMeta = {
+                merchant_reference: merchantReference,
+                kind: 'CAMPAIGN_FUNDING',
+                campaign_id: campaign.id,
+                return_url: callbackUrl,
+                cancel_url: cancellationUrl,
+                network: body.network ?? 'MTN',
+            };
+            const hostedCheckout = await createHostedPayment({
+                txRef: merchantReference,
                 amount: body.amount,
                 currency: paymentCurrency,
-                payment_options: 'card,mobilemoneyuganda',
-                redirect_url: callbackUrl,
-                payload_hash: buildCheckoutPayloadHash({
-                    amount: body.amount,
-                    currency: paymentCurrency,
-                    customerEmail: userEmail,
-                    txRef: merchantReference,
-                }),
+                redirectUrl: callbackUrl,
                 customer: {
                     email: userEmail,
                     name: `${firstName} User`.trim(),
-                    phone_number: userPhone ?? undefined,
+                    phoneNumber: userPhone ?? undefined,
                 },
                 customizations: {
                     title: 'Prime Checkout',
                     description: `Campaign funding: ${campaign.title}`,
                 },
-                meta: {
-                    merchant_reference: merchantReference,
-                    kind: 'CAMPAIGN_FUNDING',
-                    campaign_id: campaign.id,
-                    return_url: callbackUrl,
-                    cancel_url: cancellationUrl,
-                    network: body.network ?? 'MTN',
-                },
+                meta: checkoutMeta,
+            });
+            if (!hostedCheckout.checkoutUrl) {
+                reply.code(502);
+                return { error: 'flutterwave_missing_checkout_link' };
+            }
+            await client.query(`UPDATE pesapal_transactions
+         SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
+         WHERE merchant_reference=$1`, [
+                merchantReference,
+                JSON.stringify({
+                    ...checkoutMeta,
+                    checkout_url: hostedCheckout.checkoutUrl,
+                }),
+            ]);
+            const checkoutPayload = {
+                provider: 'FLUTTERWAVE_V3',
+                checkout_url: hostedCheckout.checkoutUrl,
+                tx_ref: merchantReference,
+                amount: body.amount,
+                currency: paymentCurrency,
+                payment_options: 'card,mobilemoneyuganda',
+                redirect_url: callbackUrl,
+                meta: checkoutMeta,
             };
             return { fund_source: fundSource, checkout_payload: checkoutPayload, pesapalTxn };
         });

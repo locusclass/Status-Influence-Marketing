@@ -217,15 +217,7 @@ export function buildServer() {
   // Final payment-provider configuration
   app.addHook('onReady', async () => {
     if (!config.flutterwave.secretKey) {
-      app.log.warn('FLUTTERWAVE_SECRET_KEY is not set. Hosted checkout hashing and transfers will fail.');
-    }
-
-    if (!config.flutterwave.publicKey) {
-      app.log.warn('FLUTTERWAVE_PUBLIC_KEY is not set. Hosted checkout will fail.');
-    }
-
-    if (!config.flutterwave.clientId) {
-      app.log.warn('FLUTTERWAVE_CLIENT_ID is not set. Payments will fail.');
+      app.log.warn('FLUTTERWAVE_SECRET_KEY is not set. Checkout creation, verification, and transfers will fail.');
     } else {
       app.log.info(
         { provider: 'FLUTTERWAVE' },
@@ -233,10 +225,8 @@ export function buildServer() {
       );
     }
 
-    if (!config.flutterwave.clientSecret) {
-      app.log.warn('FLUTTERWAVE_CLIENT_SECRET is not set. Payments will fail.');
-    } else if (!hasValidFlutterwaveKeys()) {
-      app.log.warn('Flutterwave hosted checkout credentials are incomplete. Payments will fail.');
+    if (!hasValidFlutterwaveKeys()) {
+      app.log.warn('Flutterwave credentials are incomplete. Payments will fail.');
     }
 
     if (!config.flutterwave.webhookSecretHash) {

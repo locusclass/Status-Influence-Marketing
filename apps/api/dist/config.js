@@ -33,11 +33,9 @@ function resolveUploadDir() {
     return './uploads';
 }
 const flutterwaveConfig = {
-    baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? 'https://developersandbox-api.flutterwave.com'),
+    baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? 'https://api.flutterwave.com/v3'),
     secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
     publicKey: stripWrappingQuotes(process.env.FLUTTERWAVE_PUBLIC_KEY ?? ''),
-    clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? ''),
-    clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
     webhookSecretHash: stripWrappingQuotes(process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? ''),
 };
 export const config = {
@@ -75,17 +73,8 @@ export function getStartupConfigIssues() {
     if (!config.jwtSecret.trim() || config.jwtSecret === 'dev-secret') {
         issues.push('JWT_SECRET is missing or using the development default');
     }
-    if (config.flutterwave.clientId && !config.flutterwave.clientId.trim()) {
-        issues.push('FLUTTERWAVE_CLIENT_ID is empty');
-    }
-    if (config.flutterwave.clientSecret && !config.flutterwave.clientSecret.trim()) {
-        issues.push('FLUTTERWAVE_CLIENT_SECRET is empty');
-    }
     if (config.flutterwave.secretKey && !config.flutterwave.secretKey.trim()) {
         issues.push('FLUTTERWAVE_SECRET_KEY is empty');
-    }
-    if (config.flutterwave.publicKey && !config.flutterwave.publicKey.trim()) {
-        issues.push('FLUTTERWAVE_PUBLIC_KEY is empty');
     }
     if (config.firebase.projectId ||
         config.firebase.clientEmail ||
@@ -116,8 +105,5 @@ export function isFatalStartupIssue(issue) {
         issue.includes('FIREBASE_STORAGE_BUCKET is missing'));
 }
 export function hasValidFlutterwaveKeys() {
-    return (config.flutterwave.secretKey.trim().length > 0 &&
-        config.flutterwave.publicKey.trim().length > 0 &&
-        config.flutterwave.clientId.trim().length > 0 &&
-        config.flutterwave.clientSecret.trim().length > 0);
+    return config.flutterwave.secretKey.trim().length > 0;
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
-import { createCharge, createCustomer, createMobileMoneyPaymentMethod, getTransactionStatus, verifyWebhookSignature, } from '../services/pesapal.js';
+import { verifyTransaction, verifyWebhookSignature, } from '../services/flutterwave.js';
 import { config } from '../config.js';
 async function ensureWalletWithdrawalsTable(client) {
     await client.query(`
@@ -87,64 +87,8 @@ export async function paymentRoutes(app) {
         transaction_id: z.union([z.string().trim().min(1), z.number().int().positive()]),
         tx_ref: z.string().trim().min(1),
     });
-    const initiateSchema = z.object({
-        tx_ref: z.string().trim().min(1),
-        network: z.enum(['MTN', 'AIRTEL']).default('MTN'),
-    });
     const statusSuccess = new Set(['SUCCESSFUL', 'SUCCEEDED', 'COMPLETED']);
     const statusFailure = new Set(['FAILED', 'FAILURE', 'CANCELLED', 'CANCELED']);
-    const readId = (payload) => {
-        const candidates = [
-            payload?.id,
-            payload?.data?.id,
-            payload?.charge_id,
-            payload?.data?.charge_id,
-        ];
-        for (const candidate of candidates) {
-            const value = String(candidate ?? '').trim();
-            if (value)
-                return value;
-        }
-        return '';
-    };
-    const readRedirectUrl = (payload) => {
-        const candidates = [
-            payload?.next_action?.redirect_url,
-            payload?.data?.next_action?.redirect_url,
-            payload?.authorization_url,
-            payload?.data?.authorization_url,
-            payload?.checkout_url,
-            payload?.data?.checkout_url,
-            payload?.payment_link,
-            payload?.data?.payment_link,
-            payload?.hosted_url,
-            payload?.data?.hosted_url,
-            payload?.redirect_url,
-            payload?.data?.redirect_url,
-        ];
-        for (const candidate of candidates) {
-            const value = String(candidate ?? '').trim();
-            if (value)
-                return value;
-        }
-        return null;
-    };
-    const readProviderMessage = (payload) => {
-        const candidates = [
-            payload?.next_action?.message,
-            payload?.data?.next_action?.message,
-            payload?.processor_response,
-            payload?.data?.processor_response,
-            payload?.message,
-            payload?.data?.message,
-        ];
-        for (const candidate of candidates) {
-            const value = String(candidate ?? '').trim();
-            if (value)
-                return value;
-        }
-        return null;
-    };
     const compactProviderSnapshot = (payload) => {
         const source = (payload?.data ?? payload);
         if (!source || typeof source !== 'object') {
@@ -157,13 +101,13 @@ export async function paymentRoutes(app) {
             amount: source.amount ?? null,
             currency: source.currency ?? null,
             processor_response: source.processor_response ?? null,
-            next_action_type: source.next_action?.type ?? null,
-            next_action_message: source.next_action?.message ?? null,
-            redirect_url: readRedirectUrl(source),
+            flw_ref: source.flw_ref ?? null,
+            transaction_id: source.id ?? null,
         };
     };
+    const normalizeTransactionStatus = (payload) => String(payload.status ?? payload.payment_status ?? '').trim().toUpperCase();
     const settleCharge = async (transactionId, reference, rawPayload) => {
-        const verifiedResponse = (await getTransactionStatus(String(transactionId), String(reference)));
+        const verifiedResponse = (await verifyTransaction(String(transactionId)));
         const verified = (verifiedResponse.data ?? verifiedResponse);
         const result = await withTransaction(async (client) => applyVerifiedCharge(client, {
             transactionId,
@@ -177,7 +121,7 @@ export async function paymentRoutes(app) {
         if (!txn) {
             return { ok: false, error: 'txn_not_found' };
         }
-        const statusText = String(verified.status ?? verified.payment_status ?? '').toUpperCase();
+        const statusText = normalizeTransactionStatus(verified);
         const amount = Number(verified.amount ?? 0);
         const currency = String(verified.currency ?? txn.currency ?? 'UGX').toUpperCase();
         if (amount !== Number(txn.amount ?? 0) || currency !== 'UGX') {
@@ -355,144 +299,6 @@ export async function paymentRoutes(app) {
     };
     app.get('/payments/flutterwave/webhook', webhookInfo);
     app.post('/payments/flutterwave/webhook', handleWebhook);
-    app.post('/payments/flutterwave/initiate', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const parsed = initiateSchema.safeParse(request.body);
-        if (!parsed.success) {
-            reply.code(400);
-            return { error: 'validation_failed', issues: parsed.error.issues };
-        }
-        try {
-            const authUser = request.user?.sub;
-            if (!authUser) {
-                reply.code(401);
-                return { error: 'unauthorized' };
-            }
-            const result = await withTransaction(async (client) => {
-                const txnRes = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1', [parsed.data.tx_ref]);
-                const txn = txnRes.rows[0];
-                if (!txn) {
-                    return { error: 'txn_not_found' };
-                }
-                const rawPayload = (txn.raw_payload ?? {});
-                const metaNetwork = String(rawPayload.network ?? parsed.data.network).toUpperCase();
-                const network = (metaNetwork === 'AIRTEL' ? 'AIRTEL' : 'MTN');
-                const txKind = String(rawPayload.kind ?? '').toUpperCase();
-                let email = '';
-                let phoneNumber = '';
-                let customerName = '';
-                if (txKind === 'WALLET_DEPOSIT') {
-                    if (String(rawPayload.user_id ?? '') !== authUser) {
-                        return { error: 'forbidden' };
-                    }
-                    const userRes = await client.query('SELECT email, phone FROM users WHERE id=$1 LIMIT 1', [authUser]);
-                    const user = userRes.rows[0];
-                    email = String(user?.email ?? '').trim();
-                    phoneNumber = String(user?.phone ?? '').trim();
-                    customerName = email.split('@')[0] || 'User';
-                }
-                else {
-                    const escrowRes = await client.query(`SELECT e.id, c.id AS campaign_id, c.advertiser_id, c.title
-             FROM escrow_ledger e
-             JOIN campaigns c ON c.id = e.campaign_id
-             WHERE e.id=$1
-             LIMIT 1`, [txn.escrow_id]);
-                    const escrow = escrowRes.rows[0];
-                    if (!escrow || escrow.advertiser_id !== authUser) {
-                        return { error: 'forbidden' };
-                    }
-                    const userRes = await client.query('SELECT email, phone FROM users WHERE id=$1 LIMIT 1', [authUser]);
-                    const user = userRes.rows[0];
-                    email = String(user?.email ?? '').trim();
-                    phoneNumber = String(user?.phone ?? '').trim();
-                    customerName = email.split('@')[0] || 'User';
-                }
-                if (!email) {
-                    return { error: 'user_email_missing' };
-                }
-                if (!phoneNumber) {
-                    return { error: 'missing_payout_phone' };
-                }
-                const callbackUrl = typeof rawPayload.return_url === 'string' && rawPayload.return_url.trim()
-                    ? rawPayload.return_url.trim()
-                    : null;
-                const customerResponse = await createCustomer({
-                    email,
-                    name: customerName,
-                    phoneNumber,
-                });
-                const customerId = readId(customerResponse);
-                if (!customerId) {
-                    throw new Error('Flutterwave customer creation did not return an id');
-                }
-                const methodResponse = await createMobileMoneyPaymentMethod({
-                    phoneNumber,
-                    network,
-                    countryCode: '256',
-                });
-                const paymentMethodId = readId(methodResponse);
-                if (!paymentMethodId) {
-                    throw new Error('Flutterwave payment method creation did not return an id');
-                }
-                const chargeResponse = await createCharge({
-                    amount: Number(txn.amount ?? 0),
-                    currency: 'UGX',
-                    customerId,
-                    paymentMethodId,
-                    txRef: parsed.data.tx_ref,
-                    redirectUrl: callbackUrl,
-                });
-                const charge = (chargeResponse.data ?? chargeResponse);
-                const chargeId = readId(chargeResponse);
-                await paymentRepo.updatePesaPalTxnStatus(client, parsed.data.tx_ref, 'PENDING', chargeId || undefined);
-                await client.query(`UPDATE pesapal_transactions
-           SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
-           WHERE merchant_reference=$1`, [
-                    parsed.data.tx_ref,
-                    JSON.stringify({
-                        network,
-                        flutterwave_charge_id: chargeId || null,
-                        flutterwave_customer_id: customerId,
-                        flutterwave_payment_method_id: paymentMethodId,
-                    }),
-                ]);
-                return {
-                    ok: true,
-                    charge_id: chargeId,
-                    redirect_url: readRedirectUrl(charge),
-                    provider_status: String(charge.status ?? charge.payment_status ?? '').toUpperCase(),
-                    instruction: readProviderMessage(charge),
-                };
-            });
-            if ('error' in result) {
-                reply.code(result.error === 'forbidden' ? 403 : 400);
-                app.log.warn({
-                    tx_ref: parsed.data.tx_ref,
-                    network: parsed.data.network,
-                    outcome: result,
-                }, 'flutterwave_initiate_rejected');
-                return result;
-            }
-            app.log.info({
-                tx_ref: parsed.data.tx_ref,
-                network: parsed.data.network,
-                charge_id: result.charge_id,
-                redirect_url: result.redirect_url,
-                provider_status: result.provider_status,
-                instruction: result.instruction,
-            }, 'flutterwave_initiate_result');
-            return result;
-        }
-        catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            app.log.error({
-                error,
-                detail,
-                body: request.body,
-            }, `flutterwave_initiate_failed: ${detail}`);
-            reply.code(502);
-            return { error: 'flutterwave_initiate_failed', detail };
-        }
-    });
     app.post('/payments/flutterwave/verify', { preHandler: [app.authenticate] }, async (request, reply) => {
         const parsed = verifySchema.safeParse(request.body);
         if (!parsed.success) {
@@ -501,7 +307,7 @@ export async function paymentRoutes(app) {
         }
         try {
             const { result, verified } = await settleCharge(parsed.data.transaction_id, parsed.data.tx_ref);
-            const verifiedStatus = String(verified.status ?? verified.payment_status ?? '').toUpperCase();
+            const verifiedStatus = normalizeTransactionStatus(verified);
             app.log.info({
                 tx_ref: parsed.data.tx_ref,
                 transaction_id: parsed.data.transaction_id,
@@ -554,7 +360,7 @@ export async function paymentRoutes(app) {
         if (transactionId && txRef) {
             try {
                 const { result, verified } = await settleCharge(transactionId, txRef);
-                const verifiedStatus = String(verified.status ?? verified.payment_status ?? '').toUpperCase();
+                const verifiedStatus = normalizeTransactionStatus(verified);
                 app.log.info({
                     tx_ref: txRef,
                     transaction_id: transactionId,

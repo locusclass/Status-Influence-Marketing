@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { verifyWebhookSignature } from '../src/services/pesapal.js';
+import { verifyWebhookSignature } from '../src/services/flutterwave.js';
 
-describe('PesaPal webhook validation', () => {
+describe('Flutterwave payment configuration', () => {
   it('validates signature', () => {
     const body = JSON.stringify({ hello: 'world' });
     const secret = 'test-secret';
@@ -19,6 +19,6 @@ describe('PesaPal webhook validation', () => {
       'utf8'
     );
     expect(routeSource).toContain("const paymentCurrency = 'UGX'");
-    expect(routeSource).toContain('currency: paymentCurrency');
+    expect(routeSource).toContain('currency: paymentCurrency,');
   });
 });

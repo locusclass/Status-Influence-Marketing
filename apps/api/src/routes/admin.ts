@@ -5,7 +5,7 @@ import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
-import { getTransactionStatus } from '../services/pesapal.js';
+import { verifyTransaction } from '../services/flutterwave.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import {
   ensurePublicIdColumns,
@@ -1470,7 +1470,8 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       if (trackingId && reference) {
-        const statusInfo = (await getTransactionStatus(String(trackingId), String(reference))) as Record<string, unknown>;
+        const statusResponse = (await verifyTransaction(String(trackingId))) as Record<string, unknown>;
+        const statusInfo = ((statusResponse as any).data ?? statusResponse) as Record<string, unknown>;
         const txnRows = await client.query(
           'SELECT * FROM pesapal_transactions WHERE merchant_reference=$1',
           [reference]
@@ -1490,7 +1491,7 @@ export async function adminRoutes(app: FastifyInstance) {
           return { error: 'amount_mismatch' };
         }
 
-        const statusText = ((statusInfo as any).payment_status_description ?? (statusInfo as any).status ?? '')
+        const statusText = (((statusInfo as any).status ?? (statusInfo as any).payment_status_description) ?? '')
           .toString()
           .toUpperCase();
         if (statusText.includes('COMPLETED') || statusText.includes('SUCCESS')) {
