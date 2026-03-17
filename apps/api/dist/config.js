@@ -33,10 +33,12 @@ function resolveUploadDir() {
     return './uploads';
 }
 const flutterwaveConfig = {
-    baseUrl: process.env.FLUTTERWAVE_BASE_URL ?? 'https://api.flutterwave.com/v3',
-    secretKey: process.env.FLUTTERWAVE_SECRET_KEY ?? '',
-    publicKey: process.env.FLUTTERWAVE_PUBLIC_KEY ?? '',
-    webhookSecretHash: process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? '',
+    baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? 'https://developersandbox-api.flutterwave.com'),
+    secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
+    publicKey: stripWrappingQuotes(process.env.FLUTTERWAVE_PUBLIC_KEY ?? ''),
+    clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
+    clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
+    webhookSecretHash: stripWrappingQuotes(process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? ''),
 };
 export const config = {
     port: Number(process.env.PORT ?? 3000),
@@ -73,6 +75,12 @@ export function getStartupConfigIssues() {
     if (!config.jwtSecret.trim() || config.jwtSecret === 'dev-secret') {
         issues.push('JWT_SECRET is missing or using the development default');
     }
+    if (config.flutterwave.clientId && !/^fw_/i.test(config.flutterwave.clientId)) {
+        issues.push('FLUTTERWAVE_CLIENT_ID does not look like a valid Flutterwave V4 client id');
+    }
+    if (config.flutterwave.clientSecret && !/^fw_/i.test(config.flutterwave.clientSecret)) {
+        issues.push('FLUTTERWAVE_CLIENT_SECRET does not look like a valid Flutterwave V4 client secret');
+    }
     if (config.firebase.projectId ||
         config.firebase.clientEmail ||
         config.firebase.privateKey ||
@@ -91,4 +99,8 @@ export function getStartupConfigIssues() {
         }
     }
     return issues;
+}
+export function hasValidFlutterwaveKeys() {
+    return (/^fw_/i.test(config.flutterwave.clientId) &&
+        /^fw_/i.test(config.flutterwave.clientSecret));
 }

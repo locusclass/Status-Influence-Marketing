@@ -43,7 +43,8 @@ export const FundCampaignSchema = z.object({
   amount: z.number().int().positive(),
   fund_source: z.enum(['FLUTTERWAVE', 'WALLET', 'PESAPAL']).optional(),
   return_url: z.string().trim().min(1).optional(),
-  cancel_url: z.string().trim().min(1).optional()
+  cancel_url: z.string().trim().min(1).optional(),
+  network: z.enum(['MTN', 'AIRTEL']).optional()
 });
 
 export const TrustScoreEventSchema = z.object({

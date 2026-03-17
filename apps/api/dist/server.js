@@ -6,7 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
-import { config } from './config.js';
+import { config, hasValidFlutterwaveKeys } from './config.js';
 import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
 export function buildServer() {
     const app = Fastify({
@@ -176,11 +176,20 @@ export function buildServer() {
     app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
     // Final payment-provider configuration
     app.addHook('onReady', async () => {
-        if (!config.flutterwave.secretKey) {
-            app.log.warn('FLUTTERWAVE_SECRET_KEY is not set. Payments will fail.');
+        if (!config.flutterwave.clientId) {
+            app.log.warn('FLUTTERWAVE_CLIENT_ID is not set. Payments will fail.');
+        }
+        else if (!/^fw_/i.test(config.flutterwave.clientId)) {
+            app.log.warn('FLUTTERWAVE_CLIENT_ID format looks invalid. Payments will fail.');
         }
         else {
             app.log.info({ provider: 'FLUTTERWAVE' }, 'Flutterwave payments configured');
+        }
+        if (!config.flutterwave.clientSecret) {
+            app.log.warn('FLUTTERWAVE_CLIENT_SECRET is not set. Payments will fail.');
+        }
+        else if (!hasValidFlutterwaveKeys()) {
+            app.log.warn('FLUTTERWAVE_CLIENT_SECRET format looks invalid. Payments will fail.');
         }
         if (!config.flutterwave.webhookSecretHash) {
             app.log.warn('FLUTTERWAVE_WEBHOOK_SECRET_HASH is not set. Webhook verification is disabled.');

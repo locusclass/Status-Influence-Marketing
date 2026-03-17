@@ -36,9 +36,10 @@ export const CreateCampaignSchema = z
 export const FundCampaignSchema = z.object({
     campaign_id: z.string().trim().min(3),
     amount: z.number().int().positive(),
-    fund_source: z.enum(['PESAPAL', 'WALLET']).optional(),
+    fund_source: z.enum(['FLUTTERWAVE', 'WALLET', 'PESAPAL']).optional(),
     return_url: z.string().trim().min(1).optional(),
-    cancel_url: z.string().trim().min(1).optional()
+    cancel_url: z.string().trim().min(1).optional(),
+    network: z.enum(['MTN', 'AIRTEL']).optional()
 });
 export const TrustScoreEventSchema = z.object({
     user_id: z.string().trim().min(3),

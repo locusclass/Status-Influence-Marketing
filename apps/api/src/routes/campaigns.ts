@@ -5,7 +5,7 @@ import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
-import { config } from '../config.js';
+import { config, hasValidFlutterwaveKeys } from '../config.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
   canAccessAdvertiserFeatures,
@@ -1540,7 +1540,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         };
       }
 
-      if (!config.flutterwave.secretKey || !config.flutterwave.publicKey) {
+      if (!hasValidFlutterwaveKeys()) {
         reply.code(503);
         return { error: 'flutterwave_not_configured' } as any;
       }
@@ -1550,15 +1550,23 @@ export async function campaignRoutes(app: FastifyInstance) {
         escrow_id: escrow.id,
         type: 'FUNDING',
         amount: body.amount,
-        merchant_reference: merchantReference
+        merchant_reference: merchantReference,
+        raw_payload: {
+          kind: 'CAMPAIGN_FUNDING',
+          campaign_id: campaign.id,
+          return_url: callbackUrl,
+          cancel_url: cancellationUrl,
+          network: body.network ?? 'MTN',
+        },
       });
 
       const checkoutPayload = {
-        public_key: config.flutterwave.publicKey,
+        version: 'v4',
+        provider: 'FLUTTERWAVE',
         tx_ref: merchantReference,
         amount: body.amount,
         currency: paymentCurrency,
-        payment_options: 'card,banktransfer,ussd,mobilemoneyuganda',
+        payment_options: 'mobilemoneyuganda',
         customer: {
           email: userEmail!,
           name: `${firstName} User`.trim(),
@@ -1574,6 +1582,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           campaign_id: campaign.id,
           return_url: callbackUrl,
           cancel_url: cancellationUrl,
+          network: body.network ?? 'MTN',
         },
       };
 

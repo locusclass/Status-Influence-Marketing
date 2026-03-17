@@ -2,17 +2,94 @@ import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config } from '../config.js';
 
-function getAuthHeaders() {
-  return {
-    Authorization: `Bearer ${config.flutterwave.secretKey}`,
-    'Content-Type': 'application/json',
+let cachedAccessToken: { token: string; expiresAt: number } | null = null;
+
+function randomId() {
+  return crypto.randomUUID();
+}
+
+function buildBaseUrl() {
+  const configured = config.flutterwave.baseUrl.trim();
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+  return 'https://developersandbox-api.flutterwave.com';
+}
+
+async function getAccessToken() {
+  const now = Date.now();
+  if (cachedAccessToken && cachedAccessToken.expiresAt > now + 30_000) {
+    return cachedAccessToken.token;
+  }
+
+  const res = await fetch(`${buildBaseUrl()}/auth/token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'X-Trace-Id': randomId(),
+    },
+    body: JSON.stringify({
+      client_id: config.flutterwave.clientId,
+      client_secret: config.flutterwave.clientSecret,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Flutterwave auth failed: ${res.status} ${text}`);
+  }
+
+  const body = (await res.json()) as Record<string, any>;
+  const payload = (body.data ?? body) as Record<string, any>;
+  const token = String(payload.access_token ?? payload.token ?? '').trim();
+  if (!token) {
+    throw new Error('Flutterwave auth did not return an access token');
+  }
+
+  const expiresIn = Number(payload.expires_in ?? 3600);
+  cachedAccessToken = {
+    token,
+    expiresAt: now + Math.max(60, expiresIn) * 1000,
   };
+  return token;
+}
+
+async function flutterwaveRequest<T>(
+  path: string,
+  init: {
+    method?: 'GET' | 'POST';
+    body?: Record<string, any>;
+    idempotencyKey?: string;
+  } = {}
+) {
+  const token = await getAccessToken();
+  const res = await fetch(`${buildBaseUrl()}${path}`, {
+    method: init.method ?? 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Trace-Id': randomId(),
+      ...(init.idempotencyKey
+        ? { 'X-Idempotency-Key': init.idempotencyKey }
+        : {}),
+    },
+    ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Flutterwave request failed: ${res.status} ${text}`);
+  }
+
+  return (await res.json()) as T;
 }
 
 export async function registerIpnUrl(): Promise<any> {
   return {
     ok: true,
-    provider: 'FLUTTERWAVE',
+    provider: 'FLUTTERWAVE_V4',
     note: 'Flutterwave webhooks are configured from the dashboard.',
   };
 }
@@ -20,91 +97,77 @@ export async function registerIpnUrl(): Promise<any> {
 export async function getIpnList(): Promise<any> {
   return {
     ok: true,
-    provider: 'FLUTTERWAVE',
+    provider: 'FLUTTERWAVE_V4',
     note: 'Flutterwave webhook endpoints are managed from the dashboard.',
   };
 }
 
-export async function submitOrder(input: {
-  amount: number;
-  description: string;
-  type: 'MERCHANT';
-  reference: string;
-  firstName: string;
-  lastName: string;
+export async function createCustomer(input: {
   email: string;
-  currency: string;
-  callback_url: string;
-  cancellation_url: string;
+  name: string;
+  phoneNumber?: string;
 }) {
-  const res = await fetch(`${config.flutterwave.baseUrl}/payments`, {
+  return flutterwaveRequest<Record<string, any>>('/customers', {
     method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify({
-      tx_ref: input.reference,
-      amount: input.amount,
-      currency: input.currency,
-      redirect_url: input.callback_url,
-      customer: {
-        email: input.email,
-        name: `${input.firstName} ${input.lastName}`.trim(),
-      },
-      customizations: {
-        title: 'Prime Checkout',
-        description: input.description,
-      },
-      meta: {
-        cancellation_url: input.cancellation_url,
-      },
-    }),
+    body: {
+      name: input.name,
+      email: input.email,
+      phone_number: input.phoneNumber,
+    },
+    idempotencyKey: `customer:${input.email.toLowerCase()}`,
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Flutterwave checkout failed: ${res.status} ${text}`);
-  }
-
-  return res.json();
 }
 
-export function buildInlinePayloadHash(input: {
-  amount: number;
-  currency: string;
-  customerEmail: string;
-  txRef: string;
+export async function createMobileMoneyPaymentMethod(input: {
+  customerId: string;
+  phoneNumber: string;
+  network: 'MTN' | 'AIRTEL';
+  country: 'UG';
 }) {
-  const hashedSecret = crypto
-    .createHash('sha256')
-    .update(config.flutterwave.secretKey)
-    .digest('hex');
-  return crypto
-    .createHash('sha256')
-    .update(
-      `${input.amount}${input.currency}${input.customerEmail}${input.txRef}${hashedSecret}`
-    )
-    .digest('hex');
+  return flutterwaveRequest<Record<string, any>>('/payment-methods', {
+    method: 'POST',
+    body: {
+      type: 'mobile_money',
+      customer_id: input.customerId,
+      mobile_money: {
+        phone_number: input.phoneNumber,
+        network: input.network,
+        country: input.country,
+      },
+    },
+    idempotencyKey: `pm:${input.customerId}:${input.phoneNumber}:${input.network}`,
+  });
+}
+
+export async function createCharge(input: {
+  amount: number;
+  currency: 'UGX';
+  customerId: string;
+  paymentMethodId: string;
+  txRef: string;
+  redirectUrl?: string | null;
+}) {
+  return flutterwaveRequest<Record<string, any>>('/charges', {
+    method: 'POST',
+    body: {
+      amount: input.amount,
+      currency: input.currency,
+      customer_id: input.customerId,
+      payment_method_id: input.paymentMethodId,
+      reference: input.txRef,
+      ...(input.redirectUrl ? { redirect_url: input.redirectUrl } : {}),
+    },
+    idempotencyKey: `charge:${input.txRef}`,
+  });
 }
 
 export async function getTransactionStatus(transactionId: string, _merchantReference?: string) {
-  const res = await fetch(
-    `${config.flutterwave.baseUrl}/transactions/${encodeURIComponent(transactionId)}/verify`,
-    {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${config.flutterwave.secretKey}`,
-      },
-    }
+  return flutterwaveRequest<Record<string, any>>(
+    `/charges/${encodeURIComponent(transactionId)}`
   );
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Flutterwave verify failed: ${res.status} ${text}`);
-  }
-
-  return res.json();
 }
 
-export async function requestPayout(input: {
+export async function requestPayout(_input: {
   amount: number;
   currency: string;
   narration: string;
@@ -113,27 +176,7 @@ export async function requestPayout(input: {
   receiverPhone: string;
   receiverNetwork?: string;
 }) {
-  const res = await fetch(`${config.flutterwave.baseUrl}/transfers`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify({
-      account_bank: (input.receiverNetwork ?? 'MTN').trim().toUpperCase(),
-      account_number: input.receiverPhone,
-      amount: input.amount,
-      narration: input.narration,
-      currency: input.currency,
-      reference: input.reference,
-      debit_currency: input.currency,
-      beneficiary_name: input.receiverName,
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Flutterwave transfer failed: ${res.status} ${text}`);
-  }
-
-  return res.json();
+  throw new Error('Flutterwave V4 payouts are not yet implemented in this build');
 }
 
 export function verifyWebhookSignature(rawBody: string, signature: string, secret: string): boolean {

@@ -19,7 +19,7 @@ import {
   normalizeAccountRole,
   normalizeActiveRole,
 } from '../services/roles.js';
-import { config } from '../config.js';
+import { config, hasValidFlutterwaveKeys } from '../config.js';
 
 const accountProfileSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -59,6 +59,7 @@ const walletDepositSchema = z.object({
   amount: z.number().int().positive(),
   return_url: z.string().trim().min(1).optional(),
   cancel_url: z.string().trim().min(1).optional(),
+  network: z.enum(['MTN', 'AIRTEL']).optional(),
 });
 
 const MIN_WALLET_WITHDRAW_UGX = 10_000;
@@ -1106,7 +1107,7 @@ export async function accountRoutes(app: FastifyInstance) {
     const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
     const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
 
-    if (!config.flutterwave.secretKey || !config.flutterwave.publicKey) {
+    if (!hasValidFlutterwaveKeys()) {
       reply.code(503);
       return { error: 'flutterwave_not_configured' };
     }
@@ -1145,17 +1146,20 @@ export async function accountRoutes(app: FastifyInstance) {
             kind: 'WALLET_DEPOSIT',
             user_id: userId,
             wallet_id: wallet.id,
+            return_url: callbackUrl,
+            cancel_url: cancellationUrl,
           },
         ]
       );
 
       const firstName = String(user.email).split('@')[0] || 'User';
       const checkoutPayload = {
-        public_key: config.flutterwave.publicKey,
+        version: 'v4',
+        provider: 'FLUTTERWAVE',
         tx_ref: reference,
         amount: parsed.data.amount,
         currency: 'UGX',
-        payment_options: 'card,banktransfer,ussd,mobilemoneyuganda',
+        payment_options: 'mobilemoneyuganda',
         customer: {
           email: String(user.email),
           name: `${firstName} User`.trim(),
@@ -1171,6 +1175,7 @@ export async function accountRoutes(app: FastifyInstance) {
           wallet_id: wallet.id,
           return_url: callbackUrl,
           cancel_url: cancellationUrl,
+          network: parsed.data.network ?? 'MTN',
         },
       };
 
