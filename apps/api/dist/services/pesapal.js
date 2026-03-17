@@ -155,6 +155,22 @@ export async function createCharge(input) {
 export async function getTransactionStatus(transactionId, _merchantReference) {
     return flutterwaveRequest(`/charges/${encodeURIComponent(transactionId)}`);
 }
+export function buildCheckoutPayloadHash(input) {
+    const secretKey = config.flutterwave.secretKey.trim();
+    if (!secretKey) {
+        throw new Error('Flutterwave checkout secret key is not configured');
+    }
+    const hashedSecretKey = crypto
+        .createHash('sha256')
+        .update(secretKey, 'utf8')
+        .digest('hex');
+    const hashSource = String(input.amount) +
+        input.currency +
+        input.customerEmail +
+        input.txRef +
+        hashedSecretKey;
+    return crypto.createHash('sha256').update(hashSource, 'utf8').digest('hex');
+}
 export async function requestPayout(_input) {
     if (!config.flutterwave.secretKey.trim()) {
         throw new Error('Flutterwave transfer secret key is not configured');

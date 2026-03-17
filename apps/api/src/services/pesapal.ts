@@ -203,6 +203,31 @@ export async function getTransactionStatus(transactionId: string, _merchantRefer
   );
 }
 
+export function buildCheckoutPayloadHash(input: {
+  amount: number | string;
+  currency: string;
+  customerEmail: string;
+  txRef: string;
+}) {
+  const secretKey = config.flutterwave.secretKey.trim();
+  if (!secretKey) {
+    throw new Error('Flutterwave checkout secret key is not configured');
+  }
+
+  const hashedSecretKey = crypto
+    .createHash('sha256')
+    .update(secretKey, 'utf8')
+    .digest('hex');
+  const hashSource =
+    String(input.amount) +
+    input.currency +
+    input.customerEmail +
+    input.txRef +
+    hashedSecretKey;
+
+  return crypto.createHash('sha256').update(hashSource, 'utf8').digest('hex');
+}
+
 export async function requestPayout(_input: {
   amount: number;
   currency: string;

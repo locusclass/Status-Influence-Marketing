@@ -102,6 +102,14 @@ export function getStartupConfigIssues() {
     issues.push('FLUTTERWAVE_CLIENT_SECRET is empty');
   }
 
+  if (config.flutterwave.secretKey && !config.flutterwave.secretKey.trim()) {
+    issues.push('FLUTTERWAVE_SECRET_KEY is empty');
+  }
+
+  if (config.flutterwave.publicKey && !config.flutterwave.publicKey.trim()) {
+    issues.push('FLUTTERWAVE_PUBLIC_KEY is empty');
+  }
+
   if (
     config.firebase.projectId ||
     config.firebase.clientEmail ||
@@ -139,6 +147,8 @@ export function isFatalStartupIssue(issue: string) {
 
 export function hasValidFlutterwaveKeys() {
   return (
+    config.flutterwave.secretKey.trim().length > 0 &&
+    config.flutterwave.publicKey.trim().length > 0 &&
     config.flutterwave.clientId.trim().length > 0 &&
     config.flutterwave.clientSecret.trim().length > 0
   );

@@ -6,6 +6,7 @@ import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import { config, hasValidFlutterwaveKeys } from '../config.js';
+import { buildCheckoutPayloadHash } from '../services/pesapal.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
   canAccessAdvertiserFeatures,
@@ -1561,12 +1562,19 @@ export async function campaignRoutes(app: FastifyInstance) {
       });
 
       const checkoutPayload = {
-        version: 'v4',
         provider: 'FLUTTERWAVE',
+        public_key: config.flutterwave.publicKey,
         tx_ref: merchantReference,
         amount: body.amount,
         currency: paymentCurrency,
-        payment_options: 'mobilemoneyuganda',
+        payment_options: 'card,mobilemoneyuganda',
+        redirect_url: callbackUrl,
+        payload_hash: buildCheckoutPayloadHash({
+          amount: body.amount,
+          currency: paymentCurrency,
+          customerEmail: userEmail!,
+          txRef: merchantReference,
+        }),
         customer: {
           email: userEmail!,
           name: `${firstName} User`.trim(),

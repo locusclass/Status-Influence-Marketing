@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { requestPayout } from '../services/pesapal.js';
+import { buildCheckoutPayloadHash } from '../services/pesapal.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
@@ -1154,12 +1155,19 @@ export async function accountRoutes(app: FastifyInstance) {
 
       const firstName = String(user.email).split('@')[0] || 'User';
       const checkoutPayload = {
-        version: 'v4',
         provider: 'FLUTTERWAVE',
+        public_key: config.flutterwave.publicKey,
         tx_ref: reference,
         amount: parsed.data.amount,
         currency: 'UGX',
-        payment_options: 'mobilemoneyuganda',
+        payment_options: 'card,mobilemoneyuganda',
+        redirect_url: callbackUrl,
+        payload_hash: buildCheckoutPayloadHash({
+          amount: parsed.data.amount,
+          currency: 'UGX',
+          customerEmail: String(user.email),
+          txRef: reference,
+        }),
         customer: {
           email: String(user.email),
           name: `${firstName} User`.trim(),
