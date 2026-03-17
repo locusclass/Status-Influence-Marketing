@@ -216,14 +216,14 @@ export function buildServer() {
 
   // Final payment-provider configuration
   app.addHook('onReady', async () => {
-    if (!config.flutterwave.secretKey) {
-      app.log.warn('FLUTTERWAVE_SECRET_KEY is not set. Checkout creation, verification, and transfers will fail.');
-    } else {
-      app.log.info(
-        { provider: 'FLUTTERWAVE' },
-        'Flutterwave payments configured'
-      );
-    }
+    app.log.info(
+      {
+        provider: 'FLUTTERWAVE',
+        base_url: config.flutterwave.baseUrl,
+        has_secret: Boolean(config.flutterwave.secretKey?.trim()),
+      },
+      'flutterwave_config'
+    );
 
     if (!hasValidFlutterwaveKeys()) {
       app.log.warn('Flutterwave credentials are incomplete. Payments will fail.');
