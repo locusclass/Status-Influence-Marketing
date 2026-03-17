@@ -1442,6 +1442,107 @@ export async function campaignRoutes(app: FastifyInstance) {
       };
     }
   });
+  app.delete('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    if (!canAccessAdvertiserFeatures(role)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+
+    const result = await withTransaction(async (client) => {
+      const editable = await loadEditableCampaign(client, params.id, authUser);
+      if ('error' in editable) {
+        return editable as any;
+      }
+
+      const escrowStatus = String(editable.escrow.status ?? 'PENDING').toUpperCase();
+      if (escrowStatus !== 'PENDING') {
+        return { error: 'campaign_delete_locked' } as const;
+      }
+
+      const campaignIds = [editable.root.id, ...editable.children.map((row: any) => row.id)];
+      const sessionRes = await client.query(
+        `SELECT id
+         FROM verification_sessions
+         WHERE campaign_id = ANY($1::uuid[])`,
+        [campaignIds]
+      );
+      const sessionIds = sessionRes.rows.map((row: any) => row.id);
+
+      const proofRes = await client.query(
+        `SELECT id
+         FROM proofs
+         WHERE session_id = ANY($1::uuid[])`,
+        [sessionIds]
+      );
+      const proofIds = proofRes.rows.map((row: any) => row.id);
+
+      await client.query(
+        `DELETE FROM payout_requests
+         WHERE proof_id = ANY($1::uuid[])`,
+        [proofIds]
+      );
+      await client.query(
+        `DELETE FROM pesapal_transactions
+         WHERE escrow_id IN (
+           SELECT id FROM escrow_ledger WHERE campaign_id = ANY($1::uuid[])
+         )`,
+        [campaignIds]
+      );
+      await client.query(
+        `DELETE FROM proofs
+         WHERE id = ANY($1::uuid[]) OR session_id = ANY($2::uuid[])`,
+        [proofIds, sessionIds]
+      );
+      await client.query(
+        `DELETE FROM verification_sessions
+         WHERE id = ANY($1::uuid[]) OR campaign_id = ANY($2::uuid[])`,
+        [sessionIds, campaignIds]
+      );
+      await client.query(
+        `DELETE FROM contracts
+         WHERE campaign_id = ANY($1::uuid[])`,
+        [campaignIds]
+      );
+      await client.query(
+        `DELETE FROM escrow_ledger
+         WHERE campaign_id = ANY($1::uuid[])`,
+        [campaignIds]
+      );
+      await client.query(
+        `DELETE FROM campaigns
+         WHERE id = ANY($1::uuid[])`,
+        [campaignIds]
+      );
+
+      return {
+        deleted: true,
+        campaign_id: editable.root.id,
+      };
+    });
+
+    if ((result as any).error) {
+      const error = (result as any).error as string;
+      const code =
+        error === 'campaign_not_found'
+          ? 404
+          : error === 'forbidden'
+            ? 403
+            : error === 'campaign_edit_root_only'
+              ? 400
+              : 409;
+      reply.code(code);
+      return { error };
+    }
+
+    return result;
+  });
   app.post('/campaigns/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const body = FundCampaignSchema.parse({
