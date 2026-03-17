@@ -6,7 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
-import { config, hasValidFlutterwaveKeys } from './config.js';
+import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
 import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
 export function buildServer() {
     const app = Fastify({
@@ -176,10 +176,14 @@ export function buildServer() {
     app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
     // Final payment-provider configuration
     app.addHook('onReady', async () => {
+        const hasSecret = hasFlutterwaveSecretKey();
+        const hasClientCreds = hasFlutterwaveClientCredentials();
         app.log.info({
             provider: 'FLUTTERWAVE',
-            base_url: config.flutterwave.baseUrl,
-            has_secret: Boolean(config.flutterwave.secretKey?.trim()),
+            base_url: resolveFlutterwaveBaseUrl(),
+            auth_mode: hasClientCreds ? 'client_credentials' : hasSecret ? 'secret_key' : 'none',
+            has_secret: hasSecret,
+            has_client_creds: hasClientCreds,
         }, 'flutterwave_config');
         if (!hasValidFlutterwaveKeys()) {
             app.log.warn('Flutterwave credentials are incomplete. Payments will fail.');
