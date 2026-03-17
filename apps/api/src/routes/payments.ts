@@ -161,6 +161,25 @@ export async function paymentRoutes(app: FastifyInstance) {
     return null;
   };
 
+  const compactProviderSnapshot = (payload: any) => {
+    const source = (payload?.data ?? payload) as Record<string, any> | undefined;
+    if (!source || typeof source !== 'object') {
+      return null;
+    }
+
+    return {
+      id: source.id ?? null,
+      status: source.status ?? source.payment_status ?? null,
+      reference: source.reference ?? source.tx_ref ?? source.txRef ?? null,
+      amount: source.amount ?? null,
+      currency: source.currency ?? null,
+      processor_response: source.processor_response ?? null,
+      next_action_type: source.next_action?.type ?? null,
+      next_action_message: source.next_action?.message ?? null,
+      redirect_url: readRedirectUrl(source),
+    };
+  };
+
   const settleCharge = async (
     transactionId: string | number,
     reference: string,
@@ -453,13 +472,27 @@ export async function paymentRoutes(app: FastifyInstance) {
         parsed.data.transaction_id,
         parsed.data.tx_ref
       );
+      const verifiedStatus = String(
+        verified.status ?? verified.payment_status ?? ''
+      ).toUpperCase();
+      app.log.info(
+        {
+          tx_ref: parsed.data.tx_ref,
+          transaction_id: parsed.data.transaction_id,
+          verified_status: verifiedStatus,
+          settlement_ok: result.ok,
+          settlement_result: result,
+          provider: compactProviderSnapshot(verified),
+        },
+        'flutterwave_verify_result'
+      );
       if (!result.ok) {
         reply.code(400);
         return result;
       }
       return {
         ok: true,
-        status: String(verified.status ?? '').toUpperCase(),
+        status: verifiedStatus,
         tx_ref: parsed.data.tx_ref,
         transaction_id: parsed.data.transaction_id,
         result,
@@ -503,14 +536,29 @@ export async function paymentRoutes(app: FastifyInstance) {
     if (transactionId && txRef) {
       try {
         const { result, verified } = await settleCharge(transactionId, txRef);
+        const verifiedStatus = String(
+          verified.status ?? verified.payment_status ?? ''
+        ).toUpperCase();
+        app.log.info(
+          {
+            tx_ref: txRef,
+            transaction_id: transactionId,
+            query_status: status,
+            verified_status: verifiedStatus,
+            settlement_ok: result.ok,
+            settlement_result: result,
+            provider: compactProviderSnapshot(verified),
+          },
+          'flutterwave_return_result'
+        );
         if (!result.ok) {
           app.log.warn(
             { result, transactionId, txRef, status },
             'flutterwave_return_processing_issue'
           );
-        } else if (String(verified.status ?? '').toUpperCase() !== 'SUCCESSFUL') {
+        } else if (verifiedStatus !== 'SUCCESSFUL') {
           app.log.info(
-            { transactionId, txRef, providerStatus: verified.status },
+            { transactionId, txRef, providerStatus: verifiedStatus },
             'flutterwave_return_not_successful'
           );
         }
