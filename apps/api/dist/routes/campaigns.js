@@ -1237,22 +1237,31 @@ export async function campaignRoutes(app) {
                 cancel_url: cancellationUrl,
                 network: body.network ?? 'MTN',
             };
-            const hostedCheckout = await createHostedPayment({
-                txRef: merchantReference,
-                amount: body.amount,
-                currency: paymentCurrency,
-                redirectUrl: callbackUrl,
-                customer: {
-                    email: userEmail,
-                    name: `${firstName} User`.trim(),
-                    phoneNumber: userPhone ?? undefined,
-                },
-                customizations: {
-                    title: 'Prime Checkout',
-                    description: `Campaign funding: ${campaign.title}`,
-                },
-                meta: checkoutMeta,
-            });
+            let hostedCheckout;
+            try {
+                hostedCheckout = await createHostedPayment({
+                    txRef: merchantReference,
+                    amount: body.amount,
+                    currency: paymentCurrency,
+                    redirectUrl: callbackUrl,
+                    customer: {
+                        email: userEmail,
+                        name: `${firstName} User`.trim(),
+                        phoneNumber: userPhone ?? undefined,
+                    },
+                    customizations: {
+                        title: 'Prime Checkout',
+                        description: `Campaign funding: ${campaign.title}`,
+                    },
+                    meta: checkoutMeta,
+                });
+            }
+            catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                request.log.error({ error, campaign: campaign.id, tx_ref: merchantReference }, 'flutterwave_checkout_failed');
+                reply.code(502);
+                return { error: 'flutterwave_checkout_failed', detail };
+            }
             if (!hostedCheckout.checkoutUrl) {
                 reply.code(502);
                 return { error: 'flutterwave_missing_checkout_link' };
