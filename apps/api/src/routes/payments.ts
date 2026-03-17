@@ -137,14 +137,16 @@ export async function paymentRoutes(app: FastifyInstance) {
     const candidates = [
       payload?.next_action?.redirect_url,
       payload?.data?.next_action?.redirect_url,
-      payload?.redirect_url,
-      payload?.data?.redirect_url,
       payload?.authorization_url,
       payload?.data?.authorization_url,
+      payload?.checkout_url,
+      payload?.data?.checkout_url,
       payload?.payment_link,
       payload?.data?.payment_link,
       payload?.hosted_url,
       payload?.data?.hosted_url,
+      payload?.redirect_url,
+      payload?.data?.redirect_url,
     ];
     for (const candidate of candidates) {
       const value = String(candidate ?? '').trim();
