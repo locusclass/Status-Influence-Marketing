@@ -105,6 +105,31 @@ export async function paymentRoutes(app: FastifyInstance) {
     tx_ref: z.string().trim().min(1),
   });
 
+  const settleCharge = async (
+    transactionId: string | number,
+    reference: string,
+    rawPayload?: any
+  ) => {
+    const verifiedResponse = (await getTransactionStatus(
+      String(transactionId),
+      String(reference)
+    )) as Record<string, any>;
+    const verified = (verifiedResponse.data ?? verifiedResponse) as Record<string, any>;
+    const result = await withTransaction(async (client) =>
+      applyVerifiedCharge(
+        client,
+        {
+          transactionId,
+          reference,
+        },
+        verified,
+        rawPayload ?? verified.meta
+      )
+    );
+
+    return { result, verified };
+  };
+
   const applyVerifiedCharge = async (
     client: any,
     paymentEvent: { transactionId: string | number; reference: string },
@@ -273,14 +298,10 @@ export async function paymentRoutes(app: FastifyInstance) {
             return;
           }
 
-          const statusInfo = (await getTransactionStatus(
-            String(paymentEvent.transactionId),
-            String(paymentEvent.reference)
-          )) as Record<string, any>;
-          const verified = (statusInfo.data ?? statusInfo) as Record<string, any>;
-
-          const result = await withTransaction(async (client) =>
-            applyVerifiedCharge(client, paymentEvent, verified, body?.data?.meta)
+          const { result } = await settleCharge(
+            paymentEvent.transactionId,
+            String(paymentEvent.reference),
+            body?.data?.meta
           );
 
           if (!result.ok) {
@@ -363,21 +384,9 @@ export async function paymentRoutes(app: FastifyInstance) {
     }
 
     try {
-      const verifiedResponse = (await getTransactionStatus(
-        String(parsed.data.transaction_id),
+      const { result, verified } = await settleCharge(
+        parsed.data.transaction_id,
         parsed.data.tx_ref
-      )) as Record<string, any>;
-      const verified = (verifiedResponse.data ?? verifiedResponse) as Record<string, any>;
-      const result = await withTransaction(async (client) =>
-        applyVerifiedCharge(
-          client,
-          {
-            transactionId: parsed.data.transaction_id,
-            reference: parsed.data.tx_ref,
-          },
-          verified,
-          verified.meta
-        )
       );
       if (!result.ok) {
         reply.code(400);
@@ -401,6 +410,41 @@ export async function paymentRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, unknown> | undefined;
     const status = String(query?.status ?? '').toLowerCase();
     const cancelled = status === 'cancelled' || status === 'failed';
+    const transactionId =
+      typeof query?.transaction_id === 'string' && query.transaction_id.trim()
+        ? query.transaction_id.trim()
+        : typeof query?.transactionId === 'string' && query.transactionId.trim()
+          ? query.transactionId.trim()
+          : undefined;
+    const txRef =
+      typeof query?.tx_ref === 'string' && query.tx_ref.trim()
+        ? query.tx_ref.trim()
+        : typeof query?.txRef === 'string' && query.txRef.trim()
+          ? query.txRef.trim()
+          : undefined;
+
+    if (transactionId && txRef) {
+      try {
+        const { result, verified } = await settleCharge(transactionId, txRef);
+        if (!result.ok) {
+          app.log.warn(
+            { result, transactionId, txRef, status },
+            'flutterwave_return_processing_issue'
+          );
+        } else if (String(verified.status ?? '').toUpperCase() !== 'SUCCESSFUL') {
+          app.log.info(
+            { transactionId, txRef, providerStatus: verified.status },
+            'flutterwave_return_not_successful'
+          );
+        }
+      } catch (error) {
+        app.log.error(
+          { error, transactionId, txRef, status },
+          'flutterwave_return_verification_failed'
+        );
+      }
+    }
+
     reply.redirect(
       resolveBrowserTarget(
         request,

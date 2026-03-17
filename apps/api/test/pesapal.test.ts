@@ -18,7 +18,7 @@ describe('PesaPal webhook validation', () => {
       resolve(process.cwd(), 'src/routes/campaigns.ts'),
       'utf8'
     );
-    expect(routeSource).toContain("const pesapalCurrency = 'UGX'");
-    expect(routeSource).toContain('currency: pesapalCurrency');
+    expect(routeSource).toContain("const paymentCurrency = 'UGX'");
+    expect(routeSource).toContain('currency: paymentCurrency');
   });
 });

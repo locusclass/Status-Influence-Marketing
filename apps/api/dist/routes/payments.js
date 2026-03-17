@@ -87,6 +87,15 @@ export async function paymentRoutes(app) {
         transaction_id: z.union([z.string().trim().min(1), z.number().int().positive()]),
         tx_ref: z.string().trim().min(1),
     });
+    const settleCharge = async (transactionId, reference, rawPayload) => {
+        const verifiedResponse = (await getTransactionStatus(String(transactionId), String(reference)));
+        const verified = (verifiedResponse.data ?? verifiedResponse);
+        const result = await withTransaction(async (client) => applyVerifiedCharge(client, {
+            transactionId,
+            reference,
+        }, verified, rawPayload ?? verified.meta));
+        return { result, verified };
+    };
     const applyVerifiedCharge = async (client, paymentEvent, verified, rawPayload) => {
         const txnRows = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1', [paymentEvent.reference]);
         const txn = txnRows.rows[0];
@@ -206,9 +215,7 @@ export async function paymentRoutes(app) {
                         app.log.warn(paymentEvent, 'flutterwave_charge_missing_identifiers');
                         return;
                     }
-                    const statusInfo = (await getTransactionStatus(String(paymentEvent.transactionId), String(paymentEvent.reference)));
-                    const verified = (statusInfo.data ?? statusInfo);
-                    const result = await withTransaction(async (client) => applyVerifiedCharge(client, paymentEvent, verified, body?.data?.meta));
+                    const { result } = await settleCharge(paymentEvent.transactionId, String(paymentEvent.reference), body?.data?.meta);
                     if (!result.ok) {
                         app.log.warn({ result, paymentEvent }, 'flutterwave_charge_processing_issue');
                     }
@@ -272,12 +279,7 @@ export async function paymentRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         try {
-            const verifiedResponse = (await getTransactionStatus(String(parsed.data.transaction_id), parsed.data.tx_ref));
-            const verified = (verifiedResponse.data ?? verifiedResponse);
-            const result = await withTransaction(async (client) => applyVerifiedCharge(client, {
-                transactionId: parsed.data.transaction_id,
-                reference: parsed.data.tx_ref,
-            }, verified, verified.meta));
+            const { result, verified } = await settleCharge(parsed.data.transaction_id, parsed.data.tx_ref);
             if (!result.ok) {
                 reply.code(400);
                 return result;
@@ -300,6 +302,30 @@ export async function paymentRoutes(app) {
         const query = request.query;
         const status = String(query?.status ?? '').toLowerCase();
         const cancelled = status === 'cancelled' || status === 'failed';
+        const transactionId = typeof query?.transaction_id === 'string' && query.transaction_id.trim()
+            ? query.transaction_id.trim()
+            : typeof query?.transactionId === 'string' && query.transactionId.trim()
+                ? query.transactionId.trim()
+                : undefined;
+        const txRef = typeof query?.tx_ref === 'string' && query.tx_ref.trim()
+            ? query.tx_ref.trim()
+            : typeof query?.txRef === 'string' && query.txRef.trim()
+                ? query.txRef.trim()
+                : undefined;
+        if (transactionId && txRef) {
+            try {
+                const { result, verified } = await settleCharge(transactionId, txRef);
+                if (!result.ok) {
+                    app.log.warn({ result, transactionId, txRef, status }, 'flutterwave_return_processing_issue');
+                }
+                else if (String(verified.status ?? '').toUpperCase() !== 'SUCCESSFUL') {
+                    app.log.info({ transactionId, txRef, providerStatus: verified.status }, 'flutterwave_return_not_successful');
+                }
+            }
+            catch (error) {
+                app.log.error({ error, transactionId, txRef, status }, 'flutterwave_return_verification_failed');
+            }
+        }
         reply.redirect(resolveBrowserTarget(request, cancelled ? '/payment/cancel' : '/payment/success') ?? (cancelled ? deepLinkCancel : deepLinkReturn));
     });
     app.get('/payments/cancel', async (request, reply) => {
