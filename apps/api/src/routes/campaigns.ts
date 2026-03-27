@@ -1,7 +1,10 @@
 import { FastifyInstance } from 'fastify';
 import {
   CreateCampaignSchema,
+  DeliveryModelSchema,
   FundCampaignSchema,
+  MediaTypeSchema,
+  PlatformAdapterSchema,
   getCampaignBurstMode,
   isCreatorPlatform,
   normalizeExecutionMeta,
@@ -40,6 +43,8 @@ type EditableCampaign = {
   root: any;
   children: any[];
   escrow: any;
+  bundle_id: string | null;
+  bundle_roots: any[];
 };
 
 type DistributorCapacityShare = {
@@ -47,6 +52,18 @@ type DistributorCapacityShare = {
   allocated_views: number;
   payout_amount: number;
   budget_total: number;
+};
+
+type BundleSummary = {
+  bundle_id: string;
+  bundle_root_campaign_id: string;
+  title: string;
+  advertiser_id: string;
+  total_budget: number;
+  escrow_status: string;
+  amount_total: number;
+  amount_available: number;
+  campaigns: any[];
 };
 
 function normalizePhone(input: string) {
@@ -123,6 +140,65 @@ function buildPaymentCallbackUrl(
     url.searchParams.set('target', targetUrl);
   }
   return url.toString();
+}
+
+function getCampaignBundleId(campaign: any) {
+  const value = String(campaign?.campaign_bundle_id ?? '').trim();
+  return value.length > 0 ? value : null;
+}
+
+function getEscrowCampaignId(campaign: any) {
+  return String(
+    campaign?.bundle_root_campaign_id ??
+      campaign?.parent_campaign_id ??
+      campaign?.id ??
+      ''
+  ).trim();
+}
+
+function normalizePlatformList(values: unknown[]) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value ?? '').trim().toUpperCase())
+        .filter((value) => value.length > 0)
+    )
+  );
+}
+
+function resolveRequestedPlatforms(body: any) {
+  const bundleItemPlatforms = Array.isArray(body?.bundle_items)
+    ? normalizePlatformList(
+        body.bundle_items.map((item: any) => item?.platform)
+      )
+    : [];
+  if (bundleItemPlatforms.length > 0) {
+    return bundleItemPlatforms;
+  }
+  const declaredPlatforms = Array.isArray(body?.platforms)
+    ? normalizePlatformList(body.platforms)
+    : [];
+  if (declaredPlatforms.length > 0) {
+    return declaredPlatforms;
+  }
+  return normalizePlatformList([body?.platform]);
+}
+
+function buildBundleItems(body: any) {
+  if (Array.isArray(body?.bundle_items) && body.bundle_items.length > 0) {
+    return body.bundle_items.map((item: any) => ({
+      ...body,
+      ...item,
+      title: String(item?.title ?? body?.title ?? '').trim() || body.title,
+      platform: item.platform,
+    }));
+  }
+
+  return resolveRequestedPlatforms(body).map((platform) => ({
+    ...body,
+    platform,
+    title: body.title,
+  }));
 }
 
 async function ensureWalletForUser(client: any, userId: string, preferredCurrency?: string | null) {
@@ -235,6 +311,14 @@ async function ensureCampaignColumns(client: any) {
   `);
   await client.query(`
     ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS campaign_bundle_id UUID
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS bundle_root_campaign_id UUID REFERENCES campaigns(id)
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS assigned_distributor_id UUID REFERENCES users(id)
   `);
   await client.query(`
@@ -285,6 +369,14 @@ async function ensureCampaignColumns(client: any) {
     ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS campaign_burst_mode BOOLEAN NOT NULL DEFAULT FALSE
   `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_campaign_bundle_id_idx
+    ON campaigns (campaign_bundle_id)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_bundle_root_campaign_id_idx
+    ON campaigns (bundle_root_campaign_id)
+  `);
 }
 
 async function usersHasColumn(client: any, columnName: string) {
@@ -334,6 +426,21 @@ async function loadEditableCampaign(client: any, campaignId: string, advertiserI
   if (!root) return { error: 'campaign_not_found' } as const;
   if (root.advertiser_id !== advertiserId) return { error: 'forbidden' } as const;
   if (root.parent_campaign_id) return { error: 'campaign_edit_root_only' } as const;
+  const bundleId = getCampaignBundleId(root);
+  const bundleRoots = bundleId
+    ? (
+        await client.query(
+          `
+          SELECT *
+          FROM campaigns
+          WHERE campaign_bundle_id=$1
+            AND parent_campaign_id IS NULL
+          ORDER BY created_at ASC
+          `,
+          [bundleId]
+        )
+      ).rows
+    : [root];
 
   const childrenRes = await client.query(
     'SELECT * FROM campaigns WHERE parent_campaign_id=$1 ORDER BY created_at ASC',
@@ -355,12 +462,12 @@ async function loadEditableCampaign(client: any, campaignId: string, advertiserI
 
   const escrowRes = await client.query(
     'SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1',
-    [root.id]
+    [getEscrowCampaignId(root)]
   );
   const escrow = escrowRes.rows[0] ?? null;
   if (!escrow) return { error: 'escrow_not_found' } as const;
 
-  return { root, children, escrow } satisfies EditableCampaign;
+  return { root, children, escrow, bundle_id: bundleId, bundle_roots: bundleRoots } satisfies EditableCampaign;
 }
 
 function deriveCampaignBudget(
@@ -550,6 +657,98 @@ async function resolvePrivateDistributorShares(
   }));
 }
 
+async function loadBundleSummary(
+  client: any,
+  bundleId: string,
+  userId?: string | null
+): Promise<BundleSummary | null> {
+  const bundleRes = await client.query(
+    `
+    SELECT *
+    FROM campaigns
+    WHERE campaign_bundle_id=$1
+      AND parent_campaign_id IS NULL
+    ORDER BY created_at ASC
+    `,
+    [bundleId]
+  );
+  const campaigns = bundleRes.rows;
+  if (campaigns.length === 0) {
+    return null;
+  }
+
+  const ownerCampaignId = getEscrowCampaignId(campaigns[0]);
+  const escrowRes = await client.query(
+    'SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1',
+    [ownerCampaignId]
+  );
+  const escrow = escrowRes.rows[0] ?? null;
+  const summaries = await buildCampaignStatusSummaries(
+    client,
+    campaigns.map((row: any) => String(row.id)),
+    userId ?? null
+  );
+
+  return {
+    bundle_id: bundleId,
+    bundle_root_campaign_id: ownerCampaignId,
+    title: String(campaigns[0]?.title ?? 'Campaign bundle'),
+    advertiser_id: String(campaigns[0]?.advertiser_id ?? ''),
+    total_budget: campaigns.reduce(
+      (sum: number, row: any) => sum + Number(row.budget_total ?? 0),
+      0
+    ),
+    escrow_status: String(escrow?.status ?? 'PENDING'),
+    amount_total: Number(escrow?.amount_total ?? 0),
+    amount_available: Number(escrow?.amount_available ?? 0),
+    campaigns: campaigns.map((row: any) => ({
+      ...row,
+      status_summary:
+        summaries.get(String(row.id)) ?? {
+          campaign_status: String(row.status ?? 'ACTIVE'),
+          escrow_status: String(escrow?.status ?? 'PENDING'),
+          latest_contract_status: 'UNCLAIMED',
+          my_contract_status: null,
+          proof_status: 'NOT_SUBMITTED',
+          settlement_status:
+            String(escrow?.status ?? 'PENDING') === 'PENDING'
+              ? 'AWAITING_FUNDING'
+              : 'LOCKED_IN_ESCROW',
+          is_available: false,
+        },
+    })),
+  };
+}
+
+async function loadBundleForAdvertiser(
+  client: any,
+  bundleId: string,
+  advertiserId: string,
+  role?: string | null
+) {
+  const bundle = await loadBundleSummary(client, bundleId, advertiserId);
+  if (!bundle) {
+    return { error: 'campaign_bundle_not_found' } as const;
+  }
+  if (bundle.advertiser_id !== advertiserId && role !== 'ADMIN') {
+    return { error: 'forbidden' } as const;
+  }
+  const ownerCampaignRes = await client.query(
+    `
+    SELECT *
+    FROM campaigns
+    WHERE id=$1
+    LIMIT 1
+    `,
+    [bundle.bundle_root_campaign_id]
+  );
+  const ownerCampaign = ownerCampaignRes.rows[0];
+  if (!ownerCampaign) {
+    return { error: 'campaign_not_found' } as const;
+  }
+  return { bundle, ownerCampaign } as const;
+}
+
 function deriveProofStatus(latestProof: any) {
   if (!latestProof) return 'NOT_SUBMITTED';
   if (latestProof.status === 'VERIFIED' && latestProof.decision === 'VERIFIED') {
@@ -610,7 +809,7 @@ export async function buildCampaignStatusSummaries(
     scope AS (
       SELECT
         c.id AS campaign_id,
-        COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id,
+        COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id,
         c.status AS campaign_status,
         (c.parent_campaign_id IS NULL) AS is_root
       FROM campaigns c
@@ -721,7 +920,7 @@ async function getContractCompletionReadiness(
     SELECT
       ctr.*,
       c.platform,
-      COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id
+      COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
     WHERE ctr.id=$1
@@ -783,7 +982,7 @@ async function getContractForAdvertiserAction(
       c.parent_campaign_id,
       c.platform,
       c.budget_total,
-      COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id
+      COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
     WHERE ctr.id=$1
@@ -809,7 +1008,45 @@ export async function campaignRoutes(app: FastifyInstance) {
   const AcceptContractSchema = z.object({
     campaign_id: z.string().trim().min(3),
   });
-  const UpdateCampaignSchema = CreateCampaignSchema;
+  const UpdateCampaignSchema = z
+    .object({
+      title: z.string().min(3).max(120),
+      platform: PlatformAdapterSchema,
+      delivery_model: DeliveryModelSchema.optional(),
+      payout_amount: z.number().int().positive(),
+      budget_total: z.number().int().positive(),
+      execution_mode: z.enum(['PRIVATE_CONTRACT', 'OPEN_BUDGET']).optional(),
+      visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
+      counterparty_contact: z.string().trim().min(7).max(20).optional(),
+      beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+      start_date: z.string(),
+      end_date: z.string(),
+      media_type: MediaTypeSchema,
+      media_url: z.string().url().optional(),
+      media_text: z.string().trim().min(3).max(4000).optional(),
+      execution_meta: z.record(z.any()).optional(),
+      impression_target: z.number().int().min(1).optional(),
+      platform_fee_percent: z.number().min(0).max(100).optional(),
+      advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
+      terms_keep_hours: z.number().int().min(1).max(168).optional(),
+      terms_min_views: z.number().int().min(1).optional().nullable(),
+      terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional(),
+    })
+    .superRefine((value, ctx) => {
+      const hasMediaUrl =
+        typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+      const hasMediaText =
+        typeof value.media_text === 'string' &&
+        value.media_text.trim().length > 0;
+      if (!hasMediaUrl && !hasMediaText) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['media_url'],
+          message: 'Either media_url or media_text is required.',
+        });
+      }
+    });
+  const FundBundleSchema = FundCampaignSchema.omit({ campaign_id: true });
   const LookupDistributorSchema = z.object({
     phone: z.string().trim().min(7).max(20),
   });
@@ -927,7 +1164,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           SELECT c2.id
           FROM campaigns c2
           LEFT JOIN escrow_ledger e
-            ON e.campaign_id = COALESCE(c2.parent_campaign_id, c2.id)
+            ON e.campaign_id = COALESCE(c2.bundle_root_campaign_id, c2.parent_campaign_id, c2.id)
           WHERE e.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
              OR c2.advertiser_id = $${idx}
         )
@@ -1083,6 +1320,35 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { error: 'campaign_not_found' };
     }
     return { campaign };
+  });
+
+  app.get('/campaign-bundles/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const authUser = (request.user as any)?.sub as string | undefined;
+    const role = (request.user as any)?.role as string | undefined;
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    if (!canAccessAdvertiserFeatures(role)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+
+    const result = await withTransaction(async (client) => {
+      return loadBundleForAdvertiser(client, params.id, authUser, role);
+    });
+    if ((result as any).error) {
+      const error = (result as any).error as string;
+      reply.code(
+        error === 'campaign_bundle_not_found' || error === 'campaign_not_found'
+          ? 404
+          : 403
+      );
+      return { error };
+    }
+
+    return { bundle: (result as any).bundle };
   });
 
   app.get('/campaigns/:id/proofs', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -1254,115 +1520,202 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
     let campaign;
     try {
-      campaign = await withTransaction(async (client) => {
-        const executionMode = resolveExecutionMode(
-          body.platform,
-          body.execution_mode
-        );
-        const beneficiaryContacts = normalizeBeneficiaryContacts(body);
-
-        if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
-          throw new Error('private_beneficiary_required');
+        campaign = await withTransaction(async (client) => {
+          const bundleItems = buildBundleItems(body);
+          const requestedPlatforms = normalizePlatformList(
+          bundleItems.map((item: any) => item.platform)
+          );
+        if (requestedPlatforms.length !== bundleItems.length) {
+          throw new Error('duplicate_bundle_platform');
         }
 
-        const {
-          platformFeePercent,
-          visibility,
-          distributableBudget,
-          normalizedPayout: rootPayout,
-          impressionTarget: budgetImpressionTarget,
-          estimatedAllocationCount,
-          perAllocationTarget,
-        } = deriveCampaignBudget(
-          body.platform,
-          executionMode,
-          body.budget_total,
-          body.payout_amount,
-          body.impression_target
-        );
-        const requestedViewerTarget =
-          executionMode === 'OPEN_BUDGET'
-            ? budgetImpressionTarget
-            : Number(body.impression_target ?? budgetImpressionTarget);
-        if (executionMode === 'PRIVATE_CONTRACT' && requestedViewerTarget > budgetImpressionTarget) {
-          throw new Error('private_target_exceeds_budget');
-        }
-        const rootBudget = body.budget_total;
-        const deliveryModel = resolveDeliveryModel(
-          body.platform,
-          body.delivery_model
-        );
-        const executionMeta = buildCampaignExecutionMeta(
-          body.platform,
-          body.execution_meta,
-          isCreatorPlatform(body.platform) && executionMode === 'OPEN_BUDGET'
-            ? {
-                allocation_strategy: 'REPUTATION_BASED',
-                creator_unit_count: estimatedAllocationCount,
-                per_creator_target_metric: perAllocationTarget,
-                target_metric_total: budgetImpressionTarget,
-              }
-            : undefined
-        );
-        const campaignBurstMode = getCampaignBurstMode({
-          execution_meta: executionMeta,
-        });
+        const bundleId = bundleItems.length > 1 ? uuid() : null;
+        const createdRootCampaigns: any[] = [];
+        let bundleRootCampaignId: string | null = null;
+        let totalEscrowAmount = 0;
 
-        const root = await campaignRepo.createCampaign(client, {
-          ...body,
-          advertiser_id: authUser,
-          delivery_model: deliveryModel,
-          execution_meta: executionMeta,
-          campaign_burst_mode: campaignBurstMode,
-          visibility,
-          execution_mode: executionMode,
-          payout_amount: rootPayout,
-          platform_fee_percent: platformFeePercent,
-          advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-          impression_target:
+        for (const item of bundleItems) {
+          const executionMode = resolveExecutionMode(
+            item.platform,
+            item.execution_mode
+          );
+          const beneficiaryContacts = normalizeBeneficiaryContacts(item);
+
+          if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
+            throw new Error('private_beneficiary_required');
+          }
+
+          const {
+            platformFeePercent,
+            visibility,
+            distributableBudget,
+            normalizedPayout: rootPayout,
+            impressionTarget: budgetImpressionTarget,
+            estimatedAllocationCount,
+            perAllocationTarget,
+          } = deriveCampaignBudget(
+            item.platform,
+            executionMode,
+            item.budget_total,
+            item.payout_amount,
+            item.impression_target
+          );
+          const requestedViewerTarget =
             executionMode === 'OPEN_BUDGET'
               ? budgetImpressionTarget
-              : requestedViewerTarget,
-        });
-        await paymentRepo.createEscrow(client, root.id, root.budget_total);
-
-        if (executionMode === 'PRIVATE_CONTRACT') {
-          const shares = await resolvePrivateDistributorShares(
-            client,
-            beneficiaryContacts,
-            requestedViewerTarget,
-            rootBudget,
-            distributableBudget
-          );
-          for (const share of shares) {
-            await campaignRepo.createCampaign(client, {
-              ...body,
-              advertiser_id: authUser,
-              delivery_model: deliveryModel,
-              execution_meta: executionMeta,
-              campaign_burst_mode: campaignBurstMode,
-              parent_campaign_id: root.id,
-              assigned_distributor_id: share.distributor.id,
-              assigned_phone: share.distributor.phone,
-              visibility: 'PRIVATE',
-              execution_mode: 'PRIVATE_CONTRACT',
-              payout_amount: share.payout_amount,
-              budget_total: share.budget_total,
-              platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
-              advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-              impression_target: share.allocated_views,
-            });
+              : Number(item.impression_target ?? budgetImpressionTarget);
+          if (
+            executionMode === 'PRIVATE_CONTRACT' &&
+            requestedViewerTarget > budgetImpressionTarget
+          ) {
+            throw new Error('private_target_exceeds_budget');
           }
+          const rootBudget = item.budget_total;
+          const deliveryModel = resolveDeliveryModel(
+            item.platform,
+            item.delivery_model
+          );
+          const executionMeta = buildCampaignExecutionMeta(
+            item.platform,
+            item.execution_meta,
+            isCreatorPlatform(item.platform) && executionMode === 'OPEN_BUDGET'
+              ? {
+                  allocation_strategy: 'REPUTATION_BASED',
+                  creator_unit_count: estimatedAllocationCount,
+                  per_creator_target_metric: perAllocationTarget,
+                  target_metric_total: budgetImpressionTarget,
+                }
+              : undefined
+          );
+          const campaignBurstMode = getCampaignBurstMode({
+            execution_meta: executionMeta,
+          });
+
+          const root = await campaignRepo.createCampaign(client, {
+            advertiser_id: authUser,
+            campaign_bundle_id: bundleId,
+            bundle_root_campaign_id: bundleRootCampaignId,
+            title: String(item.title ?? body.title),
+            platform: item.platform,
+            delivery_model: deliveryModel,
+            execution_mode: executionMode,
+            visibility,
+            payout_amount: rootPayout,
+            budget_total: item.budget_total,
+            impression_target:
+              executionMode === 'OPEN_BUDGET'
+                ? budgetImpressionTarget
+                : requestedViewerTarget,
+            platform_fee_percent: platformFeePercent,
+            advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+            media_type: item.media_type,
+            media_text: item.media_text,
+            media_url: item.media_url,
+            execution_meta: executionMeta,
+            campaign_burst_mode: campaignBurstMode,
+            terms_keep_hours: Number(item.terms_keep_hours ?? 12),
+            terms_min_views: item.terms_min_views ?? null,
+            terms_requirement: item.terms_requirement ?? 'DURATION',
+            start_date: item.start_date,
+            end_date: item.end_date,
+          });
+
+          if (!bundleRootCampaignId) {
+            bundleRootCampaignId = String(root.id);
+            if (bundleId) {
+              await client.query(
+                `
+                UPDATE campaigns
+                SET bundle_root_campaign_id=$2
+                WHERE id=$1
+                `,
+                [root.id, bundleRootCampaignId]
+              );
+              root.bundle_root_campaign_id = bundleRootCampaignId;
+            }
+          }
+
+          totalEscrowAmount += Number(item.budget_total ?? 0);
+
+          if (executionMode === 'PRIVATE_CONTRACT') {
+            const shares = await resolvePrivateDistributorShares(
+              client,
+              beneficiaryContacts,
+              requestedViewerTarget,
+              rootBudget,
+              distributableBudget
+            );
+            for (const share of shares) {
+              await campaignRepo.createCampaign(client, {
+                advertiser_id: authUser,
+                campaign_bundle_id: bundleId,
+                bundle_root_campaign_id: bundleRootCampaignId,
+                parent_campaign_id: root.id,
+                assigned_distributor_id: share.distributor.id,
+                assigned_phone: share.distributor.phone,
+                title: String(item.title ?? body.title),
+                platform: item.platform,
+                delivery_model: deliveryModel,
+                execution_mode: 'PRIVATE_CONTRACT',
+                visibility: 'PRIVATE',
+                payout_amount: share.payout_amount,
+                budget_total: share.budget_total,
+                impression_target: share.allocated_views,
+                platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
+                advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+                media_type: item.media_type,
+                media_text: item.media_text,
+                media_url: item.media_url,
+                execution_meta: executionMeta,
+                campaign_burst_mode: campaignBurstMode,
+                terms_keep_hours: Number(item.terms_keep_hours ?? 12),
+                terms_min_views: item.terms_min_views ?? null,
+                terms_requirement: item.terms_requirement ?? 'DURATION',
+                start_date: item.start_date,
+                end_date: item.end_date,
+              });
+            }
+          }
+
+          createdRootCampaigns.push({
+            ...root,
+            campaign_bundle_id: bundleId,
+            bundle_root_campaign_id: bundleRootCampaignId,
+            beneficiary_count: beneficiaryContacts.length,
+            platform_fee_percent: platformFeePercent,
+            distributable_budget: distributableBudget,
+            estimated_minimum_users: estimatedAllocationCount,
+            estimated_allocations: estimatedAllocationCount,
+            per_allocation_target: perAllocationTarget,
+          });
+        }
+
+        await paymentRepo.createEscrow(
+          client,
+          bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''),
+          bundleId ? totalEscrowAmount : Number(createdRootCampaigns[0]?.budget_total ?? 0)
+        );
+
+        if (bundleId && bundleRootCampaignId) {
+          await client.query(
+            `
+            UPDATE campaigns
+            SET bundle_root_campaign_id=$2
+            WHERE campaign_bundle_id=$1
+              AND bundle_root_campaign_id IS NULL
+            `,
+            [bundleId, bundleRootCampaignId]
+          );
+          const bundle = await loadBundleSummary(client, bundleId, authUser);
+          return {
+            campaign: createdRootCampaigns[0],
+            campaigns: bundle?.campaigns ?? createdRootCampaigns,
+            bundle,
+          };
         }
 
         return {
-          ...root,
-          beneficiary_count: beneficiaryContacts.length,
-          platform_fee_percent: platformFeePercent,
-          distributable_budget: distributableBudget,
-          estimated_minimum_users: estimatedAllocationCount,
-          estimated_allocations: estimatedAllocationCount,
-          per_allocation_target: perAllocationTarget,
+          campaign: createdRootCampaigns[0],
         };
       });
     } catch (error: any) {
@@ -1375,11 +1728,13 @@ export async function campaignRoutes(app: FastifyInstance) {
             ? 'beneficiary_capacity_not_set'
             : message.startsWith('beneficiary_capacity_insufficient')
               ? 'beneficiary_capacity_insufficient'
+          : message.startsWith('duplicate_bundle_platform')
+            ? 'duplicate_bundle_platform'
           : message,
         detail: message,
       };
     }
-    return { campaign };
+    return campaign;
   });
 
   app.patch('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -1401,6 +1756,24 @@ export async function campaignRoutes(app: FastifyInstance) {
         const editable = await loadEditableCampaign(client, params.id, authUser);
         if ('error' in editable) {
           return editable as any;
+        }
+        const bundleId = editable.bundle_id;
+        if (bundleId) {
+          const duplicatePlatformRes = await client.query(
+            `
+            SELECT 1
+            FROM campaigns
+            WHERE campaign_bundle_id=$1
+              AND parent_campaign_id IS NULL
+              AND id <> $2
+              AND platform=$3
+            LIMIT 1
+            `,
+            [bundleId, editable.root.id, body.platform]
+          );
+          if (duplicatePlatformRes.rows[0]) {
+            throw new Error('duplicate_bundle_platform');
+          }
         }
 
         const executionMode = resolveExecutionMode(
@@ -1435,9 +1808,13 @@ export async function campaignRoutes(app: FastifyInstance) {
           throw new Error('private_target_exceeds_budget');
         }
         const escrowStatus = String(editable.escrow.status ?? 'PENDING').toUpperCase();
+        const currentRootBudget = Number(editable.root.budget_total ?? 0);
+        const nextRootBudget = Number(body.budget_total ?? 0);
+        const nextEscrowTotal =
+          Number(editable.escrow.amount_total ?? 0) - currentRootBudget + nextRootBudget;
         if (
           escrowStatus !== 'PENDING' &&
-          Number(editable.escrow.amount_total ?? 0) !== body.budget_total
+          currentRootBudget !== nextRootBudget
         ) {
           return { error: 'campaign_edit_budget_locked' } as any;
         }
@@ -1519,9 +1896,9 @@ export async function campaignRoutes(app: FastifyInstance) {
           await client.query(
             `UPDATE escrow_ledger
              SET amount_total=$2,
-                 amount_available=$2
+                  amount_available=$2
              WHERE id=$1`,
-            [editable.escrow.id, body.budget_total]
+            [editable.escrow.id, nextEscrowTotal]
           );
         }
 
@@ -1541,6 +1918,8 @@ export async function campaignRoutes(app: FastifyInstance) {
             await campaignRepo.createCampaign(client, {
               ...body,
               advertiser_id: authUser,
+              campaign_bundle_id: bundleId,
+              bundle_root_campaign_id: getEscrowCampaignId(editable.root),
               delivery_model: deliveryModel,
               execution_meta: executionMeta,
               campaign_burst_mode: campaignBurstMode,
@@ -1560,6 +1939,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
         return {
           ...updatedRoot,
+          campaign_bundle_id: bundleId,
+          bundle_root_campaign_id: getEscrowCampaignId(editable.root),
           beneficiary_count: beneficiaryContacts.length,
           platform_fee_percent: platformFeePercent,
           distributable_budget: distributableBudget,
@@ -1567,6 +1948,9 @@ export async function campaignRoutes(app: FastifyInstance) {
           estimated_allocations: estimatedAllocationCount,
           per_allocation_target: perAllocationTarget,
           status_summary: await buildCampaignStatusSummary(client, editable.root.id, authUser),
+          ...(bundleId
+            ? { bundle: await loadBundleSummary(client, bundleId, authUser) }
+            : {}),
         };
       });
 
@@ -1592,13 +1976,15 @@ export async function campaignRoutes(app: FastifyInstance) {
     } catch (error: any) {
       const message = String(error?.message ?? 'campaign_update_failed');
       reply.code(400);
-      return {
-        error: message.startsWith('beneficiary_not_found')
-          ? 'beneficiary_not_found'
+        return {
+          error: message.startsWith('beneficiary_not_found')
+            ? 'beneficiary_not_found'
           : message.startsWith('beneficiary_capacity_not_set')
             ? 'beneficiary_capacity_not_set'
             : message.startsWith('beneficiary_capacity_insufficient')
               ? 'beneficiary_capacity_insufficient'
+          : message.startsWith('duplicate_bundle_platform')
+            ? 'duplicate_bundle_platform'
           : message,
         detail: message,
       };
@@ -1629,6 +2015,11 @@ export async function campaignRoutes(app: FastifyInstance) {
       }
 
       const campaignIds = [editable.root.id, ...editable.children.map((row: any) => row.id)];
+      const escrowOwnerId = getEscrowCampaignId(editable.root);
+      const remainingBundleRoots = editable.bundle_id
+        ? editable.bundle_roots.filter((row: any) => String(row.id) !== String(editable.root.id))
+        : [];
+      const isBundleOwner = String(editable.root.id) === escrowOwnerId;
       const sessionRes = await client.query(
         `SELECT id
          FROM verification_sessions
@@ -1650,13 +2041,15 @@ export async function campaignRoutes(app: FastifyInstance) {
          WHERE proof_id = ANY($1::uuid[])`,
         [proofIds]
       );
-      await client.query(
-        `DELETE FROM pesapal_transactions
-         WHERE escrow_id IN (
-           SELECT id FROM escrow_ledger WHERE campaign_id = ANY($1::uuid[])
-         )`,
-        [campaignIds]
-      );
+      if (!editable.bundle_id || remainingBundleRoots.length === 0) {
+        await client.query(
+          `DELETE FROM pesapal_transactions
+           WHERE escrow_id IN (
+             SELECT id FROM escrow_ledger WHERE campaign_id = $1
+           )`,
+          [escrowOwnerId]
+        );
+      }
       await client.query(
         `DELETE FROM proofs
          WHERE id = ANY($1::uuid[]) OR session_id = ANY($2::uuid[])`,
@@ -1672,11 +2065,49 @@ export async function campaignRoutes(app: FastifyInstance) {
          WHERE campaign_id = ANY($1::uuid[])`,
         [campaignIds]
       );
-      await client.query(
-        `DELETE FROM escrow_ledger
-         WHERE campaign_id = ANY($1::uuid[])`,
-        [campaignIds]
-      );
+      if (editable.bundle_id && remainingBundleRoots.length > 0) {
+        const nextEscrowTotal = Math.max(
+          0,
+          Number(editable.escrow.amount_total ?? 0) - Number(editable.root.budget_total ?? 0)
+        );
+        if (isBundleOwner) {
+          const nextOwnerId = String(remainingBundleRoots[0].id);
+          await client.query(
+            `
+            UPDATE escrow_ledger
+            SET campaign_id=$2,
+                amount_total=$3,
+                amount_available=$3
+            WHERE id=$1
+            `,
+            [editable.escrow.id, nextOwnerId, nextEscrowTotal]
+          );
+          await client.query(
+            `
+            UPDATE campaigns
+            SET bundle_root_campaign_id=$2
+            WHERE campaign_bundle_id=$1
+            `,
+            [editable.bundle_id, nextOwnerId]
+          );
+        } else {
+          await client.query(
+            `
+            UPDATE escrow_ledger
+            SET amount_total=$2,
+                amount_available=$2
+            WHERE id=$1
+            `,
+            [editable.escrow.id, nextEscrowTotal]
+          );
+        }
+      } else {
+        await client.query(
+          `DELETE FROM escrow_ledger
+           WHERE campaign_id = $1`,
+          [escrowOwnerId]
+        );
+      }
       await client.query(
         `DELETE FROM campaigns
          WHERE id = ANY($1::uuid[])`,
@@ -1686,6 +2117,9 @@ export async function campaignRoutes(app: FastifyInstance) {
       return {
         deleted: true,
         campaign_id: editable.root.id,
+        ...(editable.bundle_id && remainingBundleRoots.length > 0
+          ? { bundle: await loadBundleSummary(client, editable.bundle_id, authUser) }
+          : {}),
       };
     });
 
@@ -1705,6 +2139,248 @@ export async function campaignRoutes(app: FastifyInstance) {
 
     return result;
   });
+
+  app.post('/campaign-bundles/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = FundBundleSchema.parse(request.body) as z.infer<typeof FundBundleSchema>;
+    const fundSource =
+      (body.fund_source ?? 'FLUTTERWAVE') === 'PESAPAL'
+        ? 'FLUTTERWAVE'
+        : (body.fund_source ?? 'FLUTTERWAVE');
+    const paymentCurrency = 'UGX';
+    const browserOrigin = getBrowserOrigin(request);
+    const webReturnUrl = resolveWebRedirectUrl(body.return_url, browserOrigin, '/payment/success');
+    const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
+    const callbackUrl = buildPaymentCallbackUrl(request, '/payments/return', webReturnUrl);
+    const cancellationUrl = buildPaymentCallbackUrl(request, '/payments/cancel', webCancelUrl);
+    if (!webReturnUrl || !webCancelUrl || !callbackUrl || !cancellationUrl) {
+      reply.code(400);
+      return { error: 'payment_redirect_urls_invalid' };
+    }
+
+    const result = await withTransaction(async (client) => {
+      const authUser = (request.user as any)?.sub as string | undefined;
+      const role = (request.user as any)?.role as string | undefined;
+      if (!authUser) {
+        reply.code(401);
+        return { error: 'unauthorized' } as any;
+      }
+      if (!canAccessAdvertiserFeatures(role)) {
+        reply.code(403);
+        return { error: 'forbidden' } as any;
+      }
+
+      const userEmailRes = await client.query(
+        'SELECT email, phone, preferred_currency FROM users WHERE id=$1',
+        [authUser]
+      );
+      const userEmail = userEmailRes.rows?.[0]?.email as string | undefined;
+      const userPhone = userEmailRes.rows?.[0]?.phone as string | undefined;
+      const preferredCurrency = userEmailRes.rows?.[0]?.preferred_currency as
+        | string
+        | undefined;
+      if (fundSource === 'FLUTTERWAVE' && !userEmail) {
+        reply.code(400);
+        return { error: 'user_email_missing' } as any;
+      }
+      const firstName = (userEmail ?? 'user@example.com').split('@')[0] ?? 'User';
+
+      const loadedBundle = await loadBundleForAdvertiser(client, params.id, authUser, role);
+      if ('error' in loadedBundle) {
+        reply.code(
+          loadedBundle.error === 'campaign_bundle_not_found' ||
+            loadedBundle.error === 'campaign_not_found'
+            ? 404
+            : loadedBundle.error === 'forbidden'
+              ? 403
+              : 400
+        );
+        return loadedBundle as any;
+      }
+      const { bundle, ownerCampaign } = loadedBundle;
+      const escrow = await paymentRepo.getEscrowByCampaign(
+        client,
+        bundle.bundle_root_campaign_id
+      );
+      if (!escrow) {
+        reply.code(404);
+        return { error: 'escrow_not_found' } as any;
+      }
+      if (body.amount !== escrow.amount_total) {
+        reply.code(400);
+        return { error: 'amount_mismatch' } as any;
+      }
+
+      if (fundSource === 'WALLET') {
+        const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
+        const lockedWalletRes = await client.query(
+          'SELECT * FROM wallets WHERE id=$1 FOR UPDATE',
+          [wallet.id]
+        );
+        const lockedWallet = lockedWalletRes.rows[0];
+        const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);
+        if (!lockedWallet || balanceAvailable < body.amount) {
+          reply.code(400);
+          return { error: 'insufficient_wallet_balance' } as any;
+        }
+
+        const reference = `ESCROW_FUND:BUNDLE:${bundle.bundle_id}`;
+        await client.query(
+          `
+          UPDATE wallets
+          SET balance_available = balance_available - $2,
+              balance = GREATEST(balance - $2, 0)
+          WHERE id=$1
+          `,
+          [wallet.id, body.amount]
+        );
+        await client.query(
+          `
+          INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+          VALUES ($1,$2,'DEBIT',$3)
+          `,
+          [wallet.id, body.amount, reference]
+        );
+        await client.query(
+          `
+          UPDATE escrow_ledger
+          SET status='FUNDED'
+          WHERE id=$1
+          `,
+          [escrow.id]
+        );
+        return {
+          fund_source: fundSource,
+          funded: true,
+          bundle,
+          owner_campaign: ownerCampaign,
+          wallet_reference: reference,
+        };
+      }
+
+      if (!hasValidFlutterwaveKeys()) {
+        reply.code(503);
+        return { error: 'flutterwave_not_configured' } as any;
+      }
+
+      const merchantReference = uuid();
+      const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
+        escrow_id: escrow.id,
+        type: 'FUNDING',
+        amount: body.amount,
+        merchant_reference: merchantReference,
+        raw_payload: {
+          kind: 'CAMPAIGN_BUNDLE_FUNDING',
+          bundle_id: bundle.bundle_id,
+          bundle_root_campaign_id: bundle.bundle_root_campaign_id,
+          return_url: callbackUrl,
+          cancel_url: cancellationUrl,
+          network: body.network ?? 'MTN',
+        },
+      });
+
+      const checkoutMeta = {
+        merchant_reference: merchantReference,
+        kind: 'CAMPAIGN_BUNDLE_FUNDING',
+        bundle_id: bundle.bundle_id,
+        bundle_root_campaign_id: bundle.bundle_root_campaign_id,
+        return_url: callbackUrl,
+        cancel_url: cancellationUrl,
+        network: body.network ?? 'MTN',
+      };
+      let hostedCheckout;
+      try {
+        hostedCheckout = await createHostedPayment({
+          txRef: merchantReference,
+          amount: body.amount,
+          currency: paymentCurrency,
+          redirectUrl: callbackUrl,
+          customer: {
+            email: userEmail!,
+            name: `${firstName} User`.trim(),
+            phoneNumber: userPhone ?? undefined,
+          },
+          customizations: {
+            title: 'Prime Checkout',
+            description: `Campaign funding: ${bundle.title}`,
+          },
+          meta: checkoutMeta,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        request.log.error(
+          {
+            error,
+            detail,
+            bundle: bundle.bundle_id,
+            tx_ref: merchantReference,
+          },
+          `flutterwave_checkout_failed: ${detail}`
+        );
+        reply.code(502);
+        return { error: 'flutterwave_checkout_failed', detail };
+      }
+      if (!hostedCheckout.checkoutUrl) {
+        reply.code(502);
+        return { error: 'flutterwave_missing_checkout_link' } as any;
+      }
+
+      await client.query(
+        `UPDATE pesapal_transactions
+         SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
+         WHERE merchant_reference=$1`,
+        [
+          merchantReference,
+          JSON.stringify({
+            ...checkoutMeta,
+            checkout_url: hostedCheckout.checkoutUrl,
+          }),
+        ]
+      );
+
+      const checkoutPayload = {
+        provider: 'FLUTTERWAVE_CHECKOUT',
+        checkout_url: hostedCheckout.checkoutUrl,
+        tx_ref: merchantReference,
+        amount: body.amount,
+        currency: paymentCurrency,
+        payment_options: 'card,mobilemoneyuganda',
+        redirect_url: callbackUrl,
+        meta: checkoutMeta,
+      };
+
+      return {
+        fund_source: fundSource,
+        funded: false,
+        bundle,
+        owner_campaign: ownerCampaign,
+        checkout_payload: checkoutPayload,
+        pesapalTxn,
+      };
+    });
+
+    if ((result as any)?.error) {
+      return result;
+    }
+    if ((result as any)?.funded) {
+      return result;
+    }
+    const {
+      checkout_payload: checkoutPayload,
+      pesapalTxn,
+      bundle,
+      owner_campaign: ownerCampaign,
+    } = result as any;
+    return {
+      checkout_payload: checkoutPayload,
+      flutterwave_txn: pesapalTxn,
+      fund_source: fundSource,
+      funded: false,
+      bundle,
+      owner_campaign: ownerCampaign,
+    };
+  });
+
   app.post('/campaigns/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const body = FundCampaignSchema.parse({
@@ -1752,7 +2428,8 @@ export async function campaignRoutes(app: FastifyInstance) {
         reply.code(403);
         return { error: 'not_campaign_advertiser' } as any;
       }
-      const escrowOwnerId = campaign.parent_campaign_id ?? campaign.id;
+      const bundleId = getCampaignBundleId(campaign);
+      const escrowOwnerId = getEscrowCampaignId(campaign);
       const escrow = await paymentRepo.getEscrowByCampaign(client, escrowOwnerId);
       if (!escrow) {
         reply.code(404);
@@ -1775,7 +2452,9 @@ export async function campaignRoutes(app: FastifyInstance) {
           return { error: 'insufficient_wallet_balance' } as any;
         }
 
-        const reference = `ESCROW_FUND:${campaign.id}`;
+        const reference = bundleId
+          ? `ESCROW_FUND:BUNDLE:${bundleId}`
+          : `ESCROW_FUND:${escrowOwnerId}`;
         await client.query(
           `
           UPDATE wallets
@@ -1822,6 +2501,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         raw_payload: {
           kind: 'CAMPAIGN_FUNDING',
           campaign_id: campaign.id,
+          ...(bundleId ? { bundle_id: bundleId, bundle_root_campaign_id: escrowOwnerId } : {}),
           return_url: callbackUrl,
           cancel_url: cancellationUrl,
           network: body.network ?? 'MTN',
@@ -1832,6 +2512,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         merchant_reference: merchantReference,
         kind: 'CAMPAIGN_FUNDING',
         campaign_id: campaign.id,
+        ...(bundleId ? { bundle_id: bundleId, bundle_root_campaign_id: escrowOwnerId } : {}),
         return_url: callbackUrl,
         cancel_url: cancellationUrl,
         network: body.network ?? 'MTN',
@@ -1942,7 +2623,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         return { error: 'forbidden' } as any;
       }
 
-      const escrowOwnerId = campaign.parent_campaign_id ?? body.campaign_id;
+      const escrowOwnerId = getEscrowCampaignId(campaign);
       const escrowRes = await client.query(
         'SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1',
         [escrowOwnerId]

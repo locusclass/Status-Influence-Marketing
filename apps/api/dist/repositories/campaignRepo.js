@@ -4,10 +4,12 @@ export class CampaignRepo {
         await ensurePublicIdColumns(client);
         const executionMetaJson = input.execution_meta == null ? null : JSON.stringify(input.execution_meta);
         const res = await client.query(`INSERT INTO campaigns
-      (advertiser_id, parent_campaign_id, assigned_distributor_id, assigned_phone, title, platform, delivery_model, execution_mode, visibility, payout_amount, budget_total, impression_target, platform_fee_percent, advertiser_wallet_mode, last_allocated_at, allocation_round, media_type, media_text, media_url, execution_meta, campaign_burst_mode, terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21,$22,$23,$24,$25,$26,$27)
+      (advertiser_id, campaign_bundle_id, bundle_root_campaign_id, parent_campaign_id, assigned_distributor_id, assigned_phone, title, platform, delivery_model, execution_mode, visibility, payout_amount, budget_total, impression_target, platform_fee_percent, advertiser_wallet_mode, last_allocated_at, allocation_round, media_type, media_text, media_url, execution_meta, campaign_burst_mode, terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23,$24,$25,$26,$27,$28,$29)
       RETURNING *`, [
             input.advertiser_id,
+            input.campaign_bundle_id ?? null,
+            input.bundle_root_campaign_id ?? null,
             input.parent_campaign_id ?? null,
             input.assigned_distributor_id ?? null,
             input.assigned_phone ?? null,

@@ -64,6 +64,14 @@ async function ensureCampaignAllocatorColumns(client) {
   `);
     await client.query(`
     ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS campaign_bundle_id UUID
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS bundle_root_campaign_id UUID REFERENCES campaigns(id)
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS assigned_distributor_id UUID REFERENCES users(id)
   `);
     await client.query(`
@@ -113,6 +121,14 @@ async function ensureCampaignAllocatorColumns(client) {
     await client.query(`
     ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS campaign_burst_mode BOOLEAN NOT NULL DEFAULT FALSE
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_campaign_bundle_id_idx
+    ON campaigns (campaign_bundle_id)
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_bundle_root_campaign_id_idx
+    ON campaigns (bundle_root_campaign_id)
   `);
 }
 async function ensureCreatorMarketingTables(client) {
@@ -207,6 +223,12 @@ function getDistributableCampaignBudget(campaign) {
     const feePercent = Math.max(0, Number(campaign?.platform_fee_percent ?? 0));
     return Math.floor(budgetTotal * ((100 - feePercent) / 100));
 }
+function getEscrowCampaignId(campaign) {
+    return String(campaign?.bundle_root_campaign_id ??
+        campaign?.parent_campaign_id ??
+        campaign?.id ??
+        '').trim();
+}
 function getCreatorUnitCount(campaign) {
     const explicit = Math.max(0, Math.floor(Number(campaign?.execution_meta?.creator_unit_count ?? 0)));
     if (explicit > 0) {
@@ -288,9 +310,15 @@ async function getEligibleCreators(client, platform, creatorScoreFloor) {
 }
 async function getOpenRootCampaignsReadyForAllocation(client) {
     const res = await client.query(`
-    SELECT c.*, e.amount_available, e.amount_total, e.status AS escrow_status
+    SELECT
+      c.*,
+      COALESCE(c.bundle_root_campaign_id, c.id) AS escrow_campaign_id,
+      e.amount_available,
+      e.amount_total,
+      e.status AS escrow_status
     FROM campaigns c
-    JOIN escrow_ledger e ON e.campaign_id = c.id
+    JOIN escrow_ledger e
+      ON e.campaign_id = COALESCE(c.bundle_root_campaign_id, c.id)
     WHERE c.parent_campaign_id IS NULL
       AND c.execution_mode = 'OPEN_BUDGET'
       AND c.status = 'ACTIVE'
@@ -357,6 +385,8 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
             await client.query(`
         INSERT INTO campaigns (
           advertiser_id,
+          campaign_bundle_id,
+          bundle_root_campaign_id,
           parent_campaign_id,
           assigned_distributor_id,
           assigned_phone,
@@ -385,10 +415,12 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
           end_date
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,'OPEN_BUDGET','PRIVATE',$8,$9,$10,$11,$12,now(),$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,'ACTIVE',$22,$23
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN_BUDGET','PRIVATE',$10,$11,$12,$13,$14,now(),$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,'ACTIVE',$24,$25
         )
         `, [
                 rootCampaign.advertiser_id,
+                rootCampaign.campaign_bundle_id ?? null,
+                rootCampaign.bundle_root_campaign_id ?? rootCampaign.id,
                 rootCampaign.id,
                 creator.user_id,
                 creator.phone || null,
@@ -484,6 +516,8 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
             await client.query(`
         INSERT INTO campaigns (
           advertiser_id,
+          campaign_bundle_id,
+          bundle_root_campaign_id,
           parent_campaign_id,
           assigned_distributor_id,
           assigned_phone,
@@ -512,10 +546,12 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
           end_date
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,'OPEN_BUDGET','PRIVATE',$8,$9,$10,$11,$12,now(),$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,'ACTIVE',$22,$23
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN_BUDGET','PRIVATE',$10,$11,$12,$13,$14,now(),$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,'ACTIVE',$24,$25
         )
         `, [
                 rootCampaign.advertiser_id,
+                rootCampaign.campaign_bundle_id ?? null,
+                rootCampaign.bundle_root_campaign_id ?? rootCampaign.id,
                 rootCampaign.id,
                 distributor.id,
                 distributor.phone,
@@ -921,7 +957,7 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     `, [proofContext.campaign_id]);
 }
 async function preparePayoutRequest(client, proof, campaign) {
-    const escrowCampaignId = campaign.parent_campaign_id ?? campaign.id;
+    const escrowCampaignId = getEscrowCampaignId(campaign);
     const contractRes = await client.query(`SELECT id
      FROM contracts
      WHERE campaign_id=$1
@@ -1268,15 +1304,21 @@ async function compensatePayoutFailure(proofId, campaignId) {
             return;
         }
         await client.query("UPDATE payout_requests SET status='FAILED' WHERE id=$1", [payout.id]);
-        const campaignRes = await client.query('SELECT budget_total FROM campaigns WHERE id=$1 LIMIT 1', [campaignId]);
+        const campaignRes = await client.query(`
+      SELECT budget_total, parent_campaign_id, bundle_root_campaign_id
+      FROM campaigns
+      WHERE id=$1
+      LIMIT 1
+      `, [campaignId]);
         const escrowRefundAmount = Number(campaignRes.rows[0]?.budget_total ?? payout.amount ?? 0);
+        const escrowCampaignId = getEscrowCampaignId(campaignRes.rows[0] ?? { id: campaignId });
         await client.query(`UPDATE escrow_ledger
        SET amount_available = amount_available + $2,
-           status = CASE
-             WHEN amount_available + $2 >= amount_total THEN 'FUNDED'
-             ELSE 'PARTIALLY_DISBURSED'
-           END
-       WHERE campaign_id=$1`, [campaignId, escrowRefundAmount]);
+            status = CASE
+              WHEN amount_available + $2 >= amount_total THEN 'FUNDED'
+              ELSE 'PARTIALLY_DISBURSED'
+            END
+        WHERE campaign_id=$1`, [escrowCampaignId, escrowRefundAmount]);
     });
 }
 async function processVerificationJob(job) {
@@ -1485,13 +1527,13 @@ async function expireOverdueContractsIfDue() {
          AND ctr.status='ACTIVE'
          AND ctr.contract_deadline_at IS NOT NULL
          AND ctr.contract_deadline_at < now()
-       RETURNING
-         ctr.id,
-         ctr.campaign_id,
-         c.execution_mode,
-         c.advertiser_id,
-         c.budget_total,
-         COALESCE(c.parent_campaign_id, c.id) AS escrow_campaign_id`);
+        RETURNING
+          ctr.id,
+          ctr.campaign_id,
+          c.execution_mode,
+          c.advertiser_id,
+          c.budget_total,
+          COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id`);
         const openCampaignIds = expired.rows
             .filter((row) => row.execution_mode === 'OPEN_BUDGET')
             .map((row) => row.campaign_id);
