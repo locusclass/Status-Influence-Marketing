@@ -1,4 +1,4 @@
-import { CreateCampaignSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema } from '@prime/shared';
+import { CreateCampaignSchema, FundCampaignSchema, getCampaignBurstMode, isCreatorPlatform, normalizeExecutionMeta, resolveDeliveryModel, } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
@@ -175,6 +175,22 @@ async function ensureCampaignColumns(client) {
     ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS allocation_round INTEGER NOT NULL DEFAULT 0
   `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS media_text TEXT
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS delivery_model TEXT NOT NULL DEFAULT 'DETERMINISTIC'
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS execution_meta JSONB
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS campaign_burst_mode BOOLEAN NOT NULL DEFAULT FALSE
+  `);
 }
 async function usersHasColumn(client, columnName) {
     const res = await client.query(`
@@ -234,11 +250,28 @@ async function loadEditableCampaign(client, campaignId, advertiserId) {
         return { error: 'escrow_not_found' };
     return { root, children, escrow };
 }
-function deriveCampaignBudget(executionMode, budgetTotal, payoutAmount) {
+function deriveCampaignBudget(platform, executionMode, budgetTotal, payoutAmount, requestedMetricTarget) {
     const platformFeePercent = executionMode === 'OPEN_BUDGET'
         ? OPEN_PLATFORM_FEE_PERCENT
         : PRIVATE_PLATFORM_FEE_PERCENT;
     const distributableBudget = Math.floor(budgetTotal * ((100 - platformFeePercent) / 100));
+    if (isCreatorPlatform(platform) && executionMode === 'OPEN_BUDGET') {
+        const normalizedPayout = Math.max(1, Number(payoutAmount ?? 0));
+        const impressionTarget = Math.max(1, Math.round(Number(requestedMetricTarget ?? 1)));
+        const estimatedAllocationCount = Math.floor(distributableBudget / normalizedPayout);
+        if (estimatedAllocationCount < 1) {
+            throw new Error('creator_budget_insufficient');
+        }
+        return {
+            platformFeePercent,
+            distributableBudget,
+            normalizedPayout,
+            impressionTarget,
+            estimatedAllocationCount,
+            perAllocationTarget: Math.max(1, Math.ceil(impressionTarget / estimatedAllocationCount)),
+            visibility: 'PUBLIC',
+        };
+    }
     const normalizedPayout = executionMode === 'OPEN_BUDGET'
         ? OPEN_RATE_UGX
         : Math.max(1, Number(payoutAmount ?? distributableBudget));
@@ -250,8 +283,24 @@ function deriveCampaignBudget(executionMode, budgetTotal, payoutAmount) {
         distributableBudget,
         normalizedPayout,
         impressionTarget,
+        estimatedAllocationCount: executionMode === 'OPEN_BUDGET'
+            ? Math.max(1, Math.floor(distributableBudget / normalizedPayout))
+            : 1,
+        perAllocationTarget: impressionTarget,
         visibility: executionMode === 'OPEN_BUDGET' ? 'PUBLIC' : 'PRIVATE',
     };
+}
+function resolveExecutionMode(platform, requestedMode) {
+    return requestedMode ?? (isCreatorPlatform(platform) ? 'OPEN_BUDGET' : 'PRIVATE_CONTRACT');
+}
+function buildCampaignExecutionMeta(platform, rawMeta, overrides) {
+    const normalized = normalizeExecutionMeta(platform, rawMeta) ?? {};
+    for (const [key, value] of Object.entries(overrides ?? {})) {
+        if (value != null) {
+            normalized[key] = value;
+        }
+    }
+    return Object.keys(normalized).length > 0 ? normalized : null;
 }
 function normalizeBeneficiaryContacts(body) {
     return Array.from(new Set([
@@ -547,23 +596,7 @@ export async function campaignRoutes(app) {
     const AcceptContractSchema = z.object({
         campaign_id: z.string().trim().min(3),
     });
-    const UpdateCampaignSchema = z.object({
-        title: z.string().min(3).max(120),
-        platform: PlatformAdapterSchema,
-        payout_amount: z.number().int().positive(),
-        budget_total: z.number().int().positive(),
-        execution_mode: z.enum(['PRIVATE_CONTRACT', 'OPEN_BUDGET']).optional(),
-        counterparty_contact: z.string().trim().min(7).max(20).optional(),
-        beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
-        start_date: z.string(),
-        end_date: z.string(),
-        media_type: MediaTypeSchema,
-        media_url: z.string().url(),
-        impression_target: z.number().int().min(1).optional(),
-        terms_keep_hours: z.number().int().min(1).max(168).optional(),
-        terms_min_views: z.number().int().min(1).optional().nullable(),
-        terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional(),
-    });
+    const UpdateCampaignSchema = CreateCampaignSchema;
     const LookupDistributorSchema = z.object({
         phone: z.string().trim().min(7).max(20),
     });
@@ -801,7 +834,9 @@ export async function campaignRoutes(app) {
                 p.observed_post_hash,
                 p.challenge_seen,
                 p.confidence,
+                p.meta,
                 p.created_at,
+                s.platform,
                 u.id AS distributor_id,
                 u.email AS distributor_email
          FROM proofs p
@@ -911,12 +946,12 @@ export async function campaignRoutes(app) {
         let campaign;
         try {
             campaign = await withTransaction(async (client) => {
-                const executionMode = body.execution_mode ?? 'PRIVATE_CONTRACT';
+                const executionMode = resolveExecutionMode(body.platform, body.execution_mode);
                 const beneficiaryContacts = normalizeBeneficiaryContacts(body);
                 if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
                     throw new Error('private_beneficiary_required');
                 }
-                const { platformFeePercent, visibility, distributableBudget, normalizedPayout: rootPayout, impressionTarget: budgetImpressionTarget, } = deriveCampaignBudget(executionMode, body.budget_total, body.payout_amount);
+                const { platformFeePercent, visibility, distributableBudget, normalizedPayout: rootPayout, impressionTarget: budgetImpressionTarget, estimatedAllocationCount, perAllocationTarget, } = deriveCampaignBudget(body.platform, executionMode, body.budget_total, body.payout_amount, body.impression_target);
                 const requestedViewerTarget = executionMode === 'OPEN_BUDGET'
                     ? budgetImpressionTarget
                     : Number(body.impression_target ?? budgetImpressionTarget);
@@ -924,9 +959,24 @@ export async function campaignRoutes(app) {
                     throw new Error('private_target_exceeds_budget');
                 }
                 const rootBudget = body.budget_total;
+                const deliveryModel = resolveDeliveryModel(body.platform, body.delivery_model);
+                const executionMeta = buildCampaignExecutionMeta(body.platform, body.execution_meta, isCreatorPlatform(body.platform) && executionMode === 'OPEN_BUDGET'
+                    ? {
+                        allocation_strategy: 'REPUTATION_BASED',
+                        creator_unit_count: estimatedAllocationCount,
+                        per_creator_target_metric: perAllocationTarget,
+                        target_metric_total: budgetImpressionTarget,
+                    }
+                    : undefined);
+                const campaignBurstMode = getCampaignBurstMode({
+                    execution_meta: executionMeta,
+                });
                 const root = await campaignRepo.createCampaign(client, {
                     ...body,
                     advertiser_id: authUser,
+                    delivery_model: deliveryModel,
+                    execution_meta: executionMeta,
+                    campaign_burst_mode: campaignBurstMode,
                     visibility,
                     execution_mode: executionMode,
                     payout_amount: rootPayout,
@@ -943,6 +993,9 @@ export async function campaignRoutes(app) {
                         await campaignRepo.createCampaign(client, {
                             ...body,
                             advertiser_id: authUser,
+                            delivery_model: deliveryModel,
+                            execution_meta: executionMeta,
+                            campaign_burst_mode: campaignBurstMode,
                             parent_campaign_id: root.id,
                             assigned_distributor_id: share.distributor.id,
                             assigned_phone: share.distributor.phone,
@@ -961,7 +1014,9 @@ export async function campaignRoutes(app) {
                     beneficiary_count: beneficiaryContacts.length,
                     platform_fee_percent: platformFeePercent,
                     distributable_budget: distributableBudget,
-                    estimated_minimum_users: budgetImpressionTarget,
+                    estimated_minimum_users: estimatedAllocationCount,
+                    estimated_allocations: estimatedAllocationCount,
+                    per_allocation_target: perAllocationTarget,
                 };
             });
         }
@@ -1000,12 +1055,12 @@ export async function campaignRoutes(app) {
                 if ('error' in editable) {
                     return editable;
                 }
-                const executionMode = body.execution_mode ?? 'PRIVATE_CONTRACT';
+                const executionMode = resolveExecutionMode(body.platform, body.execution_mode);
                 const beneficiaryContacts = normalizeBeneficiaryContacts(body);
                 if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
                     throw new Error('private_beneficiary_required');
                 }
-                const { platformFeePercent, visibility, distributableBudget, normalizedPayout: rootPayout, impressionTarget: budgetImpressionTarget, } = deriveCampaignBudget(executionMode, body.budget_total, body.payout_amount);
+                const { platformFeePercent, visibility, distributableBudget, normalizedPayout: rootPayout, impressionTarget: budgetImpressionTarget, estimatedAllocationCount, perAllocationTarget, } = deriveCampaignBudget(body.platform, executionMode, body.budget_total, body.payout_amount, body.impression_target);
                 const requestedViewerTarget = executionMode === 'OPEN_BUDGET'
                     ? budgetImpressionTarget
                     : Number(body.impression_target ?? budgetImpressionTarget);
@@ -1017,22 +1072,39 @@ export async function campaignRoutes(app) {
                     Number(editable.escrow.amount_total ?? 0) !== body.budget_total) {
                     return { error: 'campaign_edit_budget_locked' };
                 }
+                const deliveryModel = resolveDeliveryModel(body.platform, body.delivery_model);
+                const executionMeta = buildCampaignExecutionMeta(body.platform, body.execution_meta, isCreatorPlatform(body.platform) && executionMode === 'OPEN_BUDGET'
+                    ? {
+                        allocation_strategy: 'REPUTATION_BASED',
+                        creator_unit_count: estimatedAllocationCount,
+                        per_creator_target_metric: perAllocationTarget,
+                        target_metric_total: budgetImpressionTarget,
+                    }
+                    : undefined);
+                const campaignBurstMode = getCampaignBurstMode({
+                    execution_meta: executionMeta,
+                });
+                const executionMetaJson = executionMeta == null ? null : JSON.stringify(executionMeta);
                 const updatedRootRes = await client.query(`UPDATE campaigns
            SET title=$2,
                platform=$3,
-               execution_mode=$4,
-               visibility=$5,
-               payout_amount=$6,
-               budget_total=$7,
-               impression_target=$8,
-               platform_fee_percent=$9,
-               media_type=$10,
-               media_url=$11,
-               terms_keep_hours=$12,
-               terms_min_views=$13,
-               terms_requirement=$14,
-               start_date=$15,
-               end_date=$16,
+               delivery_model=$4,
+               execution_mode=$5,
+               visibility=$6,
+               payout_amount=$7,
+               budget_total=$8,
+               impression_target=$9,
+               platform_fee_percent=$10,
+               media_type=$11,
+               media_text=$12,
+               media_url=$13,
+               execution_meta=$14::jsonb,
+               campaign_burst_mode=$15,
+               terms_keep_hours=$16,
+               terms_min_views=$17,
+               terms_requirement=$18,
+               start_date=$19,
+               end_date=$20,
                assigned_distributor_id=NULL,
                assigned_phone=NULL
            WHERE id=$1
@@ -1040,6 +1112,7 @@ export async function campaignRoutes(app) {
                     editable.root.id,
                     body.title,
                     body.platform,
+                    deliveryModel,
                     executionMode,
                     visibility,
                     rootPayout,
@@ -1049,7 +1122,10 @@ export async function campaignRoutes(app) {
                         : requestedViewerTarget,
                     platformFeePercent,
                     body.media_type,
-                    body.media_url,
+                    body.media_text ?? null,
+                    body.media_url ?? null,
+                    executionMetaJson,
+                    campaignBurstMode,
                     Number(body.terms_keep_hours ?? editable.root.terms_keep_hours ?? 12),
                     body.terms_min_views ?? null,
                     body.terms_requirement ?? editable.root.terms_requirement ?? 'DURATION',
@@ -1072,6 +1148,9 @@ export async function campaignRoutes(app) {
                         await campaignRepo.createCampaign(client, {
                             ...body,
                             advertiser_id: authUser,
+                            delivery_model: deliveryModel,
+                            execution_meta: executionMeta,
+                            campaign_burst_mode: campaignBurstMode,
                             parent_campaign_id: editable.root.id,
                             assigned_distributor_id: share.distributor.id,
                             assigned_phone: share.distributor.phone,
@@ -1090,7 +1169,9 @@ export async function campaignRoutes(app) {
                     beneficiary_count: beneficiaryContacts.length,
                     platform_fee_percent: platformFeePercent,
                     distributable_budget: distributableBudget,
-                    estimated_minimum_users: budgetImpressionTarget,
+                    estimated_minimum_users: estimatedAllocationCount,
+                    estimated_allocations: estimatedAllocationCount,
+                    per_allocation_target: perAllocationTarget,
                     status_summary: await buildCampaignStatusSummary(client, editable.root.id, authUser),
                 };
             });

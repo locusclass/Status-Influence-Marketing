@@ -1,18 +1,19 @@
 import { z } from 'zod';
-export declare const PlatformAdapterSchema: z.ZodLiteral<"WHATSAPP_STATUS">;
-export declare const MediaTypeSchema: z.ZodEnum<["IMAGE", "VIDEO"]>;
+export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
+export declare const MediaTypeSchema: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
+export declare const DeliveryModelSchema: z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>;
 export declare const CreateVerificationSessionSchema: z.ZodObject<{
     user_id: z.ZodString;
     campaign_id: z.ZodString;
-    platform: z.ZodLiteral<"WHATSAPP_STATUS">;
+    platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
 }, "strip", z.ZodTypeAny, {
     user_id: string;
     campaign_id: string;
-    platform: "WHATSAPP_STATUS";
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
 }, {
     user_id: string;
     campaign_id: string;
-    platform: "WHATSAPP_STATUS";
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
 }>;
 export declare const SubmitProofSchema: z.ZodObject<{
     session_id: z.ZodString;
@@ -30,9 +31,10 @@ export declare const SubmitProofSchema: z.ZodObject<{
     device_fingerprint: string;
     client_meta?: Record<string, any> | undefined;
 }>;
-export declare const CreateCampaignSchema: z.ZodObject<{
+export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title: z.ZodString;
-    platform: z.ZodLiteral<"WHATSAPP_STATUS">;
+    platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
+    delivery_model: z.ZodOptional<z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>>;
     payout_amount: z.ZodNumber;
     budget_total: z.ZodNumber;
     execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT", "OPEN_BUDGET"]>>;
@@ -41,8 +43,10 @@ export declare const CreateCampaignSchema: z.ZodObject<{
     beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     start_date: z.ZodString;
     end_date: z.ZodString;
-    media_type: z.ZodEnum<["IMAGE", "VIDEO"]>;
-    media_url: z.ZodString;
+    media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
+    media_url: z.ZodOptional<z.ZodString>;
+    media_text: z.ZodOptional<z.ZodString>;
+    execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
     impression_target: z.ZodOptional<z.ZodNumber>;
     platform_fee_percent: z.ZodOptional<z.ZodNumber>;
     advertiser_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
@@ -50,18 +54,21 @@ export declare const CreateCampaignSchema: z.ZodObject<{
     terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
     terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
 }, "strip", z.ZodTypeAny, {
-    platform: "WHATSAPP_STATUS";
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
     title: string;
     payout_amount: number;
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "IMAGE" | "VIDEO";
-    media_url: string;
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    media_url?: string | undefined;
+    media_text?: string | undefined;
+    execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
     advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
@@ -69,18 +76,65 @@ export declare const CreateCampaignSchema: z.ZodObject<{
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }, {
-    platform: "WHATSAPP_STATUS";
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
     title: string;
     payout_amount: number;
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "IMAGE" | "VIDEO";
-    media_url: string;
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    media_url?: string | undefined;
+    media_text?: string | undefined;
+    execution_meta?: Record<string, any> | undefined;
+    impression_target?: number | undefined;
+    platform_fee_percent?: number | undefined;
+    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    terms_keep_hours?: number | undefined;
+    terms_min_views?: number | null | undefined;
+    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
+}>, {
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    title: string;
+    payout_amount: number;
+    budget_total: number;
+    start_date: string;
+    end_date: string;
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
+    visibility?: "PUBLIC" | "PRIVATE" | undefined;
+    counterparty_contact?: string | undefined;
+    beneficiary_contacts?: string[] | undefined;
+    media_url?: string | undefined;
+    media_text?: string | undefined;
+    execution_meta?: Record<string, any> | undefined;
+    impression_target?: number | undefined;
+    platform_fee_percent?: number | undefined;
+    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    terms_keep_hours?: number | undefined;
+    terms_min_views?: number | null | undefined;
+    terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
+}, {
+    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    title: string;
+    payout_amount: number;
+    budget_total: number;
+    start_date: string;
+    end_date: string;
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
+    visibility?: "PUBLIC" | "PRIVATE" | undefined;
+    counterparty_contact?: string | undefined;
+    beneficiary_contacts?: string[] | undefined;
+    media_url?: string | undefined;
+    media_text?: string | undefined;
+    execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
     advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;

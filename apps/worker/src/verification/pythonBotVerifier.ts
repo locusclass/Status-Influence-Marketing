@@ -3,6 +3,7 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { Verifier, WorkerVerificationResult } from './verifier.js';
+import { DeterministicVerifier } from './deterministicVerifier.js';
 
 type PythonBotReport = {
   ui_detected?: boolean;
@@ -71,6 +72,7 @@ export class PythonBotVerifier implements Verifier {
   private fps: number;
   private maxSeconds: number;
   private supportedPlatforms: Set<string>;
+  private deterministicFallback: DeterministicVerifier;
 
   constructor() {
     const configured = process.env.PYTHON_VERIFIER_SCRIPT?.trim();
@@ -81,15 +83,16 @@ export class PythonBotVerifier implements Verifier {
     this.fps = Number(process.env.WA_VERIFIER_FPS ?? 2) || 2;
     this.maxSeconds = Number(process.env.WA_VERIFIER_MAX_SECONDS ?? 60) || 60;
     this.supportedPlatforms = new Set(['WHATSAPP_STATUS']);
+    this.deterministicFallback = new DeterministicVerifier();
   }
 
   async verify(videoPath: string, campaignSpec: any, challenge: any): Promise<WorkerVerificationResult> {
-    if (!fs.existsSync(this.scriptPath)) {
-      throw new Error(`python_verifier_script_missing:${this.scriptPath}`);
-    }
     const platform = String(campaignSpec?.platform ?? '').trim().toUpperCase();
     if (!this.supportedPlatforms.has(platform)) {
-      throw new Error(`python_verifier_unsupported_platform:${platform || 'UNKNOWN'}`);
+      return this.deterministicFallback.verify(videoPath, campaignSpec, challenge);
+    }
+    if (!fs.existsSync(this.scriptPath)) {
+      throw new Error(`python_verifier_script_missing:${this.scriptPath}`);
     }
 
     const args = [

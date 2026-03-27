@@ -1067,7 +1067,9 @@ export async function accountRoutes(app) {
                 p.challenge_seen,
                 p.confidence,
                 p.video_url,
+                p.meta,
                 p.created_at,
+                s.platform,
                 c.title AS campaign_title
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
@@ -1124,7 +1126,9 @@ export async function accountRoutes(app) {
                 p.challenge_seen,
                 p.confidence,
                 p.video_url,
+                p.meta,
                 p.created_at,
+                s.platform,
                 c.title AS campaign_title
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
@@ -1155,9 +1159,12 @@ export async function accountRoutes(app) {
             const res = await client.query(`SELECT ctr.*,
                 c.title AS campaign_title,
                 c.platform,
+                c.delivery_model,
                 c.media_type,
                 c.media_text,
                 c.media_url,
+                c.execution_meta,
+                c.campaign_burst_mode,
                 c.payout_amount,
                 c.terms_keep_hours,
                 c.terms_min_views,

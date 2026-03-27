@@ -5,6 +5,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { Verifier, WorkerVerificationResult } from './verifier.js';
 import { platformAdapters } from './adapters.js';
+import { isCreatorPlatform } from '@prime/shared';
 
 function run(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
@@ -81,8 +82,10 @@ export class DeterministicVerifier implements Verifier {
       }
 
       const hash = crypto.createHash('sha256').update(fs.readFileSync(framePath)).digest('hex');
-      const decision = challengeSeen && observedViews > 0 ? 'VERIFIED' : 'MANUAL_REVIEW';
-      const confidence = challengeSeen && observedViews > 0 ? 0.85 : 0.55;
+      const hasPrimaryMetricEvidence =
+        observedViews > 0 || isCreatorPlatform(campaignSpec?.platform);
+      const decision = challengeSeen && hasPrimaryMetricEvidence ? 'VERIFIED' : 'MANUAL_REVIEW';
+      const confidence = challengeSeen && hasPrimaryMetricEvidence ? 0.85 : 0.55;
 
       return {
         observed_views: observedViews,
