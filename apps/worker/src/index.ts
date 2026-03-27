@@ -337,15 +337,15 @@ async function getEligibleCreators(
       COALESCE(ca.average_engagement_rate, 0)::numeric AS average_engagement_rate
     FROM creators c
     JOIN users u ON u.id = c.user_id
-    LEFT JOIN creator_accounts ca
+    JOIN creator_accounts ca
       ON ca.creator_id = c.id
      AND ca.platform = $1
      AND ca.active = TRUE
     WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
       AND u.status = 'ACTIVE'
       AND COALESCE(c.creator_score, 50) >= $2
+      AND NULLIF(BTRIM(COALESCE(ca.profile_url, ca.handle, '')), '') IS NOT NULL
     ORDER BY
-      CASE WHEN ca.id IS NULL THEN 1 ELSE 0 END ASC,
       COALESCE(c.creator_score, 50) DESC,
       COALESCE(c.delivery_reliability, 50) DESC,
       COALESCE(c.engagement_consistency, 50) DESC,
