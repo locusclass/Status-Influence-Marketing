@@ -671,6 +671,21 @@ export async function campaignRoutes(app) {
            )`);
             }
             if (role === 'DISTRIBUTOR') {
+                filters.push(`(
+          c.platform = 'WHATSAPP_STATUS'
+          OR EXISTS (
+            SELECT 1
+            FROM creators cr
+            JOIN creator_accounts ca
+              ON ca.creator_id = cr.id
+             AND ca.platform = c.platform
+             AND ca.active = TRUE
+            WHERE cr.user_id = $${idx}
+              AND NULLIF(BTRIM(COALESCE(ca.profile_url, ca.handle, '')), '') IS NOT NULL
+          )
+        )`);
+                params.push(authUser ?? '');
+                idx++;
                 filters.push(`(c.parent_campaign_id IS NOT NULL OR c.visibility='PUBLIC')`);
             }
             const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';

@@ -12,6 +12,13 @@ const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
     current_advertiser_viewers: z.number().int().min(0).optional(),
+    promoter_platforms: z
+        .array(z.object({
+        platform: z.enum(['TIKTOK', 'X']),
+        profile_url: z.string().trim().url().max(1024),
+    }))
+        .max(2)
+        .optional(),
 });
 const accountPasswordSchema = z.object({
     current_password: z.string().min(8),
@@ -112,6 +119,47 @@ function normalizeStringList(values) {
         .map((value) => String(value ?? '').trim())
         .filter((value) => value.length > 0)));
 }
+function normalizePromoterPlatformProfiles(value) {
+    if (!Array.isArray(value))
+        return [];
+    const normalized = new Map();
+    for (const entry of value) {
+        const platform = String(entry?.platform ?? '')
+            .trim()
+            .toUpperCase() === 'X'
+            ? 'X'
+            : String(entry?.platform ?? '')
+                .trim()
+                .toUpperCase() === 'TIKTOK'
+                ? 'TIKTOK'
+                : null;
+        const profileUrl = String(entry?.profile_url ?? '').trim();
+        if (!platform || !profileUrl)
+            continue;
+        normalized.set(platform, { platform, profile_url: profileUrl });
+    }
+    return [...normalized.values()];
+}
+function extractCreatorHandle(profileUrl) {
+    try {
+        const url = new URL(profileUrl);
+        const segments = url.pathname
+            .split('/')
+            .map((segment) => segment.trim())
+            .filter((segment) => segment.length > 0);
+        for (const segment of segments) {
+            if (segment.startsWith('@') && segment.length > 1) {
+                return segment.slice(1);
+            }
+        }
+        const reserved = new Set(['home', 'explore', 'search', 'status', 'video', 'embed', 'i']);
+        const candidate = segments.find((segment) => !reserved.has(segment.toLowerCase()));
+        return candidate?.replace(/^@+/, '') || null;
+    }
+    catch {
+        return null;
+    }
+}
 async function deleteAccountMedia(urls) {
     const objectNames = Array.from(new Set(urls
         .map((url) => extractFirebaseObjectNameFromUrl(url))
@@ -139,6 +187,122 @@ async function ensureUserProfilesTable(client) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+}
+async function ensureCreatorMarketingTables(client) {
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS creators (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      creator_score NUMERIC(6,2) NOT NULL DEFAULT 50,
+      historical_performance NUMERIC(6,2) NOT NULL DEFAULT 50,
+      delivery_reliability NUMERIC(6,2) NOT NULL DEFAULT 50,
+      engagement_consistency NUMERIC(6,2) NOT NULL DEFAULT 50,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_active_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS creator_accounts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      creator_id UUID NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
+      platform TEXT NOT NULL,
+      handle TEXT,
+      profile_url TEXT,
+      average_views INTEGER NOT NULL DEFAULT 0,
+      average_engagement_rate NUMERIC(8,4) NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS creator_accounts_creator_platform_unique
+    ON creator_accounts (creator_id, platform)
+  `);
+}
+async function ensureCreatorForUser(client, userId) {
+    const existing = await client.query(`
+    SELECT id
+    FROM creators
+    WHERE user_id=$1
+    LIMIT 1
+    `, [userId]);
+    if (existing.rows[0]?.id) {
+        return String(existing.rows[0].id);
+    }
+    const inserted = await client.query(`
+    INSERT INTO creators (
+      user_id,
+      creator_score,
+      historical_performance,
+      delivery_reliability,
+      engagement_consistency,
+      last_active_at
+    )
+    VALUES ($1, 50, 50, 50, 50, NOW())
+    ON CONFLICT (user_id)
+    DO UPDATE SET
+      updated_at = NOW(),
+      last_active_at = NOW()
+    RETURNING id
+    `, [userId]);
+    return String(inserted.rows[0].id);
+}
+async function replacePromoterPlatformProfiles(client, userId, profiles) {
+    await ensureCreatorMarketingTables(client);
+    const creatorId = await ensureCreatorForUser(client, userId);
+    const requestedPlatforms = profiles.map((entry) => entry.platform);
+    if (requestedPlatforms.length > 0) {
+        await client.query(`
+      DELETE FROM creator_accounts
+      WHERE creator_id=$1
+        AND platform IN ('TIKTOK', 'X')
+        AND NOT (platform = ANY($2::text[]))
+      `, [creatorId, requestedPlatforms]);
+    }
+    else {
+        await client.query(`
+      DELETE FROM creator_accounts
+      WHERE creator_id=$1
+        AND platform IN ('TIKTOK', 'X')
+      `, [creatorId]);
+    }
+    for (const profile of profiles) {
+        const handle = extractCreatorHandle(profile.profile_url);
+        await client.query(`
+      INSERT INTO creator_accounts (
+        creator_id,
+        platform,
+        handle,
+        profile_url,
+        active,
+        metadata,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        TRUE,
+        jsonb_build_object(
+          'qualified_via', 'profile_link',
+          'profile_link_submitted_at', NOW()
+        ),
+        NOW()
+      )
+      ON CONFLICT (creator_id, platform)
+      DO UPDATE SET
+        handle = EXCLUDED.handle,
+        profile_url = EXCLUDED.profile_url,
+        active = TRUE,
+        metadata = COALESCE(creator_accounts.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+        updated_at = NOW()
+      `, [creatorId, profile.platform, handle, profile.profile_url]);
+    }
 }
 async function usersHasColumn(client, columnName) {
     const res = await client.query(`
@@ -236,6 +400,7 @@ async function ensureAccountSchema(client) {
     await ensurePublicIdColumns(client);
     await ensureWhatsappColumns(client);
     await ensureUserProfilesTable(client);
+    await ensureCreatorMarketingTables(client);
     await client.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
@@ -380,7 +545,43 @@ export async function accountRoutes(app) {
         WHERE u.id = $1
         LIMIT 1
         `, [userId]);
-            return { profile: res.rows[0] ?? null };
+            const platformProfilesRes = await client.query(`
+        SELECT
+          ca.platform,
+          ca.profile_url,
+          ca.handle,
+          ca.active
+        FROM creators c
+        JOIN creator_accounts ca ON ca.creator_id = c.id
+        WHERE c.user_id = $1
+          AND ca.platform IN ('TIKTOK', 'X')
+        ORDER BY ca.platform ASC
+        `, [userId]);
+            const promoterPlatforms = [
+                {
+                    platform: 'WHATSAPP_STATUS',
+                    active: true,
+                    qualified: true,
+                    profile_url: null,
+                    handle: null,
+                },
+                ...platformProfilesRes.rows.map((row) => ({
+                    platform: String(row.platform ?? '').trim().toUpperCase(),
+                    active: Boolean(row.active),
+                    qualified: Boolean(row.active) &&
+                        String(row.profile_url ?? row.handle ?? '').trim().length > 0,
+                    profile_url: row.profile_url ? String(row.profile_url) : null,
+                    handle: row.handle ? String(row.handle) : null,
+                })),
+            ];
+            return {
+                profile: res.rows[0]
+                    ? {
+                        ...res.rows[0],
+                        promoter_platforms: promoterPlatforms,
+                    }
+                    : null,
+            };
         });
     });
     app.patch('/account/me', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -391,6 +592,8 @@ export async function accountRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         const body = parsed.data;
+        const shouldSyncPromoterPlatforms = Array.isArray(body.promoter_platforms);
+        const promoterPlatforms = normalizePromoterPlatformProfiles(body.promoter_platforms);
         return withTransaction(async (client) => {
             await client.query(`
           INSERT INTO user_profiles (user_id, full_name, updated_at)
@@ -420,6 +623,9 @@ export async function accountRoutes(app) {
                     return { error: 'advertiser_profile_required' };
                 }
                 await client.query('UPDATE users SET current_advertiser_viewers=$2 WHERE id=$1', [userId, Math.max(0, body.current_advertiser_viewers)]);
+            }
+            if (shouldSyncPromoterPlatforms) {
+                await replacePromoterPlatformProfiles(client, userId, promoterPlatforms);
             }
             return { ok: true };
         });
