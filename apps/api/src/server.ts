@@ -17,6 +17,7 @@ import {
 import {
   authRoutes,
   campaignRoutes,
+  campaignDraftRoutes,
   healthRoutes,
   paymentRoutes,
   uploadRoutes,
@@ -209,6 +210,7 @@ export function buildServer() {
     instance.register(healthRoutes);
     instance.register(authRoutes);
     instance.register(campaignRoutes);
+    instance.register(campaignDraftRoutes);
     instance.register(verificationRoutes);
     instance.register(uploadRoutes);
     instance.register(paymentRoutes);

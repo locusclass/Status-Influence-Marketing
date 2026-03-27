@@ -7,7 +7,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
-import { authRoutes, campaignRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
+import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
 export function buildServer() {
     const app = Fastify({
         pluginTimeout: Number(process.env.FASTIFY_PLUGIN_TIMEOUT ?? 30000),
@@ -165,6 +165,7 @@ export function buildServer() {
         instance.register(healthRoutes);
         instance.register(authRoutes);
         instance.register(campaignRoutes);
+        instance.register(campaignDraftRoutes);
         instance.register(verificationRoutes);
         instance.register(uploadRoutes);
         instance.register(paymentRoutes);
