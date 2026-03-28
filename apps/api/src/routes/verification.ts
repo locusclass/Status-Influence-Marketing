@@ -1,5 +1,9 @@
 import { FastifyInstance } from 'fastify';
-import { CreateVerificationSessionSchema, SubmitProofSchema } from '@prime/shared';
+import {
+  CreateVerificationSessionSchema,
+  PlatformAdapterSchema,
+  SubmitProofSchema,
+} from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
@@ -14,6 +18,9 @@ const SESSION_TTL_SECONDS = 10 * 60;
 const MIN_RECORDING_SECONDS = 58;
 const MAX_RECORDING_SECONDS = 75;
 const STEP_TIMING_LEEWAY_SECONDS = 12;
+const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
+  .map((platform) => `'${platform}'`)
+  .join(', ')}))`;
 
 const platformInstructionPool: Record<string, string[]> = {
   WHATSAPP_STATUS: [
@@ -193,7 +200,24 @@ function isAllowedProofVideoUrl(value: string): boolean {
   }
 }
 
+async function ensureVerificationSessionColumns(client: any) {
+  await ensurePublicIdColumns(client);
+  await client.query(`
+    DO $$ BEGIN
+      IF to_regclass('public.verification_sessions') IS NOT NULL THEN
+        ALTER TABLE verification_sessions DROP CONSTRAINT IF EXISTS verification_sessions_platform_check;
+        ALTER TABLE verification_sessions
+          ADD CONSTRAINT verification_sessions_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+      END IF;
+    END $$;
+  `);
+}
+
 export async function verificationRoutes(app: FastifyInstance) {
+  await withTransaction(async (client) => {
+    await ensureVerificationSessionColumns(client);
+  });
+
   const verificationRepo = new VerificationRepo();
   const jobRepo = new JobRepo();
 
@@ -215,7 +239,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     const expires_at = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
 
     const session = await withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
+      await ensureVerificationSessionColumns(client);
       const resolvedUserId = await resolveUserId(client, body.user_id);
       if (!resolvedUserId || authUser !== resolvedUserId) {
         return { error: 'unauthorized' } as any;

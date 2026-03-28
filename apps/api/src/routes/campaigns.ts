@@ -29,6 +29,9 @@ const PRIVATE_RATE_UGX = 25;
 const OPEN_RATE_UGX = 10;
 const PRIVATE_PLATFORM_FEE_PERCENT = 15;
 const OPEN_PLATFORM_FEE_PERCENT = 25;
+const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
+  .map((platform) => `'${platform}'`)
+  .join(', ')}))`;
 
 type CampaignStatusSummary = {
   campaign_status: string;
@@ -378,6 +381,32 @@ async function ensureCampaignColumns(client: any) {
     CREATE INDEX IF NOT EXISTS campaigns_bundle_root_campaign_id_idx
     ON campaigns (bundle_root_campaign_id)
   `);
+  await client.query(`
+    DO $$ BEGIN
+      IF to_regclass('public.campaigns') IS NOT NULL THEN
+        ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
+        ALTER TABLE campaigns
+          ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+      END IF;
+    END $$;
+  `);
+}
+
+function normalizeCampaignMutationError(message: string) {
+  if (message.startsWith('beneficiary_not_found')) return 'beneficiary_not_found';
+  if (message.startsWith('beneficiary_capacity_not_set')) {
+    return 'beneficiary_capacity_not_set';
+  }
+  if (message.startsWith('beneficiary_capacity_insufficient')) {
+    return 'beneficiary_capacity_insufficient';
+  }
+  if (message.startsWith('duplicate_bundle_platform')) {
+    return 'duplicate_bundle_platform';
+  }
+  if (message.includes('campaigns_platform_check')) {
+    return 'unsupported_platform';
+  }
+  return message;
 }
 
 async function usersHasColumn(client: any, columnName: string) {
@@ -1508,7 +1537,19 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
 
   app.post('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const body = CreateCampaignSchema.parse(request.body);
+    const parsedBody = CreateCampaignSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      request.log.warn(
+        {
+          issues: parsedBody.error.issues,
+          body: request.body,
+        },
+        'campaign_create_validation_failed'
+      );
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsedBody.error.issues };
+    }
+    const body = parsedBody.data;
     const authUser = (request.user as any)?.sub as string | undefined;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
@@ -1721,18 +1762,19 @@ export async function campaignRoutes(app: FastifyInstance) {
       });
     } catch (error: any) {
       const message = String(error?.message ?? 'campaign_create_failed');
+      const normalizedError = normalizeCampaignMutationError(message);
+      request.log.warn(
+        {
+          error,
+          detail: message,
+          body,
+        },
+        'campaign_create_failed'
+      );
       reply.code(400);
       return {
-        error: message.startsWith('beneficiary_not_found')
-          ? 'beneficiary_not_found'
-          : message.startsWith('beneficiary_capacity_not_set')
-            ? 'beneficiary_capacity_not_set'
-            : message.startsWith('beneficiary_capacity_insufficient')
-              ? 'beneficiary_capacity_insufficient'
-          : message.startsWith('duplicate_bundle_platform')
-            ? 'duplicate_bundle_platform'
-          : message,
-        detail: message,
+        error: normalizedError,
+        detail: normalizedError === message ? message : '',
       };
     }
     return campaign;
@@ -1976,18 +2018,11 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { campaign };
     } catch (error: any) {
       const message = String(error?.message ?? 'campaign_update_failed');
+      const normalizedError = normalizeCampaignMutationError(message);
       reply.code(400);
-        return {
-          error: message.startsWith('beneficiary_not_found')
-            ? 'beneficiary_not_found'
-          : message.startsWith('beneficiary_capacity_not_set')
-            ? 'beneficiary_capacity_not_set'
-            : message.startsWith('beneficiary_capacity_insufficient')
-              ? 'beneficiary_capacity_insufficient'
-          : message.startsWith('duplicate_bundle_platform')
-            ? 'duplicate_bundle_platform'
-          : message,
-        detail: message,
+      return {
+        error: normalizedError,
+        detail: normalizedError === message ? message : '',
       };
     }
   });

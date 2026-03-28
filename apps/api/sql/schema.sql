@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   assigned_distributor_id UUID REFERENCES users(id),
   assigned_phone TEXT,
   title TEXT NOT NULL,
-  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS')),
+  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X')),
   execution_mode TEXT NOT NULL DEFAULT 'PRIVATE_CONTRACT' CHECK (execution_mode IN ('PRIVATE_CONTRACT', 'OPEN_BUDGET')),
   visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK (visibility IN ('PUBLIC', 'PRIVATE')),
   payout_amount INTEGER NOT NULL,
@@ -374,7 +374,7 @@ END $$;
 DO $$ BEGIN
   ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
   ALTER TABLE campaigns
-    ADD CONSTRAINT campaigns_platform_check CHECK (platform IN ('WHATSAPP_STATUS'));
+    ADD CONSTRAINT campaigns_platform_check CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X'));
 END $$;
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -437,7 +437,7 @@ CREATE TABLE IF NOT EXISTS verification_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id),
   campaign_id UUID NOT NULL REFERENCES campaigns(id),
-  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS')),
+  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X')),
   challenge_code TEXT NOT NULL,
   challenge_phrase TEXT NOT NULL,
   script JSONB,
@@ -491,7 +491,7 @@ END $$;
 DO $$ BEGIN
   ALTER TABLE verification_sessions DROP CONSTRAINT IF EXISTS verification_sessions_platform_check;
   ALTER TABLE verification_sessions
-    ADD CONSTRAINT verification_sessions_platform_check CHECK (platform IN ('WHATSAPP_STATUS'));
+    ADD CONSTRAINT verification_sessions_platform_check CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X'));
 END $$;
 
 CREATE TABLE IF NOT EXISTS trust_scores (
