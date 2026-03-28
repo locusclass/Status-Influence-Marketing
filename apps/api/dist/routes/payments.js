@@ -187,13 +187,16 @@ export async function paymentRoutes(app) {
         if (!txn) {
             return { ok: false, error: 'txn_not_found' };
         }
+        const txnPayload = (txn.raw_payload ?? rawPayload ?? {});
         const statusText = normalizeTransactionStatus(verified);
         const amount = Number(verified.amount ?? 0);
-        const currency = String(verified.currency ?? txn.currency ?? 'UGX').toUpperCase();
-        if (amount !== Number(txn.amount ?? 0) || currency !== 'UGX') {
+        const currency = String(verified.currency ?? '').trim().toUpperCase();
+        const expectedCurrency = String(txnPayload.payment_currency ?? 'UGX')
+            .trim()
+            .toUpperCase();
+        if (amount !== Number(txn.amount ?? 0) || currency !== expectedCurrency) {
             return { ok: false, error: 'amount_mismatch' };
         }
-        const txnPayload = (txn.raw_payload ?? rawPayload ?? {});
         if (txnPayload?.kind === 'WALLET_DEPOSIT') {
             if (txn.status === 'COMPLETED') {
                 return { ok: true, duplicate: true, type: 'wallet_deposit' };

@@ -126,6 +126,29 @@ function parseDateRange(from, to) {
         to: end && !isNaN(end.getTime()) ? end.toISOString() : null
     };
 }
+function parseNumberRange(min, max) {
+    const minValue = Number(min);
+    const maxValue = Number(max);
+    return {
+        min: Number.isFinite(minValue) ? minValue : null,
+        max: Number.isFinite(maxValue) ? maxValue : null,
+    };
+}
+async function ensureCampaignDraftsTable(client) {
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_drafts (
+      id UUID PRIMARY KEY,
+      advertiser_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      payload JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaign_creation_drafts_updated_at_idx
+      ON campaign_creation_drafts (updated_at DESC)
+  `);
+}
 async function logAudit(client, actorId, action, targetType, targetId, meta) {
     await client.query(`INSERT INTO admin_audit_logs (actor_id, action, target_type, target_id, meta)
      VALUES ($1,$2,$3,$4,$5)`, [actorId || null, action, targetType, targetId, meta ?? null]);
@@ -389,21 +412,371 @@ export async function adminRoutes(app) {
     });
     app.get('/admin/overview', { preHandler: [app.adminOnly] }, async () => {
         return withTransaction(async (client) => {
+            await ensureCampaignDraftsTable(client);
             const users = await client.query('SELECT COUNT(*)::int AS count FROM users');
             const campaigns = await client.query('SELECT COUNT(*)::int AS count FROM campaigns');
             const proofs = await client.query('SELECT COUNT(*)::int AS count FROM proofs');
+            const verificationSessions = await client.query('SELECT COUNT(*)::int AS count FROM verification_sessions');
             const payouts = await client.query('SELECT COUNT(*)::int AS count FROM payout_requests');
             const escrows = await client.query('SELECT COUNT(*)::int AS count FROM escrow_ledger');
+            const campaignDrafts = await client.query('SELECT COUNT(*)::int AS count FROM campaign_creation_drafts');
+            const walletWithdrawals = await client.query('SELECT COUNT(*)::int AS count FROM wallet_withdrawals');
+            const trustProfiles = await client.query('SELECT COUNT(*)::int AS count FROM trust_scores');
+            const deviceFingerprints = await client.query('SELECT COUNT(*)::int AS count FROM device_fingerprints');
             const providerTransactions = await client.query('SELECT COUNT(*)::int AS count FROM pesapal_transactions');
             return {
                 users: users.rows[0]?.count ?? 0,
                 campaigns: campaigns.rows[0]?.count ?? 0,
                 proofs: proofs.rows[0]?.count ?? 0,
+                verification_sessions: verificationSessions.rows[0]?.count ?? 0,
                 payouts: payouts.rows[0]?.count ?? 0,
                 escrows: escrows.rows[0]?.count ?? 0,
+                campaign_drafts: campaignDrafts.rows[0]?.count ?? 0,
+                wallet_withdrawals: walletWithdrawals.rows[0]?.count ?? 0,
+                trust_profiles: trustProfiles.rows[0]?.count ?? 0,
+                device_fingerprints: deviceFingerprints.rows[0]?.count ?? 0,
                 flutterwave_transactions: providerTransactions.rows[0]?.count ?? 0,
                 pesapal_transactions: providerTransactions.rows[0]?.count ?? 0
             };
+        });
+    });
+    app.get('/admin/verification-sessions', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const { limit, offset } = parsePaging(query);
+        const range = parseDateRange(query?.from, query?.to);
+        return withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (query?.q) {
+                conditions.push(`(s.id::text ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx} OR c.title ILIKE $${idx} OR c.public_id ILIKE $${idx} OR s.challenge_code ILIKE $${idx} OR s.challenge_phrase ILIKE $${idx})`);
+                params.push(`%${query.q}%`);
+                idx++;
+            }
+            if (query?.platform) {
+                conditions.push(`s.platform = $${idx}`);
+                params.push(query.platform);
+                idx++;
+            }
+            if (query?.state) {
+                conditions.push(`(CASE WHEN p.id IS NOT NULL THEN 'PROOF_SUBMITTED' WHEN s.expires_at < now() THEN 'EXPIRED' ELSE 'ACTIVE' END) = $${idx}`);
+                params.push(query.state);
+                idx++;
+            }
+            if (query?.proof_status) {
+                conditions.push(`COALESCE(p.status, 'NONE') = $${idx}`);
+                params.push(query.proof_status);
+                idx++;
+            }
+            if (range.from) {
+                conditions.push(`s.created_at >= $${idx}`);
+                params.push(range.from);
+                idx++;
+            }
+            if (range.to) {
+                conditions.push(`s.created_at <= $${idx}`);
+                params.push(range.to);
+                idx++;
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`
+        SELECT
+          s.*,
+          u.email AS user_email,
+          u.phone AS user_phone,
+          u.public_id AS user_public_id,
+          u.role AS user_role,
+          c.title AS campaign_title,
+          c.public_id AS campaign_public_id,
+          p.id AS proof_id,
+          p.status AS proof_status,
+          p.decision AS proof_decision,
+          p.created_at AS proof_created_at,
+          CASE
+            WHEN p.id IS NOT NULL THEN 'PROOF_SUBMITTED'
+            WHEN s.expires_at < now() THEN 'EXPIRED'
+            ELSE 'ACTIVE'
+          END AS session_state
+        FROM verification_sessions s
+        JOIN users u ON u.id = s.user_id
+        JOIN campaigns c ON c.id = s.campaign_id
+        LEFT JOIN proofs p ON p.session_id = s.id
+        ${where}
+        ORDER BY s.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
+            return { sessions: res.rows };
+        });
+    });
+    app.get('/admin/campaign-drafts', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const { limit, offset } = parsePaging(query);
+        const range = parseDateRange(query?.from, query?.to);
+        return withTransaction(async (client) => {
+            await ensureCampaignDraftsTable(client);
+            await ensurePublicIdColumns(client);
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (query?.q) {
+                conditions.push(`(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx} OR d.id::text ILIKE $${idx} OR COALESCE(d.payload->>'title', '') ILIKE $${idx})`);
+                params.push(`%${query.q}%`);
+                idx++;
+            }
+            if (range.from) {
+                conditions.push(`d.updated_at >= $${idx}`);
+                params.push(range.from);
+                idx++;
+            }
+            if (range.to) {
+                conditions.push(`d.updated_at <= $${idx}`);
+                params.push(range.to);
+                idx++;
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`
+        SELECT
+          d.*,
+          u.email AS advertiser_email,
+          u.phone AS advertiser_phone,
+          u.public_id AS advertiser_public_id
+        FROM campaign_creation_drafts d
+        JOIN users u ON u.id = d.advertiser_id
+        ${where}
+        ORDER BY d.updated_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
+            return {
+                drafts: res.rows.map((row) => {
+                    const payload = row.payload && typeof row.payload === 'object' && !Array.isArray(row.payload)
+                        ? row.payload
+                        : {};
+                    return {
+                        ...row,
+                        title: String(payload.title ?? '').trim(),
+                        active_platform: String(payload.active_platform ?? '').trim().toUpperCase(),
+                        selected_platforms: Array.isArray(payload.selected_platforms)
+                            ? payload.selected_platforms
+                            : [],
+                        step: Number.isFinite(Number(payload.step)) ? Math.max(0, Math.trunc(Number(payload.step))) : 0,
+                        saved_at: payload.saved_at ?? null,
+                        server_updated_at: payload.server_updated_at ?? null,
+                    };
+                }),
+            };
+        });
+    });
+    app.get('/admin/trust', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const { limit, offset } = parsePaging(query);
+        const range = parseDateRange(query?.from, query?.to);
+        const scoreRange = parseNumberRange(query?.min_score, query?.max_score);
+        return withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (query?.q) {
+                conditions.push(`(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx} OR u.id::text ILIKE $${idx})`);
+                params.push(`%${query.q}%`);
+                idx++;
+            }
+            if (query?.role) {
+                conditions.push(`u.role = $${idx}`);
+                params.push(query.role);
+                idx++;
+            }
+            if (query?.event_type) {
+                conditions.push(`COALESCE(latest.event_type, 'NONE') = $${idx}`);
+                params.push(query.event_type);
+                idx++;
+            }
+            if (scoreRange.min !== null) {
+                conditions.push(`COALESCE(ts.score, 50) >= $${idx}`);
+                params.push(scoreRange.min);
+                idx++;
+            }
+            if (scoreRange.max !== null) {
+                conditions.push(`COALESCE(ts.score, 50) <= $${idx}`);
+                params.push(scoreRange.max);
+                idx++;
+            }
+            if (range.from) {
+                conditions.push(`COALESCE(latest.created_at, ts.updated_at, u.created_at) >= $${idx}`);
+                params.push(range.from);
+                idx++;
+            }
+            if (range.to) {
+                conditions.push(`COALESCE(latest.created_at, ts.updated_at, u.created_at) <= $${idx}`);
+                params.push(range.to);
+                idx++;
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`
+        SELECT
+          u.id AS user_id,
+          u.public_id,
+          u.email,
+          u.phone,
+          u.role,
+          COALESCE(ts.score, 50)::int AS trust_score,
+          ts.updated_at AS trust_updated_at,
+          latest.event_type AS latest_event_type,
+          latest.delta AS latest_event_delta,
+          latest.created_at AS latest_event_at,
+          COALESCE(event_counts.verified_count, 0)::int AS verified_count,
+          COALESCE(event_counts.rejected_count, 0)::int AS rejected_count,
+          COALESCE(event_counts.manual_review_count, 0)::int AS manual_review_count,
+          COALESCE(fp.fingerprint_count, 0)::int AS fingerprint_count
+        FROM users u
+        LEFT JOIN trust_scores ts ON ts.user_id = u.id
+        LEFT JOIN LATERAL (
+          SELECT event_type, delta, created_at
+          FROM trust_events te
+          WHERE te.user_id = u.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) latest ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*) FILTER (WHERE event_type = 'VERIFIED') AS verified_count,
+            COUNT(*) FILTER (WHERE event_type = 'REJECTED') AS rejected_count,
+            COUNT(*) FILTER (WHERE event_type = 'MANUAL_REVIEW') AS manual_review_count
+          FROM trust_events te
+          WHERE te.user_id = u.id
+        ) event_counts ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS fingerprint_count
+          FROM device_fingerprints df
+          WHERE df.user_id = u.id
+        ) fp ON TRUE
+        ${where}
+        ORDER BY COALESCE(ts.updated_at, latest.created_at, u.created_at) DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
+            return { trust: res.rows };
+        });
+    });
+    app.get('/admin/device-fingerprints', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const { limit, offset } = parsePaging(query);
+        const range = parseDateRange(query?.from, query?.to);
+        return withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (query?.q) {
+                conditions.push(`(df.id::text ILIKE $${idx} OR df.fingerprint_hash ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx})`);
+                params.push(`%${query.q}%`);
+                idx++;
+            }
+            if (query?.role) {
+                conditions.push(`u.role = $${idx}`);
+                params.push(query.role);
+                idx++;
+            }
+            if (range.from) {
+                conditions.push(`df.created_at >= $${idx}`);
+                params.push(range.from);
+                idx++;
+            }
+            if (range.to) {
+                conditions.push(`df.created_at <= $${idx}`);
+                params.push(range.to);
+                idx++;
+            }
+            if (query?.collision_only === 'true') {
+                conditions.push(`COALESCE(collision.user_count, 0) > 1`);
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`
+        SELECT
+          df.*,
+          u.email,
+          u.phone,
+          u.public_id,
+          u.role,
+          COALESCE(collision.user_count, 0)::int AS collision_user_count,
+          COALESCE(collision.record_count, 0)::int AS collision_record_count
+        FROM device_fingerprints df
+        JOIN users u ON u.id = df.user_id
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(DISTINCT df2.user_id) AS user_count,
+            COUNT(*) AS record_count
+          FROM device_fingerprints df2
+          WHERE df2.fingerprint_hash = df.fingerprint_hash
+        ) collision ON TRUE
+        ${where}
+        ORDER BY df.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
+            return { fingerprints: res.rows };
+        });
+    });
+    app.get('/admin/wallet-withdrawals', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const { limit, offset } = parsePaging(query);
+        const range = parseDateRange(query?.from, query?.to);
+        const amountRange = parseNumberRange(query?.min_amount, query?.max_amount);
+        return withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (query?.q) {
+                conditions.push(`(ww.id::text ILIKE $${idx} OR ww.pesapal_reference ILIKE $${idx} OR ww.receiver_phone ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx})`);
+                params.push(`%${query.q}%`);
+                idx++;
+            }
+            if (query?.status) {
+                conditions.push(`ww.status = $${idx}`);
+                params.push(query.status);
+                idx++;
+            }
+            if (query?.network) {
+                conditions.push(`COALESCE(ww.mobile_money_network, '') = $${idx}`);
+                params.push(query.network);
+                idx++;
+            }
+            if (amountRange.min !== null) {
+                conditions.push(`ww.amount >= $${idx}`);
+                params.push(amountRange.min);
+                idx++;
+            }
+            if (amountRange.max !== null) {
+                conditions.push(`ww.amount <= $${idx}`);
+                params.push(amountRange.max);
+                idx++;
+            }
+            if (range.from) {
+                conditions.push(`ww.created_at >= $${idx}`);
+                params.push(range.from);
+                idx++;
+            }
+            if (range.to) {
+                conditions.push(`ww.created_at <= $${idx}`);
+                params.push(range.to);
+                idx++;
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`
+        SELECT
+          ww.*,
+          u.email AS user_email,
+          u.phone AS user_phone,
+          u.public_id AS user_public_id,
+          w.balance AS wallet_balance
+        FROM wallet_withdrawals ww
+        JOIN users u ON u.id = ww.user_id
+        JOIN wallets w ON w.id = ww.wallet_id
+        ${where}
+        ORDER BY ww.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
+            return { withdrawals: res.rows };
         });
     });
     app.get('/admin/users', { preHandler: [app.adminOnly] }, async (request) => {

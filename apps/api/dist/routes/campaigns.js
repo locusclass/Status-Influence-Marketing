@@ -6,6 +6,7 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import { config, hasValidFlutterwaveKeys } from '../config.js';
 import { createHostedPayment } from '../services/flutterwave.js';
+import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
 const PRIVATE_RATE_UGX = 25;
@@ -1619,7 +1620,6 @@ export async function campaignRoutes(app) {
         const fundSource = (body.fund_source ?? 'FLUTTERWAVE') === 'PESAPAL'
             ? 'FLUTTERWAVE'
             : (body.fund_source ?? 'FLUTTERWAVE');
-        const paymentCurrency = 'UGX';
         const browserOrigin = getBrowserOrigin(request);
         const webReturnUrl = resolveWebRedirectUrl(body.return_url, browserOrigin, '/payment/success');
         const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
@@ -1640,9 +1640,10 @@ export async function campaignRoutes(app) {
                 reply.code(403);
                 return { error: 'forbidden' };
             }
-            const userEmailRes = await client.query('SELECT email, phone, preferred_currency FROM users WHERE id=$1', [authUser]);
+            const userEmailRes = await client.query('SELECT email, phone, preferred_currency, country FROM users WHERE id=$1', [authUser]);
             const userEmail = userEmailRes.rows?.[0]?.email;
             const userPhone = userEmailRes.rows?.[0]?.phone;
+            const userCountry = userEmailRes.rows?.[0]?.country;
             const preferredCurrency = userEmailRes.rows?.[0]?.preferred_currency;
             if (fundSource === 'FLUTTERWAVE' && !userEmail) {
                 reply.code(400);
@@ -1706,6 +1707,8 @@ export async function campaignRoutes(app) {
                 reply.code(503);
                 return { error: 'flutterwave_not_configured' };
             }
+            const checkoutProfile = resolveFlutterwaveCheckoutProfile(userCountry);
+            const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
                 escrow_id: escrow.id,
@@ -1716,9 +1719,10 @@ export async function campaignRoutes(app) {
                     kind: 'CAMPAIGN_BUNDLE_FUNDING',
                     bundle_id: bundle.bundle_id,
                     bundle_root_campaign_id: bundle.bundle_root_campaign_id,
+                    country: checkoutProfile.country,
+                    payment_currency: paymentCurrency,
                     return_url: callbackUrl,
                     cancel_url: cancellationUrl,
-                    network: body.network ?? 'MTN',
                 },
             });
             const checkoutMeta = {
@@ -1726,9 +1730,10 @@ export async function campaignRoutes(app) {
                 kind: 'CAMPAIGN_BUNDLE_FUNDING',
                 bundle_id: bundle.bundle_id,
                 bundle_root_campaign_id: bundle.bundle_root_campaign_id,
+                country: checkoutProfile.country,
+                payment_currency: paymentCurrency,
                 return_url: callbackUrl,
                 cancel_url: cancellationUrl,
-                network: body.network ?? 'MTN',
             };
             let hostedCheckout;
             try {
@@ -1736,6 +1741,7 @@ export async function campaignRoutes(app) {
                     txRef: merchantReference,
                     amount: body.amount,
                     currency: paymentCurrency,
+                    paymentOptions: checkoutProfile.paymentOptions,
                     redirectUrl: callbackUrl,
                     customer: {
                         email: userEmail,
@@ -1771,6 +1777,9 @@ export async function campaignRoutes(app) {
                 JSON.stringify({
                     ...checkoutMeta,
                     checkout_url: hostedCheckout.checkoutUrl,
+                    payment_options: checkoutProfile.paymentOptions,
+                    supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                    mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
                 }),
             ]);
             const checkoutPayload = {
@@ -1779,7 +1788,10 @@ export async function campaignRoutes(app) {
                 tx_ref: merchantReference,
                 amount: body.amount,
                 currency: paymentCurrency,
-                payment_options: 'card,mobilemoneyuganda',
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                country: checkoutProfile.country,
                 redirect_url: callbackUrl,
                 meta: checkoutMeta,
             };
@@ -1817,7 +1829,6 @@ export async function campaignRoutes(app) {
         const fundSource = (body.fund_source ?? 'FLUTTERWAVE') === 'PESAPAL'
             ? 'FLUTTERWAVE'
             : (body.fund_source ?? 'FLUTTERWAVE');
-        const paymentCurrency = 'UGX';
         const browserOrigin = getBrowserOrigin(request);
         const webReturnUrl = resolveWebRedirectUrl(body.return_url, browserOrigin, '/payment/success');
         const webCancelUrl = resolveWebRedirectUrl(body.cancel_url, browserOrigin, '/payment/cancel');
@@ -1831,10 +1842,11 @@ export async function campaignRoutes(app) {
             const authUser = request.user?.sub;
             const role = request.user?.role;
             const userEmailRes = authUser
-                ? await client.query('SELECT email, phone, preferred_currency FROM users WHERE id=$1', [authUser])
+                ? await client.query('SELECT email, phone, preferred_currency, country FROM users WHERE id=$1', [authUser])
                 : null;
             const userEmail = userEmailRes?.rows?.[0]?.email;
             const userPhone = userEmailRes?.rows?.[0]?.phone;
+            const userCountry = userEmailRes?.rows?.[0]?.country;
             const preferredCurrency = userEmailRes?.rows?.[0]?.preferred_currency;
             if (fundSource === 'FLUTTERWAVE' && !userEmail) {
                 reply.code(400);
@@ -1899,6 +1911,8 @@ export async function campaignRoutes(app) {
                 reply.code(503);
                 return { error: 'flutterwave_not_configured' };
             }
+            const checkoutProfile = resolveFlutterwaveCheckoutProfile(userCountry);
+            const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
                 escrow_id: escrow.id,
@@ -1909,9 +1923,10 @@ export async function campaignRoutes(app) {
                     kind: 'CAMPAIGN_FUNDING',
                     campaign_id: campaign.id,
                     ...(bundleId ? { bundle_id: bundleId, bundle_root_campaign_id: escrowOwnerId } : {}),
+                    country: checkoutProfile.country,
+                    payment_currency: paymentCurrency,
                     return_url: callbackUrl,
                     cancel_url: cancellationUrl,
-                    network: body.network ?? 'MTN',
                 },
             });
             const checkoutMeta = {
@@ -1919,9 +1934,10 @@ export async function campaignRoutes(app) {
                 kind: 'CAMPAIGN_FUNDING',
                 campaign_id: campaign.id,
                 ...(bundleId ? { bundle_id: bundleId, bundle_root_campaign_id: escrowOwnerId } : {}),
+                country: checkoutProfile.country,
+                payment_currency: paymentCurrency,
                 return_url: callbackUrl,
                 cancel_url: cancellationUrl,
-                network: body.network ?? 'MTN',
             };
             let hostedCheckout;
             try {
@@ -1929,6 +1945,7 @@ export async function campaignRoutes(app) {
                     txRef: merchantReference,
                     amount: body.amount,
                     currency: paymentCurrency,
+                    paymentOptions: checkoutProfile.paymentOptions,
                     redirectUrl: callbackUrl,
                     customer: {
                         email: userEmail,
@@ -1959,6 +1976,9 @@ export async function campaignRoutes(app) {
                 JSON.stringify({
                     ...checkoutMeta,
                     checkout_url: hostedCheckout.checkoutUrl,
+                    payment_options: checkoutProfile.paymentOptions,
+                    supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                    mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
                 }),
             ]);
             const checkoutPayload = {
@@ -1967,7 +1987,10 @@ export async function campaignRoutes(app) {
                 tx_ref: merchantReference,
                 amount: body.amount,
                 currency: paymentCurrency,
-                payment_options: 'card,mobilemoneyuganda',
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                country: checkoutProfile.country,
                 redirect_url: callbackUrl,
                 meta: checkoutMeta,
             };

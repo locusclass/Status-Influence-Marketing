@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { createHostedPayment, requestPayout } from '../services/flutterwave.js';
+import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
@@ -1036,12 +1037,13 @@ export async function accountRoutes(app) {
             return { error: 'flutterwave_not_configured' };
         }
         const result = await withTransaction(async (client) => {
-            const userRes = await client.query('SELECT email, phone, preferred_currency FROM users WHERE id=$1 LIMIT 1', [userId]);
+            const userRes = await client.query('SELECT email, phone, preferred_currency, country FROM users WHERE id=$1 LIMIT 1', [userId]);
             const user = userRes.rows[0];
             if (!user?.email) {
                 reply.code(400);
                 return { error: 'user_email_missing' };
             }
+            const checkoutProfile = resolveFlutterwaveCheckoutProfile(user.country);
             const wallet = await ensureWalletForUser(client, userId);
             const reference = `WDP-${uuid()}`;
             const txn = await client.query(`
@@ -1063,6 +1065,8 @@ export async function accountRoutes(app) {
                     kind: 'WALLET_DEPOSIT',
                     user_id: userId,
                     wallet_id: wallet.id,
+                    country: checkoutProfile.country,
+                    payment_currency: checkoutProfile.currency,
                     return_url: callbackUrl,
                     cancel_url: cancellationUrl,
                 },
@@ -1072,16 +1076,18 @@ export async function accountRoutes(app) {
                 merchant_reference: reference,
                 kind: 'WALLET_DEPOSIT',
                 wallet_id: wallet.id,
+                country: checkoutProfile.country,
+                payment_currency: checkoutProfile.currency,
                 return_url: callbackUrl,
                 cancel_url: cancellationUrl,
-                network: parsed.data.network ?? 'MTN',
             };
             let hostedCheckout;
             try {
                 hostedCheckout = await createHostedPayment({
                     txRef: reference,
                     amount: parsed.data.amount,
-                    currency: 'UGX',
+                    currency: checkoutProfile.currency,
+                    paymentOptions: checkoutProfile.paymentOptions,
                     redirectUrl: callbackUrl,
                     customer: {
                         email: String(user.email),
@@ -1112,6 +1118,9 @@ export async function accountRoutes(app) {
                 JSON.stringify({
                     ...checkoutMeta,
                     checkout_url: hostedCheckout.checkoutUrl,
+                    payment_options: checkoutProfile.paymentOptions,
+                    supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                    mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
                 }),
             ]);
             const checkoutPayload = {
@@ -1119,8 +1128,11 @@ export async function accountRoutes(app) {
                 checkout_url: hostedCheckout.checkoutUrl,
                 tx_ref: reference,
                 amount: parsed.data.amount,
-                currency: 'UGX',
-                payment_options: 'card,mobilemoneyuganda',
+                currency: checkoutProfile.currency,
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                country: checkoutProfile.country,
                 redirect_url: callbackUrl,
                 meta: checkoutMeta,
             };
