@@ -50,6 +50,12 @@ function readCheckoutUrl(payload: Record<string, any>) {
   return null;
 }
 
+export function isHostedCheckoutCompatibilityError(detail: string) {
+  return detail.includes(
+    'Flutterwave hosted checkout is using the v3 /payments API'
+  );
+}
+
 async function getAccessToken() {
   if (!hasFlutterwaveClientCredentials()) {
     throw new Error('Flutterwave client credentials are not configured');

@@ -17,6 +17,7 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import { config, hasValidFlutterwaveKeys } from '../config.js';
 import { createHostedPayment } from '../services/flutterwave.js';
+import { isHostedCheckoutCompatibilityError } from '../services/flutterwave.js';
 import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
@@ -2358,7 +2359,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           },
           `flutterwave_checkout_failed: ${detail}`
         );
-        reply.code(502);
+        reply.code(isHostedCheckoutCompatibilityError(detail) ? 400 : 502);
         return { error: 'flutterwave_checkout_failed', detail };
       }
       if (!hostedCheckout.checkoutUrl) {
@@ -2593,7 +2594,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           { error, detail, campaign: campaign.id, tx_ref: merchantReference },
           `flutterwave_checkout_failed: ${detail}`
         );
-        reply.code(502);
+        reply.code(isHostedCheckoutCompatibilityError(detail) ? 400 : 502);
         return { error: 'flutterwave_checkout_failed', detail };
       }
       if (!hostedCheckout.checkoutUrl) {

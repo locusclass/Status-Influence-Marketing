@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { createHostedPayment, requestPayout } from '../services/flutterwave.js';
+import {
+  createHostedPayment,
+  isHostedCheckoutCompatibilityError,
+  requestPayout,
+} from '../services/flutterwave.js';
 import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
@@ -1437,7 +1441,7 @@ export async function accountRoutes(app: FastifyInstance) {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         request.log.error({ error, detail, reference }, `flutterwave_checkout_failed: ${detail}`);
-        reply.code(502);
+        reply.code(isHostedCheckoutCompatibilityError(detail) ? 400 : 502);
         return { error: 'flutterwave_checkout_failed', detail };
       }
       if (!hostedCheckout.checkoutUrl) {
