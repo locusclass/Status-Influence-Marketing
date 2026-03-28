@@ -4,15 +4,17 @@ import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
-import { config, hasValidFlutterwaveKeys } from '../config.js';
-import { createHostedPayment } from '../services/flutterwave.js';
-import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
+import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
 const PRIVATE_RATE_UGX = 25;
 const OPEN_RATE_UGX = 10;
 const PRIVATE_PLATFORM_FEE_PERCENT = 15;
 const OPEN_PLATFORM_FEE_PERCENT = 25;
+const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
+    .map((platform) => `'${platform}'`)
+    .join(', ')}))`;
 function normalizePhone(input) {
     return input.replace(/[^\d+]/g, '').trim();
 }
@@ -253,6 +255,32 @@ async function ensureCampaignColumns(client) {
     CREATE INDEX IF NOT EXISTS campaigns_bundle_root_campaign_id_idx
     ON campaigns (bundle_root_campaign_id)
   `);
+    await client.query(`
+    DO $$ BEGIN
+      IF to_regclass('public.campaigns') IS NOT NULL THEN
+        ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
+        ALTER TABLE campaigns
+          ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+      END IF;
+    END $$;
+  `);
+}
+function normalizeCampaignMutationError(message) {
+    if (message.startsWith('beneficiary_not_found'))
+        return 'beneficiary_not_found';
+    if (message.startsWith('beneficiary_capacity_not_set')) {
+        return 'beneficiary_capacity_not_set';
+    }
+    if (message.startsWith('beneficiary_capacity_insufficient')) {
+        return 'beneficiary_capacity_insufficient';
+    }
+    if (message.startsWith('duplicate_bundle_platform')) {
+        return 'duplicate_bundle_platform';
+    }
+    if (message.includes('campaigns_platform_check')) {
+        return 'unsupported_platform';
+    }
+    return message;
 }
 async function usersHasColumn(client, columnName) {
     const res = await client.query(`
@@ -1140,7 +1168,16 @@ export async function campaignRoutes(app) {
         return summary;
     });
     app.post('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const body = CreateCampaignSchema.parse(request.body);
+        const parsedBody = CreateCampaignSchema.safeParse(request.body);
+        if (!parsedBody.success) {
+            request.log.warn({
+                issues: parsedBody.error.issues,
+                body: request.body,
+            }, 'campaign_create_validation_failed');
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsedBody.error.issues };
+        }
+        const body = parsedBody.data;
         const authUser = request.user?.sub;
         const role = request.user?.role;
         if (!authUser) {
@@ -1296,18 +1333,16 @@ export async function campaignRoutes(app) {
         }
         catch (error) {
             const message = String(error?.message ?? 'campaign_create_failed');
+            const normalizedError = normalizeCampaignMutationError(message);
+            request.log.warn({
+                error,
+                detail: message,
+                body,
+            }, 'campaign_create_failed');
             reply.code(400);
             return {
-                error: message.startsWith('beneficiary_not_found')
-                    ? 'beneficiary_not_found'
-                    : message.startsWith('beneficiary_capacity_not_set')
-                        ? 'beneficiary_capacity_not_set'
-                        : message.startsWith('beneficiary_capacity_insufficient')
-                            ? 'beneficiary_capacity_insufficient'
-                            : message.startsWith('duplicate_bundle_platform')
-                                ? 'duplicate_bundle_platform'
-                                : message,
-                detail: message,
+                error: normalizedError,
+                detail: normalizedError === message ? message : '',
             };
         }
         return campaign;
@@ -1496,18 +1531,11 @@ export async function campaignRoutes(app) {
         }
         catch (error) {
             const message = String(error?.message ?? 'campaign_update_failed');
+            const normalizedError = normalizeCampaignMutationError(message);
             reply.code(400);
             return {
-                error: message.startsWith('beneficiary_not_found')
-                    ? 'beneficiary_not_found'
-                    : message.startsWith('beneficiary_capacity_not_set')
-                        ? 'beneficiary_capacity_not_set'
-                        : message.startsWith('beneficiary_capacity_insufficient')
-                            ? 'beneficiary_capacity_insufficient'
-                            : message.startsWith('duplicate_bundle_platform')
-                                ? 'duplicate_bundle_platform'
-                                : message,
-                detail: message,
+                error: normalizedError,
+                detail: normalizedError === message ? message : '',
             };
         }
     });
@@ -1703,11 +1731,11 @@ export async function campaignRoutes(app) {
                     wallet_reference: reference,
                 };
             }
-            if (!hasValidFlutterwaveKeys()) {
+            if (!hasFlutterwaveClientCredentials()) {
                 reply.code(503);
                 return { error: 'flutterwave_not_configured' };
             }
-            const checkoutProfile = resolveFlutterwaveCheckoutProfile(userCountry);
+            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(userCountry, { cardEnabled: hasFlutterwaveEncryptionKey() });
             const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -1735,64 +1763,42 @@ export async function campaignRoutes(app) {
                 return_url: callbackUrl,
                 cancel_url: cancellationUrl,
             };
-            let hostedCheckout;
-            try {
-                hostedCheckout = await createHostedPayment({
-                    txRef: merchantReference,
-                    amount: body.amount,
-                    currency: paymentCurrency,
-                    paymentOptions: checkoutProfile.paymentOptions,
-                    redirectUrl: callbackUrl,
-                    customer: {
-                        email: userEmail,
-                        name: `${firstName} User`.trim(),
-                        phoneNumber: userPhone ?? undefined,
-                    },
-                    customizations: {
-                        title: 'Prime Checkout',
-                        description: `Campaign funding: ${bundle.title}`,
-                    },
-                    meta: checkoutMeta,
-                });
-            }
-            catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                request.log.error({
-                    error,
-                    detail,
-                    bundle: bundle.bundle_id,
-                    tx_ref: merchantReference,
-                }, `flutterwave_checkout_failed: ${detail}`);
-                reply.code(502);
-                return { error: 'flutterwave_checkout_failed', detail };
-            }
-            if (!hostedCheckout.checkoutUrl) {
-                reply.code(502);
-                return { error: 'flutterwave_missing_checkout_link' };
-            }
             await client.query(`UPDATE pesapal_transactions
          SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
          WHERE merchant_reference=$1`, [
                 merchantReference,
                 JSON.stringify({
                     ...checkoutMeta,
-                    checkout_url: hostedCheckout.checkoutUrl,
                     payment_options: checkoutProfile.paymentOptions,
                     supported_payment_methods: checkoutProfile.supportedPaymentMethods,
                     mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                    phone_country_code: checkoutProfile.phoneCountryCode,
+                    availability_notes: checkoutProfile.availabilityNotes,
+                    customer: {
+                        email: userEmail,
+                        name: `${firstName} User`.trim(),
+                        phone_number: userPhone ?? null,
+                    },
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_CHECKOUT',
-                checkout_url: hostedCheckout.checkoutUrl,
+                provider: 'FLUTTERWAVE_V4',
+                mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
                 amount: body.amount,
                 currency: paymentCurrency,
                 payment_options: checkoutProfile.paymentOptions,
                 supported_payment_methods: checkoutProfile.supportedPaymentMethods,
                 mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
                 country: checkoutProfile.country,
                 redirect_url: callbackUrl,
+                customer: {
+                    email: userEmail,
+                    name: `${firstName} User`.trim(),
+                    phone_number: userPhone ?? null,
+                },
                 meta: checkoutMeta,
             };
             return {
@@ -1907,11 +1913,11 @@ export async function campaignRoutes(app) {
                     wallet_reference: reference,
                 };
             }
-            if (!hasValidFlutterwaveKeys()) {
+            if (!hasFlutterwaveClientCredentials()) {
                 reply.code(503);
                 return { error: 'flutterwave_not_configured' };
             }
-            const checkoutProfile = resolveFlutterwaveCheckoutProfile(userCountry);
+            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(userCountry, { cardEnabled: hasFlutterwaveEncryptionKey() });
             const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -1939,59 +1945,42 @@ export async function campaignRoutes(app) {
                 return_url: callbackUrl,
                 cancel_url: cancellationUrl,
             };
-            let hostedCheckout;
-            try {
-                hostedCheckout = await createHostedPayment({
-                    txRef: merchantReference,
-                    amount: body.amount,
-                    currency: paymentCurrency,
-                    paymentOptions: checkoutProfile.paymentOptions,
-                    redirectUrl: callbackUrl,
-                    customer: {
-                        email: userEmail,
-                        name: `${firstName} User`.trim(),
-                        phoneNumber: userPhone ?? undefined,
-                    },
-                    customizations: {
-                        title: 'Prime Checkout',
-                        description: `Campaign funding: ${campaign.title}`,
-                    },
-                    meta: checkoutMeta,
-                });
-            }
-            catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                request.log.error({ error, detail, campaign: campaign.id, tx_ref: merchantReference }, `flutterwave_checkout_failed: ${detail}`);
-                reply.code(502);
-                return { error: 'flutterwave_checkout_failed', detail };
-            }
-            if (!hostedCheckout.checkoutUrl) {
-                reply.code(502);
-                return { error: 'flutterwave_missing_checkout_link' };
-            }
             await client.query(`UPDATE pesapal_transactions
          SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
          WHERE merchant_reference=$1`, [
                 merchantReference,
                 JSON.stringify({
                     ...checkoutMeta,
-                    checkout_url: hostedCheckout.checkoutUrl,
                     payment_options: checkoutProfile.paymentOptions,
                     supported_payment_methods: checkoutProfile.supportedPaymentMethods,
                     mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                    phone_country_code: checkoutProfile.phoneCountryCode,
+                    availability_notes: checkoutProfile.availabilityNotes,
+                    customer: {
+                        email: userEmail,
+                        name: `${firstName} User`.trim(),
+                        phone_number: userPhone ?? null,
+                    },
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_CHECKOUT',
-                checkout_url: hostedCheckout.checkoutUrl,
+                provider: 'FLUTTERWAVE_V4',
+                mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
                 amount: body.amount,
                 currency: paymentCurrency,
                 payment_options: checkoutProfile.paymentOptions,
                 supported_payment_methods: checkoutProfile.supportedPaymentMethods,
                 mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
                 country: checkoutProfile.country,
                 redirect_url: callbackUrl,
+                customer: {
+                    email: userEmail,
+                    name: `${firstName} User`.trim(),
+                    phone_number: userPhone ?? null,
+                },
                 meta: checkoutMeta,
             };
             return { fund_source: fundSource, checkout_payload: checkoutPayload, pesapalTxn };

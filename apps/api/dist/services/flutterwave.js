@@ -1,6 +1,6 @@
 import { fetch } from 'undici';
 import crypto from 'crypto';
-import { config, hasFlutterwaveClientCredentials, resolveFlutterwaveBaseUrl, } from '../config.js';
+import { config, hasFlutterwaveSecretKey, hasFlutterwaveClientCredentials, resolveFlutterwaveBaseUrl, } from '../config.js';
 let cachedAccessToken = null;
 function randomId() {
     return crypto.randomUUID();
@@ -18,6 +18,60 @@ function normalizeNamePart(value, fallback) {
 function buildBaseUrl() {
     return resolveFlutterwaveBaseUrl();
 }
+function randomNonce(length = 12) {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const bytes = crypto.randomBytes(length);
+    let nonce = '';
+    for (let index = 0; index < length; index += 1) {
+        nonce += alphabet[(bytes[index] ?? 0) % alphabet.length];
+    }
+    return nonce;
+}
+async function encryptFlutterwaveValue(value, nonce) {
+    const encryptionKey = config.flutterwave.encryptionKey.trim();
+    if (!encryptionKey) {
+        throw new Error('Flutterwave card payments require FLUTTERWAVE_ENCRYPTION_KEY.');
+    }
+    if (nonce.length !== 12) {
+        throw new Error('Flutterwave encryption nonce must be exactly 12 characters.');
+    }
+    const keyBytes = Buffer.from(encryptionKey, 'base64');
+    if (keyBytes.length === 0) {
+        throw new Error('FLUTTERWAVE_ENCRYPTION_KEY must be base64 encoded.');
+    }
+    const cryptoSubtle = globalThis.crypto?.subtle ?? crypto.webcrypto?.subtle;
+    if (!cryptoSubtle) {
+        throw new Error('Crypto API is not available in this environment.');
+    }
+    const key = await cryptoSubtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
+    const encrypted = await cryptoSubtle.encrypt({
+        name: 'AES-GCM',
+        iv: Buffer.from(nonce),
+    }, key, Buffer.from(value));
+    return Buffer.from(encrypted).toString('base64');
+}
+async function encryptFlutterwaveFields(fields, nonce = randomNonce()) {
+    const encryptedEntries = await Promise.all(Object.entries(fields).map(async ([key, value]) => {
+        return [key, await encryptFlutterwaveValue(value, nonce)];
+    }));
+    return {
+        nonce,
+        ...Object.fromEntries(encryptedEntries),
+    };
+}
+function resolvePhonePayload(phoneNumber, phoneCountryCode) {
+    const normalizedPhone = (phoneNumber ?? '').replace(/[^\d]/g, '');
+    const normalizedCountryCode = (phoneCountryCode ?? '').replace(/[^\d]/g, '');
+    if (!normalizedPhone || !normalizedCountryCode) {
+        return null;
+    }
+    return {
+        country_code: normalizedCountryCode,
+        number: normalizedPhone.startsWith(normalizedCountryCode)
+            ? normalizedPhone.slice(normalizedCountryCode.length)
+            : normalizedPhone.replace(/^0+/, ''),
+    };
+}
 function readCheckoutUrl(payload) {
     const candidates = [
         payload?.data?.link,
@@ -34,6 +88,9 @@ function readCheckoutUrl(payload) {
         }
     }
     return null;
+}
+export function isHostedCheckoutCompatibilityError(detail) {
+    return detail.includes('Flutterwave hosted checkout is using the v3 /payments API');
 }
 async function getAccessToken() {
     if (!hasFlutterwaveClientCredentials()) {
@@ -119,6 +176,9 @@ export async function getIpnList() {
     };
 }
 export async function createHostedPayment(input) {
+    if (!hasFlutterwaveSecretKey() && hasFlutterwaveClientCredentials()) {
+        throw new Error('Flutterwave hosted checkout is using the v3 /payments API, but this server is configured for v4 client-credential flow. Switch to a v3 secret key for hosted checkout or replace this path with a true v4 payment-method/charge flow.');
+    }
     const response = await flutterwaveRequest('/payments', {
         method: 'POST',
         body: {
@@ -148,7 +208,17 @@ export async function createCustomer(input) {
     const parts = input.name.trim().split(/\s+/).filter(Boolean);
     const first = normalizeNamePart(parts[0], 'Customer');
     const last = normalizeNamePart(parts.slice(1).join(' '), 'User');
-    const normalizedPhone = (input.phoneNumber ?? '').replace(/[^\d]/g, '');
+    const phone = resolvePhonePayload(input.phoneNumber, input.phoneCountryCode);
+    const address = input.address
+        ? {
+            city: input.address.city?.trim() || undefined,
+            country: input.address.country?.trim() || undefined,
+            line1: input.address.line1?.trim() || undefined,
+            line2: input.address.line2?.trim() || undefined,
+            postal_code: input.address.postalCode?.trim() || undefined,
+            state: input.address.state?.trim() || undefined,
+        }
+        : null;
     return flutterwaveRequest('/customers', {
         method: 'POST',
         body: {
@@ -157,16 +227,8 @@ export async function createCustomer(input) {
                 first,
                 last,
             },
-            ...(normalizedPhone
-                ? {
-                    phone: {
-                        country_code: '256',
-                        number: normalizedPhone.startsWith('256')
-                            ? normalizedPhone.slice(3)
-                            : normalizedPhone.replace(/^0+/, ''),
-                    },
-                }
-                : {}),
+            ...(phone ? { phone } : {}),
+            ...(address ? { address } : {}),
         },
         idempotencyKey: `customer:${input.email.toLowerCase()}`,
     });
@@ -198,8 +260,68 @@ export async function createCharge(input) {
             payment_method_id: input.paymentMethodId,
             reference: input.txRef,
             ...(input.redirectUrl ? { redirect_url: input.redirectUrl } : {}),
+            ...(input.meta ? { meta: input.meta } : {}),
         },
         idempotencyKey: `charge:${input.txRef}`,
+    });
+}
+export async function createCardPaymentMethod(input) {
+    const encryptedCard = await encryptFlutterwaveFields({
+        encrypted_card_number: input.cardNumber.replace(/\s+/g, ''),
+        encrypted_expiry_month: input.expiryMonth.trim(),
+        encrypted_expiry_year: input.expiryYear.trim(),
+        encrypted_cvv: input.cvv.trim(),
+    });
+    return flutterwaveRequest('/payment-methods', {
+        method: 'POST',
+        body: {
+            type: 'card',
+            card: encryptedCard,
+        },
+        idempotencyKey: `card_method:${encryptedCard.nonce}:${input.cardNumber.slice(-4)}`,
+    });
+}
+export async function updateChargeAuthorization(input) {
+    let authorization;
+    if (input.authorization.type === 'pin') {
+        authorization = {
+            type: 'pin',
+            pin: await encryptFlutterwaveFields({
+                encrypted_pin: input.authorization.pin.trim(),
+            }),
+        };
+    }
+    else if (input.authorization.type === 'otp') {
+        authorization = {
+            type: 'otp',
+            otp: {
+                code: input.authorization.otp.trim(),
+            },
+        };
+    }
+    else {
+        authorization = {
+            type: 'avs',
+            avs: {
+                address: {
+                    city: input.authorization.avs.city.trim(),
+                    country: input.authorization.avs.country.trim().toUpperCase(),
+                    line1: input.authorization.avs.line1.trim(),
+                    ...(input.authorization.avs.line2?.trim()
+                        ? { line2: input.authorization.avs.line2.trim() }
+                        : {}),
+                    postal_code: input.authorization.avs.postalCode.trim(),
+                    state: input.authorization.avs.state.trim(),
+                },
+            },
+        };
+    }
+    return flutterwaveRequest(`/charges/${encodeURIComponent(input.chargeId)}`, {
+        method: 'PUT',
+        body: {
+            authorization,
+        },
+        idempotencyKey: `charge_auth:${input.chargeId}:${input.authorization.type}`,
     });
 }
 export async function getTransactionStatus(transactionId, _merchantReference) {

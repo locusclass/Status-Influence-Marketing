@@ -2,13 +2,13 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { createHostedPayment, requestPayout } from '../services/flutterwave.js';
-import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { requestPayout, } from '../services/flutterwave.js';
+import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
-import { config, hasValidFlutterwaveKeys } from '../config.js';
+import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
@@ -1032,7 +1032,7 @@ export async function accountRoutes(app) {
             reply.code(400);
             return { error: 'payment_redirect_urls_invalid' };
         }
-        if (!hasValidFlutterwaveKeys()) {
+        if (!hasFlutterwaveClientCredentials()) {
             reply.code(503);
             return { error: 'flutterwave_not_configured' };
         }
@@ -1043,7 +1043,7 @@ export async function accountRoutes(app) {
                 reply.code(400);
                 return { error: 'user_email_missing' };
             }
-            const checkoutProfile = resolveFlutterwaveCheckoutProfile(user.country);
+            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(user.country, { cardEnabled: hasFlutterwaveEncryptionKey() });
             const wallet = await ensureWalletForUser(client, userId);
             const reference = `WDP-${uuid()}`;
             const txn = await client.query(`
@@ -1081,59 +1081,42 @@ export async function accountRoutes(app) {
                 return_url: callbackUrl,
                 cancel_url: cancellationUrl,
             };
-            let hostedCheckout;
-            try {
-                hostedCheckout = await createHostedPayment({
-                    txRef: reference,
-                    amount: parsed.data.amount,
-                    currency: checkoutProfile.currency,
-                    paymentOptions: checkoutProfile.paymentOptions,
-                    redirectUrl: callbackUrl,
-                    customer: {
-                        email: String(user.email),
-                        name: `${firstName} User`.trim(),
-                        phoneNumber: user.phone?.toString() || undefined,
-                    },
-                    customizations: {
-                        title: 'Prime Checkout',
-                        description: 'Wallet deposit',
-                    },
-                    meta: checkoutMeta,
-                });
-            }
-            catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                request.log.error({ error, detail, reference }, `flutterwave_checkout_failed: ${detail}`);
-                reply.code(502);
-                return { error: 'flutterwave_checkout_failed', detail };
-            }
-            if (!hostedCheckout.checkoutUrl) {
-                reply.code(502);
-                return { error: 'flutterwave_missing_checkout_link' };
-            }
             await client.query(`UPDATE pesapal_transactions
          SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
          WHERE merchant_reference=$1`, [
                 reference,
                 JSON.stringify({
                     ...checkoutMeta,
-                    checkout_url: hostedCheckout.checkoutUrl,
                     payment_options: checkoutProfile.paymentOptions,
                     supported_payment_methods: checkoutProfile.supportedPaymentMethods,
                     mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                    phone_country_code: checkoutProfile.phoneCountryCode,
+                    availability_notes: checkoutProfile.availabilityNotes,
+                    customer: {
+                        email: String(user.email),
+                        name: `${firstName} User`.trim(),
+                        phone_number: user.phone?.toString() || null,
+                    },
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_CHECKOUT',
-                checkout_url: hostedCheckout.checkoutUrl,
+                provider: 'FLUTTERWAVE_V4',
+                mode: 'DIRECT_CHARGE',
                 tx_ref: reference,
                 amount: parsed.data.amount,
                 currency: checkoutProfile.currency,
                 payment_options: checkoutProfile.paymentOptions,
                 supported_payment_methods: checkoutProfile.supportedPaymentMethods,
                 mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
                 country: checkoutProfile.country,
                 redirect_url: callbackUrl,
+                customer: {
+                    email: String(user.email),
+                    name: `${firstName} User`.trim(),
+                    phone_number: user.phone?.toString() || null,
+                },
                 meta: checkoutMeta,
             };
             return { checkout_payload: checkoutPayload, txn: txn.rows[0] };

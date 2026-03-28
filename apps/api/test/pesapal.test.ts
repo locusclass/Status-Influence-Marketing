@@ -16,10 +16,14 @@ describe('Flutterwave payment configuration', () => {
     expect(resolveFlutterwaveCheckoutProfile('UG')).toEqual({
       country: 'UG',
       currency: 'UGX',
-      paymentOptions: 'card,banktransfer,mobilemoneyuganda',
-      paymentOptionsList: ['card', 'banktransfer', 'mobilemoneyuganda'],
-      supportedPaymentMethods: ['CARD', 'BANK_TRANSFER', 'MOBILE_MONEY'],
+      phoneCountryCode: '256',
+      paymentOptions: 'card,mobilemoneyuganda',
+      paymentOptionsList: ['card', 'mobilemoneyuganda'],
+      supportedPaymentMethods: ['CARD', 'MOBILE_MONEY'],
       mobileMoneyNetworks: ['MTN', 'AIRTEL'],
+      availabilityNotes: [
+        'Flutterwave v4 in Uganda supports cards and mobile money.',
+      ],
     });
   });
 
@@ -27,21 +31,29 @@ describe('Flutterwave payment configuration', () => {
     expect(resolveFlutterwaveCheckoutProfile('KE')).toEqual({
       country: 'KE',
       currency: 'KES',
-      paymentOptions: 'card,banktransfer,mpesa',
-      paymentOptionsList: ['card', 'banktransfer', 'mpesa'],
-      supportedPaymentMethods: ['CARD', 'BANK_TRANSFER', 'MOBILE_MONEY'],
+      phoneCountryCode: '254',
+      paymentOptions: 'card,mpesa',
+      paymentOptionsList: ['card', 'mpesa'],
+      supportedPaymentMethods: ['CARD', 'MOBILE_MONEY'],
       mobileMoneyNetworks: ['M-PESA'],
+      availabilityNotes: [
+        'Flutterwave v4 in Kenya supports cards and M-Pesa.',
+      ],
     });
   });
 
-  it('maps every other country to USD card and bank transfer only', () => {
+  it('maps every other country to USD card only', () => {
     expect(resolveFlutterwaveCheckoutProfile('NG')).toEqual({
       country: 'NG',
       currency: 'USD',
-      paymentOptions: 'card,banktransfer',
-      paymentOptionsList: ['card', 'banktransfer'],
-      supportedPaymentMethods: ['CARD', 'BANK_TRANSFER'],
+      phoneCountryCode: null,
+      paymentOptions: 'card',
+      paymentOptionsList: ['card'],
+      supportedPaymentMethods: ['CARD'],
       mobileMoneyNetworks: [],
+      availabilityNotes: [
+        'Flutterwave v4 bank transfer is documented for NGN and GHS virtual accounts only, so USD checkout currently supports cards only.',
+      ],
     });
   });
 });

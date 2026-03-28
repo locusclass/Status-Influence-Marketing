@@ -3,14 +3,19 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import {
+  createCardPaymentMethod,
   createCharge,
   createCustomer,
   createMobileMoneyPaymentMethod,
   getTransactionStatus,
-  verifyTransaction,
+  updateChargeAuthorization,
   verifyWebhookSignature,
 } from '../services/flutterwave.js';
-import { config } from '../config.js';
+import {
+  config,
+  hasFlutterwaveClientCredentials,
+  hasFlutterwaveEncryptionKey,
+} from '../config.js';
 
 async function ensureWalletWithdrawalsTable(client: any) {
   await client.query(`
@@ -111,10 +116,65 @@ export async function paymentRoutes(app: FastifyInstance) {
     transaction_id: z.union([z.string().trim().min(1), z.number().int().positive()]),
     tx_ref: z.string().trim().min(1),
   });
-  const initiateSchema = z.object({
-    tx_ref: z.string().trim().min(1),
-    network: z.enum(['MTN', 'AIRTEL']).default('MTN'),
+  const cardInputSchema = z.object({
+    card_number: z.string().trim().min(12).max(23),
+    expiry_month: z.string().trim().min(1).max(2),
+    expiry_year: z.string().trim().min(2).max(4),
+    cvv: z.string().trim().min(3).max(4),
   });
+  const initiateSchema = z
+    .object({
+      tx_ref: z.string().trim().min(1),
+      payment_method: z.enum(['MOBILE_MONEY', 'CARD', 'BANK_TRANSFER']),
+      network: z.enum(['MTN', 'AIRTEL', 'M-PESA']).optional(),
+      phone_number: z.string().trim().min(7).max(20).optional(),
+      card: cardInputSchema.optional(),
+    })
+    .superRefine((value, ctx) => {
+      if (value.payment_method === 'MOBILE_MONEY') {
+        if (!value.network) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['network'],
+            message: 'network is required for mobile money.',
+          });
+        }
+      }
+      if (value.payment_method === 'CARD' && !value.card) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['card'],
+          message: 'card details are required for card payments.',
+        });
+      }
+    });
+  const authorizeSchema = z.discriminatedUnion('authorization_type', [
+    z.object({
+      tx_ref: z.string().trim().min(1),
+      charge_id: z.string().trim().min(1).optional(),
+      authorization_type: z.literal('PIN'),
+      pin: z.string().trim().min(4).max(12),
+    }),
+    z.object({
+      tx_ref: z.string().trim().min(1),
+      charge_id: z.string().trim().min(1).optional(),
+      authorization_type: z.literal('OTP'),
+      otp: z.string().trim().min(3).max(10),
+    }),
+    z.object({
+      tx_ref: z.string().trim().min(1),
+      charge_id: z.string().trim().min(1).optional(),
+      authorization_type: z.literal('AVS'),
+      address: z.object({
+        city: z.string().trim().min(2).max(120),
+        country: z.string().trim().min(2).max(3),
+        line1: z.string().trim().min(2).max(240),
+        line2: z.string().trim().max(240).optional(),
+        postal_code: z.string().trim().min(2).max(32),
+        state: z.string().trim().min(2).max(120),
+      }),
+    }),
+  ]);
 
   const statusSuccess = new Set(['SUCCESSFUL', 'SUCCEEDED', 'COMPLETED']);
   const statusFailure = new Set(['FAILED', 'FAILURE', 'CANCELLED', 'CANCELED']);
@@ -125,6 +185,7 @@ export async function paymentRoutes(app: FastifyInstance) {
     'INITIATED',
     'QUEUED',
     'REQUIRES_ACTION',
+    'PENDING_AUTHORIZATION',
   ]);
 
   const readId = (payload: any) => {
@@ -145,8 +206,30 @@ export async function paymentRoutes(app: FastifyInstance) {
     return '';
   };
 
+  const readTextValue = (value: any): string | null => {
+    if (typeof value === 'string') {
+      const normalized = value.trim();
+      return normalized || null;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    if (value && typeof value === 'object') {
+      const directCandidates = [value.url, value.note, value.message, value.code];
+      for (const candidate of directCandidates) {
+        const direct = readTextValue(candidate);
+        if (direct) {
+          return direct;
+        }
+      }
+    }
+    return null;
+  };
+
   const readRedirectUrl = (payload: any) => {
     const candidates = [
+      payload?.next_action?.redirect_url?.url,
+      payload?.data?.next_action?.redirect_url?.url,
       payload?.next_action?.redirect_url,
       payload?.data?.next_action?.redirect_url,
       payload?.redirect_url,
@@ -160,7 +243,7 @@ export async function paymentRoutes(app: FastifyInstance) {
     ];
 
     for (const candidate of candidates) {
-      const value = String(candidate ?? '').trim();
+      const value = readTextValue(candidate);
       if (value) {
         return value;
       }
@@ -171,6 +254,8 @@ export async function paymentRoutes(app: FastifyInstance) {
 
   const readProviderMessage = (payload: any) => {
     const candidates = [
+      payload?.next_action?.payment_instruction?.note,
+      payload?.data?.next_action?.payment_instruction?.note,
       payload?.next_action?.message,
       payload?.data?.next_action?.message,
       payload?.processor_response,
@@ -180,7 +265,7 @@ export async function paymentRoutes(app: FastifyInstance) {
     ];
 
     for (const candidate of candidates) {
-      const value = String(candidate ?? '').trim();
+      const value = readTextValue(candidate);
       if (value) {
         return value;
       }
@@ -203,20 +288,72 @@ export async function paymentRoutes(app: FastifyInstance) {
       currency: source.currency ?? null,
       processor_response: source.processor_response ?? null,
       next_action_type: source.next_action?.type ?? null,
-      next_action_message: source.next_action?.message ?? null,
+      next_action_message: readProviderMessage(source),
+      next_action_fields:
+        Array.isArray(source.next_action?.requires_additional_fields?.fields)
+          ? source.next_action.requires_additional_fields.fields
+          : null,
       redirect_url: readRedirectUrl(source),
     };
   };
 
-  const normalizeTransactionStatus = (payload: Record<string, any>) =>
-    String(payload.status ?? payload.payment_status ?? '').trim().toUpperCase();
+  const normalizeTransactionStatus = (payload: Record<string, any>) => {
+    const source = (payload?.data ?? payload) as Record<string, any>;
+    return String(source.status ?? source.payment_status ?? '')
+      .trim()
+      .toUpperCase();
+  };
+
+  const normalizeNextAction = (payload: any) => {
+    const source = (payload?.data ?? payload) as Record<string, any> | undefined;
+    const nextAction = source?.next_action as Record<string, any> | undefined;
+    const type = String(nextAction?.type ?? '').trim().toLowerCase();
+    if (!type) {
+      return null;
+    }
+
+    if (type === 'redirect_url') {
+      return {
+        type: 'redirect_url',
+        redirect_url: readRedirectUrl(source),
+      };
+    }
+
+    if (type === 'payment_instruction') {
+      return {
+        type: 'payment_instruction',
+        note:
+          readProviderMessage(source) ??
+          readTextValue(nextAction?.payment_instruction?.note),
+      };
+    }
+
+    if (type === 'requires_additional_fields') {
+      return {
+        type: 'requires_additional_fields',
+        fields: Array.isArray(nextAction?.requires_additional_fields?.fields)
+          ? nextAction.requires_additional_fields.fields
+          : [],
+      };
+    }
+
+    if (type === 'requires_pin') {
+      return { type: 'requires_pin' };
+    }
+
+    if (type === 'requires_otp') {
+      return { type: 'requires_otp' };
+    }
+
+    return { type };
+  };
 
   const settleCharge = async (
     transactionId: string | number,
     reference: string,
     rawPayload?: any
   ) => {
-    const verifiedResponse = (await verifyTransaction(
+    const verifiedResponse = (await getTransactionStatus(
       String(transactionId)
     )) as Record<string, any>;
     const verified = (verifiedResponse.data ?? verifiedResponse) as Record<string, any>;
@@ -493,6 +630,113 @@ export async function paymentRoutes(app: FastifyInstance) {
   app.get('/payments/flutterwave/webhook', webhookInfo);
   app.post('/payments/flutterwave/webhook', handleWebhook);
 
+  const loadChargeContext = async (client: any, txRef: string, authUser: string) => {
+    const txnRes = await client.query(
+      'SELECT * FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1',
+      [txRef]
+    );
+    const txn = txnRes.rows[0];
+    if (!txn) {
+      return { error: 'txn_not_found' } as const;
+    }
+
+    const rawPayload = (txn.raw_payload ?? {}) as Record<string, any>;
+    const txKind = String(rawPayload.kind ?? '').toUpperCase();
+
+    let user: any = null;
+    if (txKind === 'WALLET_DEPOSIT') {
+      if (String(rawPayload.user_id ?? '') !== authUser) {
+        return { error: 'forbidden' } as const;
+      }
+      const userRes = await client.query(
+        'SELECT email, phone, full_name FROM users WHERE id=$1 LIMIT 1',
+        [authUser]
+      );
+      user = userRes.rows[0];
+    } else {
+      const escrowRes = await client.query(
+        `SELECT e.id, c.id AS campaign_id, c.advertiser_id
+         FROM escrow_ledger e
+         JOIN campaigns c ON c.id = e.campaign_id
+         WHERE e.id=$1
+         LIMIT 1`,
+        [txn.escrow_id]
+      );
+      const escrow = escrowRes.rows[0];
+      if (!escrow || escrow.advertiser_id !== authUser) {
+        return { error: 'forbidden' } as const;
+      }
+      const userRes = await client.query(
+        'SELECT email, phone, full_name FROM users WHERE id=$1 LIMIT 1',
+        [authUser]
+      );
+      user = userRes.rows[0];
+    }
+
+    const email = String(rawPayload?.customer?.email ?? user?.email ?? '').trim();
+    const phoneNumber = String(
+      rawPayload?.customer?.phone_number ?? user?.phone ?? ''
+    ).trim();
+    const customerName =
+      String(rawPayload?.customer?.name ?? user?.full_name ?? '').trim() ||
+      email.split('@')[0] ||
+      'User';
+    const currency = String(rawPayload.payment_currency ?? 'USD')
+      .trim()
+      .toUpperCase();
+    const country = String(rawPayload.country ?? '').trim().toUpperCase();
+    const phoneCountryCode =
+      String(rawPayload.phone_country_code ?? '')
+        .replace(/[^\d]/g, '')
+        .trim() ||
+      (country === 'UG' ? '256' : country === 'KE' ? '254' : '');
+    const supportedPaymentMethods = Array.isArray(rawPayload.supported_payment_methods)
+      ? rawPayload.supported_payment_methods
+          .map((entry: unknown) => String(entry ?? '').trim().toUpperCase())
+          .filter(Boolean)
+      : [];
+
+    return {
+      txn,
+      rawPayload,
+      email,
+      phoneNumber,
+      customerName,
+      currency,
+      country,
+      phoneCountryCode,
+      supportedPaymentMethods,
+      mobileMoneyNetworks: Array.isArray(rawPayload.mobile_money_networks)
+        ? rawPayload.mobile_money_networks
+            .map((entry: unknown) => String(entry ?? '').trim().toUpperCase())
+            .filter(Boolean)
+        : [],
+      callbackUrl:
+        typeof rawPayload.return_url === 'string' && rawPayload.return_url.trim()
+          ? rawPayload.return_url.trim()
+          : null,
+    };
+  };
+
+  const buildChargeResponse = (
+    txRef: string,
+    paymentMethod: 'MOBILE_MONEY' | 'CARD' | 'BANK_TRANSFER',
+    chargePayload: Record<string, any>
+  ) => {
+    const charge = (chargePayload.data ?? chargePayload) as Record<string, any>;
+    return {
+      ok: true,
+      tx_ref: txRef,
+      payment_method: paymentMethod,
+      charge_id: readId(chargePayload),
+      provider_status: normalizeTransactionStatus(charge),
+      redirect_url: readRedirectUrl(charge),
+      instruction: readProviderMessage(charge),
+      next_action: normalizeNextAction(charge),
+      provider: compactProviderSnapshot(charge),
+    };
+  };
+
   app.post('/payments/flutterwave/initiate', { preHandler: [app.authenticate] }, async (request, reply) => {
     const parsed = initiateSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -506,102 +750,103 @@ export async function paymentRoutes(app: FastifyInstance) {
         reply.code(401);
         return { error: 'unauthorized' };
       }
+      if (!hasFlutterwaveClientCredentials()) {
+        reply.code(503);
+        return { error: 'flutterwave_not_configured' };
+      }
 
       const result = await withTransaction(async (client) => {
-        const txnRes = await client.query(
-          'SELECT * FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1',
-          [parsed.data.tx_ref]
-        );
-        const txn = txnRes.rows[0];
-        if (!txn) {
-          return { error: 'txn_not_found' } as const;
+        const context = await loadChargeContext(client, parsed.data.tx_ref, authUser);
+        if ('error' in context) {
+          return context;
         }
 
-        const rawPayload = (txn.raw_payload ?? {}) as Record<string, any>;
-        const metaNetwork = String(rawPayload.network ?? parsed.data.network).toUpperCase();
-        const network = (metaNetwork === 'AIRTEL' ? 'AIRTEL' : 'MTN') as 'MTN' | 'AIRTEL';
-        const txKind = String(rawPayload.kind ?? '').toUpperCase();
-
-        let email = '';
-        let phoneNumber = '';
-        let customerName = '';
-
-        if (txKind === 'WALLET_DEPOSIT') {
-          if (String(rawPayload.user_id ?? '') !== authUser) {
-            return { error: 'forbidden' } as const;
-          }
-          const userRes = await client.query(
-            'SELECT email, phone, full_name FROM users WHERE id=$1 LIMIT 1',
-            [authUser]
-          );
-          const user = userRes.rows[0];
-          email = String(user?.email ?? '').trim();
-          phoneNumber = String(user?.phone ?? '').trim();
-          customerName = String(user?.full_name ?? '').trim() || email.split('@')[0] || 'User';
-        } else {
-          const escrowRes = await client.query(
-            `SELECT e.id, c.id AS campaign_id, c.advertiser_id, c.title
-             FROM escrow_ledger e
-             JOIN campaigns c ON c.id = e.campaign_id
-             WHERE e.id=$1
-             LIMIT 1`,
-            [txn.escrow_id]
-          );
-          const escrow = escrowRes.rows[0];
-          if (!escrow || escrow.advertiser_id !== authUser) {
-            return { error: 'forbidden' } as const;
-          }
-          const userRes = await client.query(
-            'SELECT email, phone, full_name FROM users WHERE id=$1 LIMIT 1',
-            [authUser]
-          );
-          const user = userRes.rows[0];
-          email = String(user?.email ?? '').trim();
-          phoneNumber = String(user?.phone ?? '').trim();
-          customerName = String(user?.full_name ?? '').trim() || email.split('@')[0] || 'User';
-        }
-
-        if (!email) {
+        if (!context.email) {
           return { error: 'user_email_missing' } as const;
         }
-        if (!phoneNumber) {
-          return { error: 'missing_payout_phone' } as const;
+        if (
+          context.supportedPaymentMethods.length > 0 &&
+          !context.supportedPaymentMethods.includes(parsed.data.payment_method)
+        ) {
+          return { error: 'unsupported_payment_method' } as const;
         }
 
-        const callbackUrl =
-          typeof rawPayload.return_url === 'string' && rawPayload.return_url.trim()
-            ? rawPayload.return_url.trim()
-            : null;
+        if (parsed.data.payment_method === 'BANK_TRANSFER') {
+          return {
+            error: 'flutterwave_bank_transfer_unavailable',
+            detail:
+              'Flutterwave v4 bank transfer is only available for NGN and GHS virtual-account flows.',
+          } as const;
+        }
 
+        const phoneNumber =
+          parsed.data.phone_number?.trim() || context.phoneNumber;
         const customerResponse = await createCustomer({
-          email,
-          name: customerName,
-          phoneNumber,
+          email: context.email,
+          name: context.customerName,
+          phoneNumber: phoneNumber || undefined,
+          phoneCountryCode: context.phoneCountryCode || undefined,
         });
         const customerId = readId(customerResponse);
         if (!customerId) {
           throw new Error('Flutterwave customer creation did not return an id');
         }
 
-        const methodResponse = await createMobileMoneyPaymentMethod({
-          phoneNumber,
-          network,
-          countryCode: '256',
-        });
+        let methodResponse: Record<string, any>;
+        let methodNetwork: string | null = null;
+
+        if (parsed.data.payment_method === 'MOBILE_MONEY') {
+          if (!phoneNumber) {
+            return { error: 'missing_payout_phone' } as const;
+          }
+          if (!context.phoneCountryCode) {
+            return { error: 'unsupported_payment_method' } as const;
+          }
+          const network = String(parsed.data.network ?? '')
+            .trim()
+            .toUpperCase() as 'MTN' | 'AIRTEL' | 'M-PESA';
+          if (
+            context.mobileMoneyNetworks.length > 0 &&
+            !context.mobileMoneyNetworks.includes(network)
+          ) {
+            return { error: 'missing_mobile_money_network' } as const;
+          }
+          methodNetwork = network;
+          methodResponse = await createMobileMoneyPaymentMethod({
+            phoneNumber,
+            network,
+            countryCode: context.phoneCountryCode,
+          });
+        } else {
+          if (!hasFlutterwaveEncryptionKey()) {
+            return { error: 'flutterwave_card_not_configured' } as const;
+          }
+          methodResponse = await createCardPaymentMethod({
+            cardNumber: parsed.data.card!.card_number,
+            expiryMonth: parsed.data.card!.expiry_month,
+            expiryYear: parsed.data.card!.expiry_year,
+            cvv: parsed.data.card!.cvv,
+          });
+        }
+
         const paymentMethodId = readId(methodResponse);
         if (!paymentMethodId) {
           throw new Error('Flutterwave payment method creation did not return an id');
         }
 
         const chargeResponse = await createCharge({
-          amount: Number(txn.amount ?? 0),
-          currency: 'UGX',
+          amount: Number(context.txn.amount ?? 0),
+          currency: context.currency,
           customerId,
           paymentMethodId,
           txRef: parsed.data.tx_ref,
-          redirectUrl: callbackUrl,
+          redirectUrl: context.callbackUrl,
+          meta: {
+            ...(context.rawPayload ?? {}),
+            payment_method: parsed.data.payment_method,
+            ...(methodNetwork ? { network: methodNetwork } : {}),
+          },
         });
-        const charge = (chargeResponse.data ?? chargeResponse) as Record<string, any>;
         const chargeId = readId(chargeResponse);
         if (!chargeId) {
           throw new Error('Flutterwave charge creation did not return an id');
@@ -620,48 +865,51 @@ export async function paymentRoutes(app: FastifyInstance) {
           [
             parsed.data.tx_ref,
             JSON.stringify({
-              network,
+              payment_method: parsed.data.payment_method,
+              ...(methodNetwork ? { network: methodNetwork } : {}),
               flutterwave_charge_id: chargeId,
               flutterwave_customer_id: customerId,
               flutterwave_payment_method_id: paymentMethodId,
+              flutterwave_last_provider_status: normalizeTransactionStatus(chargeResponse),
+              flutterwave_next_action: normalizeNextAction(chargeResponse),
             }),
           ]
         );
 
-        return {
-          ok: true,
-          charge_id: chargeId,
-          redirect_url: readRedirectUrl(charge),
-          provider_status: normalizeTransactionStatus(charge),
-          instruction: readProviderMessage(charge),
-        };
+        return buildChargeResponse(
+          parsed.data.tx_ref,
+          parsed.data.payment_method,
+          chargeResponse
+        );
       });
 
-      if ('error' in result) {
-        reply.code(result.error === 'forbidden' ? 403 : 400);
+      const outcome: any = result;
+      if (outcome?.error) {
+        reply.code(outcome.error === 'forbidden' ? 403 : 400);
         app.log.warn(
           {
             tx_ref: parsed.data.tx_ref,
-            network: parsed.data.network,
-            outcome: result,
+            payment_method: parsed.data.payment_method,
+            outcome,
           },
           'flutterwave_initiate_rejected'
         );
-        return result;
+        return outcome;
       }
 
       app.log.info(
         {
           tx_ref: parsed.data.tx_ref,
-          network: parsed.data.network,
-          charge_id: result.charge_id,
-          redirect_url: result.redirect_url,
-          provider_status: result.provider_status,
-          instruction: result.instruction,
+          payment_method: parsed.data.payment_method,
+          charge_id: outcome.charge_id,
+          redirect_url: outcome.redirect_url,
+          provider_status: outcome.provider_status,
+          instruction: outcome.instruction,
+          next_action: outcome.next_action,
         },
         'flutterwave_initiate_result'
       );
-      return result;
+      return outcome;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       app.log.error(
@@ -674,6 +922,127 @@ export async function paymentRoutes(app: FastifyInstance) {
       );
       reply.code(502);
       return { error: 'flutterwave_initiate_failed', detail };
+    }
+  });
+
+  app.post('/payments/flutterwave/authorize', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const parsed = authorizeSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+
+    try {
+      const authUser = (request.user as any)?.sub as string | undefined;
+      if (!authUser) {
+        reply.code(401);
+        return { error: 'unauthorized' };
+      }
+      if (!hasFlutterwaveClientCredentials()) {
+        reply.code(503);
+        return { error: 'flutterwave_not_configured' };
+      }
+
+      const result = await withTransaction(async (client) => {
+        const context = await loadChargeContext(client, parsed.data.tx_ref, authUser);
+        if ('error' in context) {
+          return context;
+        }
+
+        const chargeId =
+          parsed.data.charge_id?.trim() ||
+          String(context.rawPayload.flutterwave_charge_id ?? '').trim();
+        if (!chargeId) {
+          return { error: 'txn_not_found' } as const;
+        }
+
+        let chargeResponse: Record<string, any>;
+        if (parsed.data.authorization_type === 'PIN') {
+          chargeResponse = await updateChargeAuthorization({
+            chargeId,
+            authorization: {
+              type: 'pin',
+              pin: parsed.data.pin,
+            },
+          });
+        } else if (parsed.data.authorization_type === 'OTP') {
+          chargeResponse = await updateChargeAuthorization({
+            chargeId,
+            authorization: {
+              type: 'otp',
+              otp: parsed.data.otp,
+            },
+          });
+        } else {
+          chargeResponse = await updateChargeAuthorization({
+            chargeId,
+            authorization: {
+              type: 'avs',
+              avs: {
+                city: parsed.data.address.city,
+                country: parsed.data.address.country,
+                line1: parsed.data.address.line1,
+                line2: parsed.data.address.line2,
+                postalCode: parsed.data.address.postal_code,
+                state: parsed.data.address.state,
+              },
+            },
+          });
+        }
+
+        await client.query(
+          `UPDATE pesapal_transactions
+           SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
+           WHERE merchant_reference=$1`,
+          [
+            parsed.data.tx_ref,
+            JSON.stringify({
+              flutterwave_charge_id: chargeId,
+              flutterwave_last_authorization_type: parsed.data.authorization_type,
+              flutterwave_last_provider_status: normalizeTransactionStatus(chargeResponse),
+              flutterwave_next_action: normalizeNextAction(chargeResponse),
+            }),
+          ]
+        );
+
+        return buildChargeResponse(
+          parsed.data.tx_ref,
+          String(context.rawPayload.payment_method ?? 'CARD')
+            .trim()
+            .toUpperCase() as 'MOBILE_MONEY' | 'CARD' | 'BANK_TRANSFER',
+          chargeResponse
+        );
+      });
+
+      const outcome: any = result;
+      if (outcome?.error) {
+        reply.code(outcome.error === 'forbidden' ? 403 : 400);
+        return outcome;
+      }
+
+      app.log.info(
+        {
+          tx_ref: parsed.data.tx_ref,
+          charge_id: outcome.charge_id,
+          provider_status: outcome.provider_status,
+          instruction: outcome.instruction,
+          next_action: outcome.next_action,
+        },
+        'flutterwave_authorize_result'
+      );
+      return outcome;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      app.log.error(
+        {
+          error,
+          detail,
+          body: request.body,
+        },
+        `flutterwave_authorize_failed: ${detail}`
+      );
+      reply.code(502);
+      return { error: 'flutterwave_authorize_failed', detail };
     }
   });
 

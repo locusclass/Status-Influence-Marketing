@@ -15,10 +15,12 @@ import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
-import { config, hasValidFlutterwaveKeys } from '../config.js';
-import { createHostedPayment } from '../services/flutterwave.js';
-import { isHostedCheckoutCompatibilityError } from '../services/flutterwave.js';
-import { resolveFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import {
+  config,
+  hasFlutterwaveClientCredentials,
+  hasFlutterwaveEncryptionKey,
+} from '../config.js';
+import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
   canAccessAdvertiserFeatures,
@@ -2295,12 +2297,15 @@ export async function campaignRoutes(app: FastifyInstance) {
         };
       }
 
-      if (!hasValidFlutterwaveKeys()) {
+      if (!hasFlutterwaveClientCredentials()) {
         reply.code(503);
         return { error: 'flutterwave_not_configured' } as any;
       }
 
-      const checkoutProfile = resolveFlutterwaveCheckoutProfile(userCountry);
+      const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(
+        userCountry,
+        { cardEnabled: hasFlutterwaveEncryptionKey() }
+      );
       const paymentCurrency = checkoutProfile.currency;
       const merchantReference = uuid();
       const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -2329,43 +2334,6 @@ export async function campaignRoutes(app: FastifyInstance) {
         return_url: callbackUrl,
         cancel_url: cancellationUrl,
       };
-      let hostedCheckout;
-      try {
-        hostedCheckout = await createHostedPayment({
-          txRef: merchantReference,
-          amount: body.amount,
-          currency: paymentCurrency,
-          paymentOptions: checkoutProfile.paymentOptions,
-          redirectUrl: callbackUrl,
-          customer: {
-            email: userEmail!,
-            name: `${firstName} User`.trim(),
-            phoneNumber: userPhone ?? undefined,
-          },
-          customizations: {
-            title: 'Prime Checkout',
-            description: `Campaign funding: ${bundle.title}`,
-          },
-          meta: checkoutMeta,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        request.log.error(
-          {
-            error,
-            detail,
-            bundle: bundle.bundle_id,
-            tx_ref: merchantReference,
-          },
-          `flutterwave_checkout_failed: ${detail}`
-        );
-        reply.code(isHostedCheckoutCompatibilityError(detail) ? 400 : 502);
-        return { error: 'flutterwave_checkout_failed', detail };
-      }
-      if (!hostedCheckout.checkoutUrl) {
-        reply.code(502);
-        return { error: 'flutterwave_missing_checkout_link' } as any;
-      }
 
       await client.query(
         `UPDATE pesapal_transactions
@@ -2375,25 +2343,38 @@ export async function campaignRoutes(app: FastifyInstance) {
           merchantReference,
           JSON.stringify({
             ...checkoutMeta,
-            checkout_url: hostedCheckout.checkoutUrl,
             payment_options: checkoutProfile.paymentOptions,
             supported_payment_methods: checkoutProfile.supportedPaymentMethods,
             mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+            phone_country_code: checkoutProfile.phoneCountryCode,
+            availability_notes: checkoutProfile.availabilityNotes,
+            customer: {
+              email: userEmail!,
+              name: `${firstName} User`.trim(),
+              phone_number: userPhone ?? null,
+            },
           }),
         ]
       );
 
       const checkoutPayload = {
-        provider: 'FLUTTERWAVE_CHECKOUT',
-        checkout_url: hostedCheckout.checkoutUrl,
+        provider: 'FLUTTERWAVE_V4',
+        mode: 'DIRECT_CHARGE',
         tx_ref: merchantReference,
         amount: body.amount,
         currency: paymentCurrency,
         payment_options: checkoutProfile.paymentOptions,
         supported_payment_methods: checkoutProfile.supportedPaymentMethods,
         mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
         country: checkoutProfile.country,
         redirect_url: callbackUrl,
+        customer: {
+          email: userEmail!,
+          name: `${firstName} User`.trim(),
+          phone_number: userPhone ?? null,
+        },
         meta: checkoutMeta,
       };
 
@@ -2535,12 +2516,15 @@ export async function campaignRoutes(app: FastifyInstance) {
         };
       }
 
-      if (!hasValidFlutterwaveKeys()) {
+      if (!hasFlutterwaveClientCredentials()) {
         reply.code(503);
         return { error: 'flutterwave_not_configured' } as any;
       }
 
-      const checkoutProfile = resolveFlutterwaveCheckoutProfile(userCountry);
+      const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(
+        userCountry,
+        { cardEnabled: hasFlutterwaveEncryptionKey() }
+      );
       const paymentCurrency = checkoutProfile.currency;
       const merchantReference = uuid();
       const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -2569,38 +2553,6 @@ export async function campaignRoutes(app: FastifyInstance) {
         return_url: callbackUrl,
         cancel_url: cancellationUrl,
       };
-      let hostedCheckout;
-      try {
-        hostedCheckout = await createHostedPayment({
-          txRef: merchantReference,
-          amount: body.amount,
-          currency: paymentCurrency,
-          paymentOptions: checkoutProfile.paymentOptions,
-          redirectUrl: callbackUrl,
-          customer: {
-            email: userEmail!,
-            name: `${firstName} User`.trim(),
-            phoneNumber: userPhone ?? undefined,
-          },
-          customizations: {
-            title: 'Prime Checkout',
-            description: `Campaign funding: ${campaign.title}`,
-          },
-          meta: checkoutMeta,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        request.log.error(
-          { error, detail, campaign: campaign.id, tx_ref: merchantReference },
-          `flutterwave_checkout_failed: ${detail}`
-        );
-        reply.code(isHostedCheckoutCompatibilityError(detail) ? 400 : 502);
-        return { error: 'flutterwave_checkout_failed', detail };
-      }
-      if (!hostedCheckout.checkoutUrl) {
-        reply.code(502);
-        return { error: 'flutterwave_missing_checkout_link' } as any;
-      }
 
       await client.query(
         `UPDATE pesapal_transactions
@@ -2610,25 +2562,38 @@ export async function campaignRoutes(app: FastifyInstance) {
           merchantReference,
           JSON.stringify({
             ...checkoutMeta,
-            checkout_url: hostedCheckout.checkoutUrl,
             payment_options: checkoutProfile.paymentOptions,
             supported_payment_methods: checkoutProfile.supportedPaymentMethods,
             mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+            phone_country_code: checkoutProfile.phoneCountryCode,
+            availability_notes: checkoutProfile.availabilityNotes,
+            customer: {
+              email: userEmail!,
+              name: `${firstName} User`.trim(),
+              phone_number: userPhone ?? null,
+            },
           }),
         ]
       );
 
       const checkoutPayload = {
-        provider: 'FLUTTERWAVE_CHECKOUT',
-        checkout_url: hostedCheckout.checkoutUrl,
+        provider: 'FLUTTERWAVE_V4',
+        mode: 'DIRECT_CHARGE',
         tx_ref: merchantReference,
         amount: body.amount,
         currency: paymentCurrency,
         payment_options: checkoutProfile.paymentOptions,
         supported_payment_methods: checkoutProfile.supportedPaymentMethods,
         mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
         country: checkoutProfile.country,
         redirect_url: callbackUrl,
+        customer: {
+          email: userEmail!,
+          name: `${firstName} User`.trim(),
+          phone_number: userPhone ?? null,
+        },
         meta: checkoutMeta,
       };
 

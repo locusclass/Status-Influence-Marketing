@@ -44,6 +44,7 @@ const flutterwaveConfig = {
   secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
   clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? ''),
   clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
+  encryptionKey: stripWrappingQuotes(process.env.FLUTTERWAVE_ENCRYPTION_KEY ?? ''),
   publicKey: stripWrappingQuotes(process.env.FLUTTERWAVE_PUBLIC_KEY ?? ''),
   webhookSecretHash: stripWrappingQuotes(process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? ''),
 };
@@ -97,6 +98,12 @@ export function getStartupConfigIssues() {
   if (config.flutterwave.clientSecret && !config.flutterwave.clientSecret.trim()) {
     issues.push('FLUTTERWAVE_CLIENT_SECRET is empty');
   }
+  if (
+    hasFlutterwaveClientCredentials() &&
+    !hasFlutterwaveEncryptionKey()
+  ) {
+    issues.push('FLUTTERWAVE_ENCRYPTION_KEY is missing; card payments are disabled');
+  }
 
   if (
     config.firebase.projectId ||
@@ -146,6 +153,10 @@ export function hasFlutterwaveClientCredentials() {
     config.flutterwave.clientId.trim().length > 0 &&
     config.flutterwave.clientSecret.trim().length > 0
   );
+}
+
+export function hasFlutterwaveEncryptionKey() {
+  return config.flutterwave.encryptionKey.trim().length > 0;
 }
 
 export function resolveFlutterwaveBaseUrl() {
