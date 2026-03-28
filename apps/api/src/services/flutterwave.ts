@@ -2,6 +2,7 @@ import { fetch } from 'undici';
 import crypto from 'crypto';
 import {
   config,
+  hasFlutterwaveSecretKey,
   hasFlutterwaveClientCredentials,
   resolveFlutterwaveBaseUrl,
 } from '../config.js';
@@ -173,6 +174,12 @@ export async function createHostedPayment(input: {
   };
   meta?: Record<string, any>;
 }) {
+  if (!hasFlutterwaveSecretKey() && hasFlutterwaveClientCredentials()) {
+    throw new Error(
+      'Flutterwave hosted checkout is using the v3 /payments API, but this server is configured for v4 client-credential flow. Switch to a v3 secret key for hosted checkout or replace this path with a true v4 payment-method/charge flow.'
+    );
+  }
+
   const response = await flutterwaveRequest<Record<string, any>>('/payments', {
     method: 'POST',
     body: {
