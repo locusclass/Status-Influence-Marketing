@@ -766,6 +766,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         }
         if (
           context.supportedPaymentMethods.length > 0 &&
+          parsed.data.payment_method !== 'CARD' &&
           !context.supportedPaymentMethods.includes(parsed.data.payment_method)
         ) {
           return { error: 'unsupported_payment_method' } as const;
@@ -840,12 +841,16 @@ export async function paymentRoutes(app: FastifyInstance) {
           customerId,
           paymentMethodId,
           txRef: parsed.data.tx_ref,
-          redirectUrl: context.callbackUrl,
-          meta: {
-            ...(context.rawPayload ?? {}),
-            payment_method: parsed.data.payment_method,
-            ...(methodNetwork ? { network: methodNetwork } : {}),
-          },
+          redirectUrl:
+            parsed.data.payment_method === 'CARD' ? context.callbackUrl : null,
+          meta:
+            parsed.data.payment_method === 'CARD'
+                ? {
+                    payment_method: parsed.data.payment_method,
+                    ...(context.country ? { country: context.country } : {}),
+                    ...(methodNetwork ? { network: methodNetwork } : {}),
+                  }
+                : undefined,
         });
         const chargeId = readId(chargeResponse);
         if (!chargeId) {
