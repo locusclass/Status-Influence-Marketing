@@ -3,6 +3,10 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@prime/shared": ["../../packages/shared/dist/index.d.ts"]
+    },
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,

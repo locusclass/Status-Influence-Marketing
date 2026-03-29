@@ -7,12 +7,13 @@ import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterw
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
-import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
+import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
     current_advertiser_viewers: z.number().int().min(0).optional(),
+    private_contract_rate_ugx: z.number().int().min(0).optional(),
     promoter_platforms: z
         .array(z.object({
         platform: z.enum(['TIKTOK', 'X']),
@@ -50,6 +51,26 @@ const walletDepositSchema = z.object({
     network: z.enum(['MTN', 'AIRTEL']).optional(),
 });
 const MIN_WALLET_WITHDRAW_UGX = 10_000;
+async function getVerifiedEngagements24h(client, userId, platform) {
+    const params = [userId];
+    const platformFilter = platform && platform.trim().length > 0
+        ? `AND s.platform = $2`
+        : '';
+    if (platform && platform.trim().length > 0) {
+        params.push(platform.trim().toUpperCase());
+    }
+    const res = await client.query(`
+    SELECT COALESCE(SUM(COALESCE(p.observed_views, 0)), 0)::int AS engagements_24h
+    FROM proofs p
+    JOIN verification_sessions s ON s.id = p.session_id
+    WHERE p.user_id = $1
+      AND p.status = 'VERIFIED'
+      AND p.decision = 'VERIFIED'
+      AND p.created_at >= now() - interval '24 hours'
+      ${platformFilter}
+    `, params);
+    return Math.max(0, Number(res.rows[0]?.engagements_24h ?? 0));
+}
 function normalizeUrlOrigin(value) {
     if (!value)
         return null;
@@ -428,6 +449,10 @@ async function ensureAccountSchema(client) {
   `);
     await client.query(`
     ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS private_contract_rate_ugx INTEGER NOT NULL DEFAULT 0
+  `);
+    await client.query(`
+    ALTER TABLE users
       ADD COLUMN IF NOT EXISTS current_advertiser_viewers INTEGER NOT NULL DEFAULT 0
   `);
     await client.query(`
@@ -537,12 +562,23 @@ export async function accountRoutes(app) {
           u.country,
           u.preferred_currency AS currency,
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
           COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+          COALESCE(engagements.engagements_24h, 0)::int AS proven_engagements_24h,
           ${fullNameSelect} AS full_name,
           p.avatar_url,
           p.updated_at
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS engagements_24h
+          FROM proofs pr
+          JOIN verification_sessions vs ON vs.id = pr.session_id
+          WHERE pr.user_id = u.id
+            AND pr.status = 'VERIFIED'
+            AND pr.decision = 'VERIFIED'
+            AND pr.created_at >= now() - interval '24 hours'
+        ) engagements ON TRUE
         WHERE u.id = $1
         LIMIT 1
         `, [userId]);
@@ -624,6 +660,20 @@ export async function accountRoutes(app) {
                     return { error: 'advertiser_profile_required' };
                 }
                 await client.query('UPDATE users SET current_advertiser_viewers=$2 WHERE id=$1', [userId, Math.max(0, body.current_advertiser_viewers)]);
+            }
+            if (typeof body.private_contract_rate_ugx === 'number') {
+                const roleRes = await client.query(`
+            SELECT role
+            FROM users
+            WHERE id=$1
+            LIMIT 1
+            `, [userId]);
+                const user = roleRes.rows[0];
+                if (!canAccessDistributorFeatures(user?.role)) {
+                    reply.code(403);
+                    return { error: 'distributor_profile_required' };
+                }
+                await client.query('UPDATE users SET private_contract_rate_ugx=$2 WHERE id=$1', [userId, Math.max(0, body.private_contract_rate_ugx)]);
             }
             if (shouldSyncPromoterPlatforms) {
                 await replacePromoterPlatformProfiles(client, userId, promoterPlatforms);
@@ -806,7 +856,8 @@ export async function accountRoutes(app) {
             country,
             preferred_currency AS currency,
             ${canMultiSelect},
-            COALESCE(max_status_viewers_12h, 0)::int AS max_status_viewers_12h
+            COALESCE(max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+            COALESCE(private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx
           FROM users
           WHERE id=$1
           LIMIT 1
@@ -836,7 +887,7 @@ export async function accountRoutes(app) {
           UPDATE users
           SET max_status_viewers_12h=$2
           WHERE id=$1
-          RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h
+          RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx
           `, [userId, parsed.data.max_status_viewers_12h]);
             const user = updated.rows[0];
             if (!user) {

@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS users (
   preferred_currency TEXT NOT NULL DEFAULT 'UGX',
   can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE,
   max_status_viewers_12h INTEGER NOT NULL DEFAULT 0,
+  private_contract_rate_ugx INTEGER NOT NULL DEFAULT 0,
   current_advertiser_viewers INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -152,6 +153,14 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE users
       ADD COLUMN max_status_viewers_12h INTEGER NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'private_contract_rate_ugx'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN private_contract_rate_ugx INTEGER NOT NULL DEFAULT 0;
   END IF;
   IF NOT EXISTS (
     SELECT 1

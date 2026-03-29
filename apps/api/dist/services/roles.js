@@ -54,6 +54,7 @@ export function buildUserSession(user) {
     const activeRole = normalizeActiveRole(user.active_role, role);
     const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
     const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
+    const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
     const requiresDistributorCapacitySetup = (activeRole === ACCOUNT_ROLE_DISTRIBUTOR || role === ACCOUNT_ROLE_DUAL_USER)
         && maxStatusViewers12h <= 0;
     return {
@@ -70,6 +71,9 @@ export function buildUserSession(user) {
         max_status_viewers_12h: Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0),
         current_advertiser_viewers: Math.max(0, Number.isFinite(currentAdvertiserViewers)
             ? Math.trunc(currentAdvertiserViewers)
+            : 0),
+        private_contract_rate_ugx: Math.max(0, Number.isFinite(privateContractRateUgx)
+            ? Math.trunc(privateContractRateUgx)
             : 0),
         requires_distributor_capacity_setup: requiresDistributorCapacitySetup,
     };

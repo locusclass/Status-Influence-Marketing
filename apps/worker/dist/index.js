@@ -7,7 +7,7 @@ import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-import { deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getMinEngagementRate, getPrimaryMetricTarget, getRequiredLiveHours, getSubmissionActionType, getSubmissionLiveHours, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, isSubmissionPublic, normalizeCampaignPlatform, } from '@prime/shared';
+import { deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getMinEngagementRate, getPrimaryMetricTarget, getPublicContractUnitRate, getRequiredLiveHours, getSubmissionActionType, getSubmissionLiveHours, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, isSubmissionPublic, normalizeCampaignPlatform, } from '@prime/shared';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
@@ -427,10 +427,10 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
                 `${rootCampaign.title} · Creator ${uuid().slice(0, 8)}`,
                 rootCampaign.platform,
                 rootCampaign.delivery_model ?? 'DETERMINISTIC',
-                rootCampaign.payout_amount,
-                rootCampaign.payout_amount,
+                unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
+                unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
                 unitTarget,
-                rootCampaign.platform_fee_percent ?? 25,
+                rootCampaign.platform_fee_percent ?? 0,
                 rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
                 round,
                 rootCampaign.media_type,
@@ -509,7 +509,7 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
                 continue;
             }
             const views = Math.max(1, Math.min(distributor.max_status_viewers_12h, remainingViews));
-            const budgetTotal = views * Number(rootCampaign.payout_amount ?? 10);
+            const budgetTotal = views * getPublicContractUnitRate(rootCampaign.media_type);
             const executionMetaJson = rootCampaign.execution_meta == null
                 ? null
                 : JSON.stringify(rootCampaign.execution_meta);
@@ -558,10 +558,10 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
                 `${rootCampaign.title} · Allocation ${uuid().slice(0, 8)}`,
                 rootCampaign.platform,
                 rootCampaign.delivery_model ?? 'DETERMINISTIC',
-                rootCampaign.payout_amount,
+                budgetTotal,
                 budgetTotal,
                 views,
-                rootCampaign.platform_fee_percent ?? 25,
+                rootCampaign.platform_fee_percent ?? 0,
                 rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
                 round,
                 rootCampaign.media_type,

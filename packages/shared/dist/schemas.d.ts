@@ -59,7 +59,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    media_type: "VIDEO" | "IMAGE" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     title?: string | undefined;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -81,7 +81,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    media_type: "VIDEO" | "IMAGE" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     title?: string | undefined;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -103,7 +103,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    media_type: "VIDEO" | "IMAGE" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     title?: string | undefined;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -125,7 +125,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "IMAGE" | "VIDEO" | "TEXT";
+    media_type: "VIDEO" | "IMAGE" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     title?: string | undefined;
     execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -174,7 +174,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -196,7 +196,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -218,7 +218,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -240,7 +240,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -288,7 +288,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_contacts?: string[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
-    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
+    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -305,7 +305,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -334,7 +334,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_contacts?: string[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
-    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
+    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -351,7 +351,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -380,7 +380,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_contacts?: string[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
-    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
+    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -397,7 +397,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;
@@ -426,7 +426,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_contacts?: string[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
-    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
+    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -443,7 +443,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "IMAGE" | "VIDEO" | "TEXT";
+        media_type: "VIDEO" | "IMAGE" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         title?: string | undefined;
         execution_mode?: "PRIVATE_CONTRACT" | "OPEN_BUDGET" | undefined;

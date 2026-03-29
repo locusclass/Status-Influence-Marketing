@@ -1,4 +1,4 @@
-import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getCampaignBurstMode, isCreatorPlatform, normalizeExecutionMeta, resolveDeliveryModel, } from '@prime/shared';
+import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, isCreatorPlatform, normalizeExecutionMeta, resolveDeliveryModel, } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
@@ -8,10 +8,10 @@ import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, }
 import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
-const PRIVATE_RATE_UGX = 25;
-const OPEN_RATE_UGX = 10;
-const PRIVATE_PLATFORM_FEE_PERCENT = 15;
-const OPEN_PLATFORM_FEE_PERCENT = 25;
+const PRIVATE_PLATFORM_FEE_PERCENT = 0;
+const OPEN_PLATFORM_FEE_PERCENT = 0;
+const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
+const CREATOR_DEFAULT_TARGET_METRIC = 100;
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
     .map((platform) => `'${platform}'`)
     .join(', ')}))`;
@@ -293,6 +293,51 @@ async function usersHasColumn(client, columnName) {
     `, [columnName]);
     return Boolean(res.rowCount);
 }
+async function getVerifiedEngagements24h(client, userId, platform) {
+    const params = [userId];
+    const platformFilter = platform && platform.trim().length > 0
+        ? `AND s.platform = $2`
+        : '';
+    if (platform && platform.trim().length > 0) {
+        params.push(platform.trim().toUpperCase());
+    }
+    const res = await client.query(`
+    SELECT COALESCE(SUM(COALESCE(p.observed_views, 0)), 0)::int AS engagements_24h
+    FROM proofs p
+    JOIN verification_sessions s ON s.id = p.session_id
+    WHERE p.user_id = $1
+      AND p.status = 'VERIFIED'
+      AND p.decision = 'VERIFIED'
+      AND p.created_at >= now() - interval '24 hours'
+      ${platformFilter}
+    `, params);
+    return Math.max(0, Number(res.rows[0]?.engagements_24h ?? 0));
+}
+function resolveDeterministicEngagements24h(provenEngagements24h, maxStatusViewers12h) {
+    if (provenEngagements24h > 0) {
+        return provenEngagements24h;
+    }
+    const capacity24h = Math.max(0, maxStatusViewers12h) * 2;
+    return Math.max(1, capacity24h);
+}
+async function buildPrivatePricingQuote(client, distributor, mediaType, platform) {
+    const provenEngagements24h = await getVerifiedEngagements24h(client, String(distributor.id), platform);
+    const pricingReferenceEngagements24h = resolveDeterministicEngagements24h(provenEngagements24h, Number(distributor.max_status_viewers_12h ?? 0));
+    const deterministicRateUgx = pricingReferenceEngagements24h * getPublicContractUnitRate(mediaType);
+    const privateContractRateUgx = Math.max(0, Number(distributor.private_contract_rate_ugx ?? 0));
+    const selectedRateUgx = privateContractRateUgx > 0 ? privateContractRateUgx : deterministicRateUgx;
+    return {
+        pricing_mode: privateContractRateUgx > 0
+            ? 'CUSTOM_RATE'
+            : 'DETERMINISTIC',
+        private_contract_rate_ugx: privateContractRateUgx,
+        deterministic_rate_ugx: deterministicRateUgx,
+        selected_rate_ugx: selectedRateUgx,
+        proven_engagements_24h: provenEngagements24h,
+        pricing_reference_engagements_24h: pricingReferenceEngagements24h,
+        impression_target: Math.max(1, pricingReferenceEngagements24h),
+    };
+}
 async function findDistributorByPhone(client, rawPhone) {
     const phone = normalizePhone(rawPhone);
     const hasFullName = await usersHasColumn(client, 'full_name');
@@ -305,6 +350,7 @@ async function findDistributorByPhone(client, rawPhone) {
       u.public_id,
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
@@ -350,18 +396,16 @@ async function loadEditableCampaign(client, campaignId, advertiserId) {
         return { error: 'escrow_not_found' };
     return { root, children, escrow, bundle_id: bundleId, bundle_roots: bundleRoots };
 }
-function deriveCampaignBudget(platform, executionMode, budgetTotal, payoutAmount, requestedMetricTarget) {
+function deriveCampaignBudget(platform, executionMode, budgetTotal, payoutAmount, requestedMetricTarget, mediaType) {
     const platformFeePercent = executionMode === 'OPEN_BUDGET'
         ? OPEN_PLATFORM_FEE_PERCENT
         : PRIVATE_PLATFORM_FEE_PERCENT;
-    const distributableBudget = Math.floor(budgetTotal * ((100 - platformFeePercent) / 100));
+    const distributableBudget = Math.max(0, Math.floor(budgetTotal));
+    const publicUnitRate = getPublicContractUnitRate(mediaType);
     if (isCreatorPlatform(platform) && executionMode === 'OPEN_BUDGET') {
-        const normalizedPayout = Math.max(1, Number(payoutAmount ?? 0));
-        const impressionTarget = Math.max(1, Math.round(Number(requestedMetricTarget ?? 1)));
-        const estimatedAllocationCount = Math.floor(distributableBudget / normalizedPayout);
-        if (estimatedAllocationCount < 1) {
-            throw new Error('creator_budget_insufficient');
-        }
+        const impressionTarget = Math.max(1, Math.floor(distributableBudget / publicUnitRate));
+        const estimatedAllocationCount = Math.max(1, Math.ceil(impressionTarget / CREATOR_DEFAULT_TARGET_METRIC));
+        const normalizedPayout = publicUnitRate;
         return {
             platformFeePercent,
             distributableBudget,
@@ -373,11 +417,11 @@ function deriveCampaignBudget(platform, executionMode, budgetTotal, payoutAmount
         };
     }
     const normalizedPayout = executionMode === 'OPEN_BUDGET'
-        ? OPEN_RATE_UGX
+        ? publicUnitRate
         : Math.max(1, Number(payoutAmount ?? distributableBudget));
     const impressionTarget = executionMode === 'OPEN_BUDGET'
-        ? Math.max(1, Math.floor(distributableBudget / OPEN_RATE_UGX))
-        : Math.max(1, Math.floor(distributableBudget / PRIVATE_RATE_UGX));
+        ? Math.max(1, Math.floor(distributableBudget / publicUnitRate))
+        : Math.max(1, Math.round(Number(requestedMetricTarget ?? 1)));
     return {
         platformFeePercent,
         distributableBudget,
@@ -450,42 +494,27 @@ function distributeIntegerTotal(total, weights) {
     }
     return shares;
 }
-async function resolvePrivateDistributorShares(client, beneficiaryContacts, requestedViewerTarget, rootBudgetTotal, distributableBudget) {
-    const distributors = [];
-    let remainingViewers = requestedViewerTarget;
+async function resolvePrivateDistributorShares(client, beneficiaryContacts, mediaType, platform) {
+    const shares = [];
     for (const phone of beneficiaryContacts) {
         const distributor = await findDistributorByPhone(client, phone);
         if (!distributor) {
             throw new Error(`beneficiary_not_found:${phone}`);
         }
-        const capacity = Math.max(0, Number(distributor.max_status_viewers_12h ?? 0));
-        if (capacity <= 0) {
-            throw new Error(`beneficiary_capacity_not_set:${phone}`);
-        }
-        const allocatedViews = Math.min(capacity, remainingViewers);
-        if (allocatedViews > 0) {
-            distributors.push({
-                distributor,
-                allocated_views: allocatedViews,
-            });
-            remainingViewers -= allocatedViews;
-        }
-        if (remainingViewers <= 0) {
-            break;
-        }
+        const pricing = await buildPrivatePricingQuote(client, distributor, mediaType, platform);
+        shares.push({
+            distributor,
+            impression_target: pricing.impression_target,
+            payout_amount: pricing.selected_rate_ugx,
+            budget_total: pricing.selected_rate_ugx,
+            pricing_mode: pricing.pricing_mode,
+            private_contract_rate_ugx: pricing.private_contract_rate_ugx,
+            deterministic_rate_ugx: pricing.deterministic_rate_ugx,
+            proven_engagements_24h: pricing.proven_engagements_24h,
+            pricing_reference_engagements_24h: pricing.pricing_reference_engagements_24h,
+        });
     }
-    if (remainingViewers > 0) {
-        throw new Error(`beneficiary_capacity_insufficient:${remainingViewers}`);
-    }
-    const weights = distributors.map((entry) => entry.allocated_views);
-    const payoutShares = distributeIntegerTotal(distributableBudget, weights);
-    const budgetShares = distributeIntegerTotal(rootBudgetTotal, weights);
-    return distributors.map((entry, index) => ({
-        distributor: entry.distributor,
-        allocated_views: entry.allocated_views,
-        payout_amount: Math.max(1, payoutShares[index] ?? 0),
-        budget_total: Math.max(1, budgetShares[index] ?? 0),
-    }));
+    return shares;
 }
 async function loadBundleSummary(client, bundleId, userId) {
     const bundleRes = await client.query(`
@@ -796,6 +825,7 @@ export async function campaignRoutes(app) {
     const FundBundleSchema = FundCampaignSchema.omit({ campaign_id: true });
     const LookupDistributorSchema = z.object({
         phone: z.string().trim().min(7).max(20),
+        media_type: MediaTypeSchema.optional(),
     });
     app.get('/campaigns/distributor-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
         const role = request.user?.role;
@@ -809,7 +839,15 @@ export async function campaignRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         const distributor = await withTransaction(async (client) => {
-            return findDistributorByPhone(client, parsed.data.phone);
+            const found = await findDistributorByPhone(client, String(parsed.data.phone));
+            if (!found) {
+                return null;
+            }
+            const pricing = await buildPrivatePricingQuote(client, found, parsed.data.media_type ?? 'IMAGE', 'WHATSAPP_STATUS');
+            return {
+                ...found,
+                ...pricing,
+            };
         });
         if (!distributor) {
             reply.code(404);
@@ -943,10 +981,16 @@ export async function campaignRoutes(app) {
                    c.id,
                    c.assigned_distributor_id,
                    c.assigned_phone,
-                   COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h
+                   COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+                   COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+                   COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), c.assigned_phone) AS full_name,
+                   c.payout_amount,
+                   c.impression_target,
+                   c.execution_meta
                  FROM campaigns
                  c
                  LEFT JOIN users u ON u.id = c.assigned_distributor_id
+                 LEFT JOIN user_profiles p ON p.user_id = c.assigned_distributor_id
                  WHERE c.parent_campaign_id=$1
                  ORDER BY created_at ASC`, [found.id])).rows
                 : [];
@@ -1203,27 +1247,80 @@ export async function campaignRoutes(app) {
                 for (const item of bundleItems) {
                     const executionMode = resolveExecutionMode(item.platform, item.execution_mode);
                     const beneficiaryContacts = normalizeBeneficiaryContacts(item);
+                    const deliveryModel = resolveDeliveryModel(item.platform, item.delivery_model);
+                    const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
+                        ? Math.max(PRIVATE_CONTRACT_WINDOW_HOURS, Number(item.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS))
+                        : Number(item.terms_keep_hours ?? 12);
                     if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
                         throw new Error('private_beneficiary_required');
                     }
-                    const { platformFeePercent, visibility, distributableBudget, normalizedPayout: rootPayout, impressionTarget: budgetImpressionTarget, estimatedAllocationCount, perAllocationTarget, } = deriveCampaignBudget(item.platform, executionMode, item.budget_total, item.payout_amount, item.impression_target);
-                    const requestedViewerTarget = executionMode === 'OPEN_BUDGET'
-                        ? budgetImpressionTarget
-                        : Number(item.impression_target ?? budgetImpressionTarget);
-                    if (executionMode === 'PRIVATE_CONTRACT' &&
-                        requestedViewerTarget > budgetImpressionTarget) {
-                        throw new Error('private_target_exceeds_budget');
+                    let platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
+                    let visibility = executionMode === 'OPEN_BUDGET' ? 'PUBLIC' : 'PRIVATE';
+                    let distributableBudget = Math.max(0, Number(item.budget_total ?? 0));
+                    let resolvedRootPayout = Math.max(1, Number(item.payout_amount ?? 0));
+                    let resolvedBudgetTotal = distributableBudget;
+                    let resolvedImpressionTarget = Math.max(1, Number(item.impression_target ?? 1));
+                    let estimatedAllocationCount = 1;
+                    let perAllocationTarget = resolvedImpressionTarget;
+                    let privateShares = [];
+                    let privateBeneficiaryMeta = [];
+                    if (executionMode === 'PRIVATE_CONTRACT') {
+                        privateShares = await resolvePrivateDistributorShares(client, beneficiaryContacts, item.media_type, item.platform);
+                        resolvedBudgetTotal = privateShares.reduce((sum, share) => sum + Number(share.budget_total ?? 0), 0);
+                        distributableBudget = resolvedBudgetTotal;
+                        resolvedRootPayout = privateShares.reduce((sum, share) => sum + Number(share.payout_amount ?? 0), 0);
+                        resolvedImpressionTarget = privateShares.reduce((sum, share) => sum + Number(share.impression_target ?? 0), 0);
+                        estimatedAllocationCount = Math.max(1, privateShares.length);
+                        perAllocationTarget = Math.max(1, Math.ceil(resolvedImpressionTarget / estimatedAllocationCount));
+                        visibility = 'PRIVATE';
+                        platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
+                        privateBeneficiaryMeta = privateShares.map((share) => ({
+                            distributor_id: String(share.distributor.id ?? ''),
+                            distributor_public_id: String(share.distributor.public_id ?? ''),
+                            full_name: String(share.distributor.full_name ??
+                                share.distributor.phone ??
+                                ''),
+                            phone: String(share.distributor.phone ?? ''),
+                            pricing_mode: share.pricing_mode,
+                            private_contract_rate_ugx: share.private_contract_rate_ugx,
+                            deterministic_rate_ugx: share.deterministic_rate_ugx,
+                            selected_rate_ugx: share.budget_total,
+                            proven_engagements_24h: share.proven_engagements_24h,
+                            pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
+                            impression_target: share.impression_target,
+                        }));
                     }
-                    const rootBudget = item.budget_total;
-                    const deliveryModel = resolveDeliveryModel(item.platform, item.delivery_model);
-                    const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, isCreatorPlatform(item.platform) && executionMode === 'OPEN_BUDGET'
+                    else {
+                        const publicBudget = deriveCampaignBudget(item.platform, executionMode, item.budget_total, item.payout_amount, item.impression_target, item.media_type);
+                        platformFeePercent = publicBudget.platformFeePercent;
+                        visibility = publicBudget.visibility;
+                        distributableBudget = publicBudget.distributableBudget;
+                        resolvedRootPayout = publicBudget.normalizedPayout;
+                        resolvedBudgetTotal = Math.max(0, Number(item.budget_total ?? 0));
+                        resolvedImpressionTarget = publicBudget.impressionTarget;
+                        estimatedAllocationCount = publicBudget.estimatedAllocationCount;
+                        perAllocationTarget = publicBudget.perAllocationTarget;
+                    }
+                    const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, executionMode === 'PRIVATE_CONTRACT'
                         ? {
-                            allocation_strategy: 'REPUTATION_BASED',
-                            creator_unit_count: estimatedAllocationCount,
-                            per_creator_target_metric: perAllocationTarget,
-                            target_metric_total: budgetImpressionTarget,
+                            private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                            private_pricing_model: 'PROMOTER_RATE',
+                            private_beneficiaries: privateBeneficiaryMeta,
+                            private_total_rate_ugx: resolvedBudgetTotal,
+                            private_total_proven_engagements_24h: resolvedImpressionTarget,
                         }
-                        : undefined);
+                        : isCreatorPlatform(item.platform) &&
+                            executionMode === 'OPEN_BUDGET'
+                            ? {
+                                allocation_strategy: 'REPUTATION_BASED',
+                                creator_unit_count: estimatedAllocationCount,
+                                per_creator_target_metric: perAllocationTarget,
+                                target_metric_total: resolvedImpressionTarget,
+                                public_contract_rate_ugx: getPublicContractUnitRate(item.media_type),
+                            }
+                            : {
+                                public_contract_rate_ugx: getPublicContractUnitRate(item.media_type),
+                            });
                     const campaignBurstMode = getCampaignBurstMode({
                         execution_meta: executionMeta,
                     });
@@ -1236,11 +1333,9 @@ export async function campaignRoutes(app) {
                         delivery_model: deliveryModel,
                         execution_mode: executionMode,
                         visibility,
-                        payout_amount: rootPayout,
-                        budget_total: item.budget_total,
-                        impression_target: executionMode === 'OPEN_BUDGET'
-                            ? budgetImpressionTarget
-                            : requestedViewerTarget,
+                        payout_amount: resolvedRootPayout,
+                        budget_total: resolvedBudgetTotal,
+                        impression_target: resolvedImpressionTarget,
                         platform_fee_percent: platformFeePercent,
                         advertiser_wallet_mode: 'CAMPAIGN_ONLY',
                         media_type: item.media_type,
@@ -1248,7 +1343,7 @@ export async function campaignRoutes(app) {
                         media_url: item.media_url,
                         execution_meta: executionMeta,
                         campaign_burst_mode: campaignBurstMode,
-                        terms_keep_hours: Number(item.terms_keep_hours ?? 12),
+                        terms_keep_hours: resolvedTermsKeepHours,
                         terms_min_views: item.terms_min_views ?? null,
                         terms_requirement: item.terms_requirement ?? 'DURATION',
                         start_date: item.start_date,
@@ -1265,10 +1360,18 @@ export async function campaignRoutes(app) {
                             root.bundle_root_campaign_id = bundleRootCampaignId;
                         }
                     }
-                    totalEscrowAmount += Number(item.budget_total ?? 0);
+                    totalEscrowAmount += resolvedBudgetTotal;
                     if (executionMode === 'PRIVATE_CONTRACT') {
-                        const shares = await resolvePrivateDistributorShares(client, beneficiaryContacts, requestedViewerTarget, rootBudget, distributableBudget);
-                        for (const share of shares) {
+                        for (const share of privateShares) {
+                            const childExecutionMeta = buildCampaignExecutionMeta(item.platform, executionMeta, {
+                                private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                                private_pricing_model: share.pricing_mode,
+                                private_contract_rate_ugx: share.private_contract_rate_ugx,
+                                deterministic_rate_ugx: share.deterministic_rate_ugx,
+                                selected_rate_ugx: share.budget_total,
+                                proven_engagements_24h: share.proven_engagements_24h,
+                                pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
+                            });
                             await campaignRepo.createCampaign(client, {
                                 advertiser_id: authUser,
                                 campaign_bundle_id: bundleId,
@@ -1283,15 +1386,15 @@ export async function campaignRoutes(app) {
                                 visibility: 'PRIVATE',
                                 payout_amount: share.payout_amount,
                                 budget_total: share.budget_total,
-                                impression_target: share.allocated_views,
+                                impression_target: share.impression_target,
                                 platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
                                 advertiser_wallet_mode: 'CAMPAIGN_ONLY',
                                 media_type: item.media_type,
                                 media_text: item.media_text,
                                 media_url: item.media_url,
-                                execution_meta: executionMeta,
+                                execution_meta: childExecutionMeta,
                                 campaign_burst_mode: campaignBurstMode,
-                                terms_keep_hours: Number(item.terms_keep_hours ?? 12),
+                                terms_keep_hours: resolvedTermsKeepHours,
                                 terms_min_views: item.terms_min_views ?? null,
                                 terms_requirement: item.terms_requirement ?? 'DURATION',
                                 start_date: item.start_date,
@@ -1350,6 +1453,7 @@ export async function campaignRoutes(app) {
     app.patch('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
         const body = UpdateCampaignSchema.parse(request.body);
+        const platformKey = String(body.platform);
         const authUser = request.user?.sub;
         const role = request.user?.role;
         if (!authUser) {
@@ -1381,35 +1485,92 @@ export async function campaignRoutes(app) {
                         throw new Error('duplicate_bundle_platform');
                     }
                 }
-                const executionMode = resolveExecutionMode(body.platform, body.execution_mode);
+                const executionMode = resolveExecutionMode(platformKey, body.execution_mode);
                 const beneficiaryContacts = normalizeBeneficiaryContacts(body);
+                const deliveryModel = resolveDeliveryModel(platformKey, body.delivery_model);
+                const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
+                    ? Math.max(PRIVATE_CONTRACT_WINDOW_HOURS, Number(body.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS))
+                    : Number(body.terms_keep_hours ?? editable.root.terms_keep_hours ?? 12);
                 if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
                     throw new Error('private_beneficiary_required');
                 }
-                const { platformFeePercent, visibility, distributableBudget, normalizedPayout: rootPayout, impressionTarget: budgetImpressionTarget, estimatedAllocationCount, perAllocationTarget, } = deriveCampaignBudget(body.platform, executionMode, body.budget_total, body.payout_amount, body.impression_target);
-                const requestedViewerTarget = executionMode === 'OPEN_BUDGET'
-                    ? budgetImpressionTarget
-                    : Number(body.impression_target ?? budgetImpressionTarget);
-                if (executionMode === 'PRIVATE_CONTRACT' && requestedViewerTarget > budgetImpressionTarget) {
-                    throw new Error('private_target_exceeds_budget');
+                let platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
+                let visibility = executionMode === 'OPEN_BUDGET' ? 'PUBLIC' : 'PRIVATE';
+                let distributableBudget = Math.max(0, Number(body.budget_total ?? 0));
+                let resolvedRootPayout = Math.max(1, Number(body.payout_amount ?? 0));
+                let resolvedBudgetTotal = distributableBudget;
+                let resolvedImpressionTarget = Math.max(1, Number(body.impression_target ?? 1));
+                let estimatedAllocationCount = 1;
+                let perAllocationTarget = resolvedImpressionTarget;
+                let privateShares = [];
+                let privateBeneficiaryMeta = [];
+                if (executionMode === 'PRIVATE_CONTRACT') {
+                    privateShares = await resolvePrivateDistributorShares(client, beneficiaryContacts, body.media_type, platformKey);
+                    resolvedBudgetTotal = privateShares.reduce((sum, share) => sum + Number(share.budget_total ?? 0), 0);
+                    distributableBudget = resolvedBudgetTotal;
+                    resolvedRootPayout = privateShares.reduce((sum, share) => sum + Number(share.payout_amount ?? 0), 0);
+                    resolvedImpressionTarget = privateShares.reduce((sum, share) => sum + Number(share.impression_target ?? 0), 0);
+                    estimatedAllocationCount = Math.max(1, privateShares.length);
+                    perAllocationTarget = Math.max(1, Math.ceil(resolvedImpressionTarget / estimatedAllocationCount));
+                    visibility = 'PRIVATE';
+                    platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
+                    privateBeneficiaryMeta = privateShares.map((share) => ({
+                        distributor_id: String(share.distributor.id ?? ''),
+                        distributor_public_id: String(share.distributor.public_id ?? ''),
+                        full_name: String(share.distributor.full_name ??
+                            share.distributor.phone ??
+                            ''),
+                        phone: String(share.distributor.phone ?? ''),
+                        pricing_mode: share.pricing_mode,
+                        private_contract_rate_ugx: share.private_contract_rate_ugx,
+                        deterministic_rate_ugx: share.deterministic_rate_ugx,
+                        selected_rate_ugx: share.budget_total,
+                        proven_engagements_24h: share.proven_engagements_24h,
+                        pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
+                        impression_target: share.impression_target,
+                    }));
+                }
+                else {
+                    const publicBudget = deriveCampaignBudget(platformKey, executionMode, Number(body.budget_total), body.payout_amount == null ? null : Number(body.payout_amount), body.impression_target == null
+                        ? null
+                        : Number(body.impression_target), body.media_type);
+                    platformFeePercent = publicBudget.platformFeePercent;
+                    visibility = publicBudget.visibility;
+                    distributableBudget = publicBudget.distributableBudget;
+                    resolvedRootPayout = publicBudget.normalizedPayout;
+                    resolvedBudgetTotal = Math.max(0, Number(body.budget_total ?? 0));
+                    resolvedImpressionTarget = publicBudget.impressionTarget;
+                    estimatedAllocationCount = publicBudget.estimatedAllocationCount;
+                    perAllocationTarget = publicBudget.perAllocationTarget;
                 }
                 const escrowStatus = String(editable.escrow.status ?? 'PENDING').toUpperCase();
                 const currentRootBudget = Number(editable.root.budget_total ?? 0);
-                const nextRootBudget = Number(body.budget_total ?? 0);
+                const nextRootBudget = resolvedBudgetTotal;
                 const nextEscrowTotal = Number(editable.escrow.amount_total ?? 0) - currentRootBudget + nextRootBudget;
                 if (escrowStatus !== 'PENDING' &&
                     currentRootBudget !== nextRootBudget) {
                     return { error: 'campaign_edit_budget_locked' };
                 }
-                const deliveryModel = resolveDeliveryModel(body.platform, body.delivery_model);
-                const executionMeta = buildCampaignExecutionMeta(body.platform, body.execution_meta, isCreatorPlatform(body.platform) && executionMode === 'OPEN_BUDGET'
+                const executionMeta = buildCampaignExecutionMeta(platformKey, body.execution_meta, executionMode === 'PRIVATE_CONTRACT'
                     ? {
-                        allocation_strategy: 'REPUTATION_BASED',
-                        creator_unit_count: estimatedAllocationCount,
-                        per_creator_target_metric: perAllocationTarget,
-                        target_metric_total: budgetImpressionTarget,
+                        private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                        private_pricing_model: 'PROMOTER_RATE',
+                        private_beneficiaries: privateBeneficiaryMeta,
+                        private_total_rate_ugx: resolvedBudgetTotal,
+                        private_total_proven_engagements_24h: resolvedImpressionTarget,
                     }
-                    : undefined);
+                    : isCreatorPlatform(body.platform) &&
+                        executionMode === 'OPEN_BUDGET'
+                        ? {
+                            allocation_strategy: 'REPUTATION_BASED',
+                            creator_unit_count: estimatedAllocationCount,
+                            per_creator_target_metric: perAllocationTarget,
+                            target_metric_total: resolvedImpressionTarget,
+                            public_contract_rate_ugx: getPublicContractUnitRate(body.media_type),
+                        }
+                        : {
+                            public_contract_rate_ugx: getPublicContractUnitRate(body.media_type),
+                        });
                 const campaignBurstMode = getCampaignBurstMode({
                     execution_meta: executionMeta,
                 });
@@ -1444,18 +1605,16 @@ export async function campaignRoutes(app) {
                     deliveryModel,
                     executionMode,
                     visibility,
-                    rootPayout,
-                    body.budget_total,
-                    executionMode === 'OPEN_BUDGET'
-                        ? budgetImpressionTarget
-                        : requestedViewerTarget,
+                    resolvedRootPayout,
+                    resolvedBudgetTotal,
+                    resolvedImpressionTarget,
                     platformFeePercent,
                     body.media_type,
                     body.media_text ?? null,
                     body.media_url ?? null,
                     executionMetaJson,
                     campaignBurstMode,
-                    Number(body.terms_keep_hours ?? editable.root.terms_keep_hours ?? 12),
+                    resolvedTermsKeepHours,
                     body.terms_min_views ?? null,
                     body.terms_requirement ?? editable.root.terms_requirement ?? 'DURATION',
                     body.start_date,
@@ -1472,15 +1631,23 @@ export async function campaignRoutes(app) {
                     editable.root.id,
                 ]);
                 if (executionMode === 'PRIVATE_CONTRACT') {
-                    const shares = await resolvePrivateDistributorShares(client, beneficiaryContacts, requestedViewerTarget, body.budget_total, distributableBudget);
-                    for (const share of shares) {
+                    for (const share of privateShares) {
+                        const childExecutionMeta = buildCampaignExecutionMeta(platformKey, executionMeta, {
+                            private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                            private_pricing_model: share.pricing_mode,
+                            private_contract_rate_ugx: share.private_contract_rate_ugx,
+                            deterministic_rate_ugx: share.deterministic_rate_ugx,
+                            selected_rate_ugx: share.budget_total,
+                            proven_engagements_24h: share.proven_engagements_24h,
+                            pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
+                        });
                         await campaignRepo.createCampaign(client, {
                             ...body,
                             advertiser_id: authUser,
                             campaign_bundle_id: bundleId,
                             bundle_root_campaign_id: getEscrowCampaignId(editable.root),
                             delivery_model: deliveryModel,
-                            execution_meta: executionMeta,
+                            execution_meta: childExecutionMeta,
                             campaign_burst_mode: campaignBurstMode,
                             parent_campaign_id: editable.root.id,
                             assigned_distributor_id: share.distributor.id,
@@ -1491,7 +1658,8 @@ export async function campaignRoutes(app) {
                             budget_total: share.budget_total,
                             platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
                             advertiser_wallet_mode: 'CAMPAIGN_ONLY',
-                            impression_target: share.allocated_views,
+                            impression_target: share.impression_target,
+                            terms_keep_hours: resolvedTermsKeepHours,
                         });
                     }
                 }
@@ -2084,9 +2252,8 @@ export async function campaignRoutes(app) {
                 contract: {
                     ...contractRes.rows[0],
                     allocated_views: allocatedViews,
-                    allocated_value: campaign.execution_mode === 'OPEN_BUDGET'
-                        ? allocatedViews * OPEN_RATE_UGX
-                        : Number(campaign.payout_amount ?? 0),
+                    allocated_value: Number(campaign.payout_amount ??
+                        allocatedViews * getPublicContractUnitRate(campaign.media_type)),
                 },
                 campaign: {
                     ...campaign,

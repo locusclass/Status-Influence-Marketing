@@ -16,6 +16,7 @@ import {
   getCreatorScoreFloor,
   getMinEngagementRate,
   getPrimaryMetricTarget,
+  getPublicContractUnitRate,
   getRequiredLiveHours,
   getSubmissionActionType,
   getSubmissionLiveHours,
@@ -536,10 +537,10 @@ async function allocateCreatorCampaignShares(client: any, rootCampaign: any) {
           `${rootCampaign.title} · Creator ${uuid().slice(0, 8)}`,
           rootCampaign.platform,
           rootCampaign.delivery_model ?? 'DETERMINISTIC',
-          rootCampaign.payout_amount,
-          rootCampaign.payout_amount,
+          unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
+          unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
           unitTarget,
-          rootCampaign.platform_fee_percent ?? 25,
+          rootCampaign.platform_fee_percent ?? 0,
           rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
           round,
           rootCampaign.media_type,
@@ -634,7 +635,8 @@ async function allocateOpenCampaignShares(client: any, rootCampaign: any) {
       }
 
       const views = Math.max(1, Math.min(distributor.max_status_viewers_12h, remainingViews));
-      const budgetTotal = views * Number(rootCampaign.payout_amount ?? 10);
+      const budgetTotal =
+        views * getPublicContractUnitRate(rootCampaign.media_type);
       const executionMetaJson =
         rootCampaign.execution_meta == null
           ? null
@@ -686,10 +688,10 @@ async function allocateOpenCampaignShares(client: any, rootCampaign: any) {
           `${rootCampaign.title} · Allocation ${uuid().slice(0, 8)}`,
           rootCampaign.platform,
           rootCampaign.delivery_model ?? 'DETERMINISTIC',
-          rootCampaign.payout_amount,
+          budgetTotal,
           budgetTotal,
           views,
-          rootCampaign.platform_fee_percent ?? 25,
+          rootCampaign.platform_fee_percent ?? 0,
           rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
           round,
           rootCampaign.media_type,

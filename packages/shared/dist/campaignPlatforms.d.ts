@@ -4,6 +4,7 @@ type JsonRecord = Record<string, unknown>;
 export declare function normalizeCampaignPlatform(value: unknown): CampaignPlatform;
 export declare function isCreatorPlatform(value: unknown): boolean;
 export declare function resolveDeliveryModel(platform: unknown, requested?: unknown): DeliveryModel;
+export declare function getPublicContractUnitRate(mediaType: unknown): number;
 export declare function normalizeExecutionMeta(platform: unknown, rawMeta: unknown): JsonRecord | null;
 export declare function getExecutionMeta(campaign: any): JsonRecord;
 export declare function getCreatorScoreFloor(campaign: any): number;

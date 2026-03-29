@@ -56,6 +56,10 @@ export function resolveDeliveryModel(platform, requested) {
         ? 'PROBABILISTIC'
         : 'DETERMINISTIC';
 }
+export function getPublicContractUnitRate(mediaType) {
+    const normalized = String(mediaType ?? '').trim().toUpperCase();
+    return normalized === 'VIDEO' ? 200 : 100;
+}
 export function normalizeExecutionMeta(platform, rawMeta) {
     const source = toRecord(rawMeta);
     const normalized = {};

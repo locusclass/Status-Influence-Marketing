@@ -71,6 +71,11 @@ export function resolveDeliveryModel(
     : 'DETERMINISTIC';
 }
 
+export function getPublicContractUnitRate(mediaType: unknown): number {
+  const normalized = String(mediaType ?? '').trim().toUpperCase();
+  return normalized === 'VIDEO' ? 200 : 100;
+}
+
 export function normalizeExecutionMeta(
   platform: unknown,
   rawMeta: unknown
