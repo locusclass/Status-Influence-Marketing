@@ -41,9 +41,31 @@ BEGIN
 END;
 $$;
 
+CREATE SEQUENCE IF NOT EXISTS user_public_id_seq
+  MINVALUE 1000000000
+  START WITH 1000000000
+  MAXVALUE 9999999999
+  NO CYCLE;
+
+CREATE OR REPLACE FUNCTION generate_user_numeric_public_id()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  next_value BIGINT;
+BEGIN
+  next_value := nextval('user_public_id_seq');
+  IF next_value > 9999999999 THEN
+    RAISE EXCEPTION 'user_public_id_seq exhausted';
+  END IF;
+
+  RETURN lpad(next_value::text, 10, '0');
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('usr'),
+  public_id TEXT NOT NULL DEFAULT generate_user_numeric_public_id(),
   full_name TEXT NOT NULL DEFAULT '',
   email TEXT UNIQUE NOT NULL,
   phone TEXT UNIQUE NOT NULL,
@@ -88,11 +110,31 @@ DO $$ BEGIN
     WHERE table_name = 'users' AND column_name = 'public_id'
   ) THEN
     ALTER TABLE users
-      ADD COLUMN public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('usr');
+      ADD COLUMN public_id TEXT NOT NULL DEFAULT generate_user_numeric_public_id();
   END IF;
+  ALTER TABLE users
+    ALTER COLUMN public_id
+    SET DEFAULT generate_user_numeric_public_id();
+  PERFORM setval(
+    'user_public_id_seq',
+    GREATEST(
+      COALESCE(
+        (
+          SELECT MAX(public_id::bigint)
+          FROM users
+          WHERE public_id ~ '^[1-9][0-9]{9}$'
+        ),
+        1000000000
+      ),
+      COALESCE((SELECT last_value FROM user_public_id_seq), 1000000000)
+    ),
+    true
+  );
   UPDATE users
-  SET public_id = generate_pronounceable_public_id('usr')
-  WHERE public_id IS NULL OR btrim(public_id) = '';
+  SET public_id = generate_user_numeric_public_id()
+  WHERE public_id IS NULL
+     OR btrim(public_id) = ''
+     OR public_id !~ '^[1-9][0-9]{9}$';
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
