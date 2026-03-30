@@ -1023,7 +1023,12 @@ export async function accountRoutes(app: FastifyInstance) {
         return { error: 'validation_failed', issues: parsed.error.issues };
       }
       const body = parsed.data;
-      const nextCapacity = Number(body.max_status_viewers_12h ?? 0);
+      const nextCapacity =
+        typeof body.max_status_viewers_12h === 'number' &&
+        Number.isFinite(body.max_status_viewers_12h) &&
+        body.max_status_viewers_12h > 0
+          ? Math.trunc(body.max_status_viewers_12h)
+          : null;
 
       return withTransaction(async (client) => {
         const currentRes = await client.query(
@@ -1046,10 +1051,6 @@ export async function accountRoutes(app: FastifyInstance) {
 
         const currentRole = normalizeAccountRole(currentUser.role);
         const nextActiveRole = normalizeActiveRole(body.role, body.role);
-        if (nextActiveRole === 'DISTRIBUTOR' && nextCapacity <= 0) {
-          reply.code(400);
-          return { error: 'max_status_viewers_required' };
-        }
         const nextRole =
           currentRole === 'ADMIN'
             ? 'ADMIN'
@@ -1065,12 +1066,12 @@ export async function accountRoutes(app: FastifyInstance) {
           SET role=$2,
               active_role=$3,
               max_status_viewers_12h = CASE
-                WHEN $3='DISTRIBUTOR' THEN $4
+                WHEN $4::int IS NOT NULL THEN $4
                 ELSE max_status_viewers_12h
               END
           WHERE id=$1
           `,
-          [userId, nextRole, nextActiveRole, Math.max(0, nextCapacity)]
+          [userId, nextRole, nextActiveRole, nextCapacity]
         );
 
         const hasCanMultiContract = await usersHasColumn(
