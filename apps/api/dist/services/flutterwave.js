@@ -2,6 +2,20 @@ import { fetch } from 'undici';
 import crypto from 'crypto';
 import { config, hasFlutterwaveSecretKey, hasFlutterwaveClientCredentials, resolveFlutterwaveBaseUrl, } from '../config.js';
 let cachedAccessToken = null;
+export class FlutterwaveRequestError extends Error {
+    status;
+    payload;
+    responseText;
+    path;
+    constructor(input) {
+        super(`Flutterwave request failed: ${input.status} ${input.responseText}`.trim());
+        this.name = 'FlutterwaveRequestError';
+        this.status = input.status;
+        this.payload = input.payload;
+        this.responseText = input.responseText;
+        this.path = input.path;
+    }
+}
 function randomId() {
     return crypto.randomUUID();
 }
@@ -157,9 +171,133 @@ async function flutterwaveRequest(path, init = {}) {
     });
     if (!res.ok) {
         const text = await res.text();
-        throw new Error(`Flutterwave request failed: ${res.status} ${text}`);
+        let payload = null;
+        try {
+            payload = text ? JSON.parse(text) : null;
+        }
+        catch {
+            payload = null;
+        }
+        throw new FlutterwaveRequestError({
+            status: res.status,
+            payload,
+            responseText: text,
+            path,
+        });
     }
     return (await res.json());
+}
+function extractCollectionItems(payload) {
+    const candidates = [
+        payload?.data,
+        payload?.data?.data,
+        payload?.data?.records,
+        payload?.records,
+        payload?.items,
+        payload?.results,
+        payload,
+    ];
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) {
+            return candidate;
+        }
+        if (candidate && typeof candidate === 'object') {
+            return [candidate];
+        }
+    }
+    return [];
+}
+function readPayloadErrorText(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return '';
+    }
+    const value = payload;
+    const candidates = [
+        value?.message,
+        value?.error,
+        value?.error?.message,
+        value?.error?.type,
+        value?.error?.code,
+        value?.detail,
+    ];
+    return candidates
+        .map((candidate) => {
+        if (typeof candidate === 'string') {
+            return candidate.trim();
+        }
+        if (candidate && typeof candidate === 'object') {
+            return JSON.stringify(candidate);
+        }
+        return '';
+    })
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+}
+function isExistingCustomerConflict(error) {
+    if (!(error instanceof FlutterwaveRequestError)) {
+        return false;
+    }
+    if (error.status !== 409) {
+        return false;
+    }
+    const detail = `${error.responseText} ${readPayloadErrorText(error.payload)}`.toLowerCase();
+    return (detail.includes('customer already exists') ||
+        (detail.includes('resource_conflict') && detail.includes('customer')));
+}
+function readCustomerEmail(customer) {
+    const value = customer?.email ?? customer?.customer?.email;
+    return String(value ?? '').trim().toLowerCase();
+}
+function readCustomerId(customer) {
+    const candidates = [
+        customer?.id,
+        customer?.data?.id,
+        customer?.customer_id,
+        customer?.customer?.id,
+    ];
+    for (const candidate of candidates) {
+        const value = String(candidate ?? '').trim();
+        if (value) {
+            return value;
+        }
+    }
+    return '';
+}
+async function findCustomerByEmail(email) {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+        return null;
+    }
+    const queryVariants = [
+        `/customers?email=${encodeURIComponent(normalizedEmail)}`,
+        `/customers?search=${encodeURIComponent(normalizedEmail)}`,
+        `/customers`,
+    ];
+    for (const [index, path] of queryVariants.entries()) {
+        try {
+            const response = await flutterwaveRequest(path);
+            const customers = extractCollectionItems(response);
+            const match = customers.find((entry) => {
+                if (!entry || typeof entry !== 'object') {
+                    return false;
+                }
+                return readCustomerEmail(entry) === normalizedEmail;
+            });
+            if (match && typeof match === 'object') {
+                return match;
+            }
+        }
+        catch (error) {
+            if (index < queryVariants.length - 1 &&
+                error instanceof FlutterwaveRequestError &&
+                (error.status === 400 || error.status === 404)) {
+                continue;
+            }
+            throw error;
+        }
+    }
+    return null;
 }
 export async function registerIpnUrl() {
     return {
@@ -232,6 +370,22 @@ export async function createCustomer(input) {
         },
         idempotencyKey: `customer:${input.email.toLowerCase()}`,
     });
+}
+export async function ensureCustomer(input) {
+    try {
+        return await createCustomer(input);
+    }
+    catch (error) {
+        if (!isExistingCustomerConflict(error)) {
+            throw error;
+        }
+        const existingCustomer = await findCustomerByEmail(input.email);
+        const customerId = existingCustomer ? readCustomerId(existingCustomer) : '';
+        if (!customerId) {
+            throw new Error(`Flutterwave customer already exists for ${input.email}, but no customer id could be resolved.`);
+        }
+        return existingCustomer;
+    }
 }
 export async function createMobileMoneyPaymentMethod(input) {
     const normalizedPhone = input.phoneNumber.replace(/[^\d]/g, '');

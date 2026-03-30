@@ -5,7 +5,7 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import {
   createCardPaymentMethod,
   createCharge,
-  createCustomer,
+  ensureCustomer,
   createMobileMoneyPaymentMethod,
   getTransactionStatus,
   updateChargeAuthorization,
@@ -782,15 +782,32 @@ export async function paymentRoutes(app: FastifyInstance) {
 
         const phoneNumber =
           parsed.data.phone_number?.trim() || context.phoneNumber;
-        const customerResponse = await createCustomer({
-          email: context.email,
-          name: context.customerName,
-          phoneNumber: phoneNumber || undefined,
-          phoneCountryCode: context.phoneCountryCode || undefined,
-        });
-        const customerId = readId(customerResponse);
+        let customerId = String(
+          context.rawPayload.flutterwave_customer_id ?? ''
+        ).trim();
         if (!customerId) {
-          throw new Error('Flutterwave customer creation did not return an id');
+          const customerResponse = await ensureCustomer({
+            email: context.email,
+            name: context.customerName,
+            phoneNumber: phoneNumber || undefined,
+            phoneCountryCode: context.phoneCountryCode || undefined,
+          });
+          customerId = readId(customerResponse);
+          if (!customerId) {
+            throw new Error('Flutterwave customer creation did not return an id');
+          }
+
+          await client.query(
+            `UPDATE pesapal_transactions
+             SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
+             WHERE merchant_reference=$1`,
+            [
+              parsed.data.tx_ref,
+              JSON.stringify({
+                flutterwave_customer_id: customerId,
+              }),
+            ]
+          );
         }
 
         let methodResponse: Record<string, any>;

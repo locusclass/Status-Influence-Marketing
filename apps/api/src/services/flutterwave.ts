@@ -9,6 +9,29 @@ import {
 
 let cachedAccessToken: { token: string; expiresAt: number } | null = null;
 
+export class FlutterwaveRequestError extends Error {
+  status: number;
+  payload: unknown;
+  responseText: string;
+  path: string;
+
+  constructor(input: {
+    status: number;
+    payload: unknown;
+    responseText: string;
+    path: string;
+  }) {
+    super(
+      `Flutterwave request failed: ${input.status} ${input.responseText}`.trim()
+    );
+    this.name = 'FlutterwaveRequestError';
+    this.status = input.status;
+    this.payload = input.payload;
+    this.responseText = input.responseText;
+    this.path = input.path;
+  }
+}
+
 function randomId() {
   return crypto.randomUUID();
 }
@@ -225,10 +248,153 @@ async function flutterwaveRequest<T>(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Flutterwave request failed: ${res.status} ${text}`);
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = null;
+    }
+    throw new FlutterwaveRequestError({
+      status: res.status,
+      payload,
+      responseText: text,
+      path,
+    });
   }
 
   return (await res.json()) as T;
+}
+
+function extractCollectionItems(payload: Record<string, any>) {
+  const candidates = [
+    payload?.data,
+    payload?.data?.data,
+    payload?.data?.records,
+    payload?.records,
+    payload?.items,
+    payload?.results,
+    payload,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+    if (candidate && typeof candidate === 'object') {
+      return [candidate];
+    }
+  }
+
+  return [];
+}
+
+function readPayloadErrorText(payload: unknown) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+
+  const value = payload as Record<string, any>;
+  const candidates = [
+    value?.message,
+    value?.error,
+    value?.error?.message,
+    value?.error?.type,
+    value?.error?.code,
+    value?.detail,
+  ];
+
+  return candidates
+    .map((candidate) => {
+      if (typeof candidate === 'string') {
+        return candidate.trim();
+      }
+      if (candidate && typeof candidate === 'object') {
+        return JSON.stringify(candidate);
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function isExistingCustomerConflict(error: unknown) {
+  if (!(error instanceof FlutterwaveRequestError)) {
+    return false;
+  }
+
+  if (error.status !== 409) {
+    return false;
+  }
+
+  const detail = `${error.responseText} ${readPayloadErrorText(error.payload)}`.toLowerCase();
+  return (
+    detail.includes('customer already exists') ||
+    (detail.includes('resource_conflict') && detail.includes('customer'))
+  );
+}
+
+function readCustomerEmail(customer: Record<string, any>) {
+  const value = customer?.email ?? customer?.customer?.email;
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function readCustomerId(customer: Record<string, any>) {
+  const candidates = [
+    customer?.id,
+    customer?.data?.id,
+    customer?.customer_id,
+    customer?.customer?.id,
+  ];
+
+  for (const candidate of candidates) {
+    const value = String(candidate ?? '').trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return '';
+}
+
+async function findCustomerByEmail(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail) {
+    return null;
+  }
+
+  const queryVariants = [
+    `/customers?email=${encodeURIComponent(normalizedEmail)}`,
+    `/customers?search=${encodeURIComponent(normalizedEmail)}`,
+    `/customers`,
+  ];
+
+  for (const [index, path] of queryVariants.entries()) {
+    try {
+      const response = await flutterwaveRequest<Record<string, any>>(path);
+      const customers = extractCollectionItems(response);
+      const match = customers.find((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return false;
+        }
+        return readCustomerEmail(entry as Record<string, any>) === normalizedEmail;
+      });
+      if (match && typeof match === 'object') {
+        return match as Record<string, any>;
+      }
+    } catch (error) {
+      if (
+        index < queryVariants.length - 1 &&
+        error instanceof FlutterwaveRequestError &&
+        (error.status === 400 || error.status === 404)
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return null;
 }
 
 export async function registerIpnUrl(): Promise<any> {
@@ -340,6 +506,39 @@ export async function createCustomer(input: {
     },
     idempotencyKey: `customer:${input.email.toLowerCase()}`,
   });
+}
+
+export async function ensureCustomer(input: {
+  email: string;
+  name: string;
+  phoneNumber?: string;
+  phoneCountryCode?: string;
+  address?: {
+    city?: string;
+    country?: string;
+    line1?: string;
+    line2?: string;
+    postalCode?: string;
+    state?: string;
+  };
+}) {
+  try {
+    return await createCustomer(input);
+  } catch (error) {
+    if (!isExistingCustomerConflict(error)) {
+      throw error;
+    }
+
+    const existingCustomer = await findCustomerByEmail(input.email);
+    const customerId = existingCustomer ? readCustomerId(existingCustomer) : '';
+    if (!customerId) {
+      throw new Error(
+        `Flutterwave customer already exists for ${input.email}, but no customer id could be resolved.`
+      );
+    }
+
+    return existingCustomer;
+  }
 }
 
 export async function createMobileMoneyPaymentMethod(input: {

@@ -1359,7 +1359,7 @@ export async function campaignRoutes(app: FastifyInstance) {
                  LEFT JOIN users u ON u.id = c.assigned_distributor_id
                  LEFT JOIN user_profiles p ON p.user_id = c.assigned_distributor_id
                  WHERE c.parent_campaign_id=$1
-                 ORDER BY created_at ASC`,
+                 ORDER BY c.created_at ASC`,
                 [found.id]
               )
             ).rows
