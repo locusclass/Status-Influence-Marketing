@@ -260,12 +260,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.created_at >= $${idx}`);
+        conditions.push(`created_at >= ${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.created_at <= $${idx}`);
+        conditions.push(`created_at <= ${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -301,7 +301,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`c.status_placeholder_idx`);
+        conditions.push(`status = ${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -316,12 +316,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.created_at >= $${idx}`);
+        conditions.push(`created_at >= ${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.created_at <= $${idx}`);
+        conditions.push(`created_at <= ${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -857,7 +857,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`ww.c.status_placeholder_idx`);
+        conditions.push(`ww.status = ${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1132,12 +1132,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.created_at >= $${idx}`);
+        conditions.push(`created_at >= ${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.created_at <= $${idx}`);
+        conditions.push(`created_at <= ${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1246,7 +1246,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`p.c.status = ${idx}`);
+        conditions.push(`p.status = ${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1336,7 +1336,7 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(c.id::text ILIKE $${idx} OR user_c.id::text ILIKE $${idx})`);
+        conditions.push(`(id::text ILIKE ${idx} OR user_id::text ILIKE ${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -1351,12 +1351,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.created_at >= $${idx}`);
+        conditions.push(`created_at >= ${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.created_at <= $${idx}`);
+        conditions.push(`created_at <= ${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1429,7 +1429,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`e.c.status = ${idx}`);
+        conditions.push(`status = ${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1510,7 +1510,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`p.c.status = ${idx}`);
+        conditions.push(`p.status = ${idx}`);
         params.push(query.status);
         idx++;
       }
