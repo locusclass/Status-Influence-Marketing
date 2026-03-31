@@ -920,7 +920,7 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx})`);
+        conditions.push(`(u.email ILIKE ${idx} OR u.phone ILIKE ${idx} OR u.id::text ILIKE ${idx} OR u.public_id ILIKE ${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
