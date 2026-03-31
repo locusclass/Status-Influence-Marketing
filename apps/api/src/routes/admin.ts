@@ -930,24 +930,24 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`c.u.status = ${idx}`);
+        conditions.push(`u.status = ${idx}`);
         params.push(query.status);
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.u.created_at >= $${idx}`);
+        conditions.push(`u.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.u.created_at <= $${idx}`);
+        conditions.push(`u.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT u.*, p.avatar_url FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        `SELECT u.*, p.avatar_url FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id ${where} ORDER BY u.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
         [...params, limit, offset]
       );
       return { users: res.rows };
@@ -1144,7 +1144,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT c.*, adv.email AS advertiser_email, dist.email AS assigned_distributor_email FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        `SELECT c.*, adv.email AS advertiser_email, dist.email AS assigned_distributor_email FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
         [...params, limit, offset]
       );
       const statusSummaries = await buildCampaignStatusSummaries(
@@ -1559,22 +1559,22 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(c.title ILIKE $${idx} OR u.email ILIKE $${idx} OR ctr.c.id::text ILIKE $${idx})`);
+        conditions.push(`(c.title ILIKE $${idx} OR u.email ILIKE $${idx} OR c.id::text ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`ctr.c.ctr.status = ${idx}`);
+        conditions.push(`c.ctr.status = ${idx}`);
         params.push(query.status);
         idx++;
       }
       if (range.from) {
-        conditions.push(`ctr.c.ctr.created_at >= $${idx}`);
+        conditions.push(`c.ctr.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`ctr.c.ctr.created_at <= $${idx}`);
+        conditions.push(`c.ctr.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
