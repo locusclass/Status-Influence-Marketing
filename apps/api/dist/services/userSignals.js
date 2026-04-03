@@ -9,6 +9,14 @@ export async function ensureUserSignalSchema(client) {
       ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ
   `);
     await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS status_reason TEXT
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS status_reason_updated_at TIMESTAMPTZ
+  `);
+    await client.query(`
     CREATE TABLE IF NOT EXISTS user_notifications (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

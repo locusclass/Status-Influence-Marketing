@@ -55,10 +55,16 @@ export function buildUserSession(user) {
     const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
     const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
     const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
+    const accountStatus = String(user.status ?? 'ACTIVE').trim().toUpperCase();
     return {
         id: String(user.id ?? ''),
         public_id: String(user.public_id ?? ''),
         email: String(user.email ?? ''),
+        status: accountStatus === 'SUSPENDED' || accountStatus === 'BANNED'
+            ? accountStatus
+            : 'ACTIVE',
+        status_reason: user.status_reason == null ? null : String(user.status_reason),
+        status_reason_updated_at: user.status_reason_updated_at ?? null,
         role,
         active_role: activeRole,
         phone: String(user.phone ?? ''),

@@ -557,6 +557,9 @@ export async function accountRoutes(app) {
           u.id,
           u.public_id,
           u.email,
+          u.status,
+          u.status_reason,
+          u.status_reason_updated_at,
           u.role,
           u.active_role,
           u.phone,
@@ -859,6 +862,9 @@ export async function accountRoutes(app) {
             id,
             public_id,
             email,
+            status,
+            status_reason,
+            status_reason_updated_at,
             role,
             active_role,
             phone,
@@ -896,7 +902,7 @@ export async function accountRoutes(app) {
           UPDATE users
           SET max_status_viewers_12h=$2
           WHERE id=$1
-          RETURNING id, public_id, email, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx
+          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx
           `, [userId, parsed.data.max_status_viewers_12h]);
             const user = updated.rows[0];
             if (!user) {

@@ -79,8 +79,72 @@ type BundleSummary = {
   campaigns: any[];
 };
 
+type AccountRestrictionResult = {
+  error: 'account_restricted';
+  detail: string;
+  status: 'SUSPENDED' | 'BANNED';
+};
+
 function normalizePhone(input: string) {
   return input.replace(/[^\d+]/g, '').trim();
+}
+
+function normalizeUserAccountStatus(value: unknown) {
+  const status = String(value ?? 'ACTIVE').trim().toUpperCase();
+  if (status === 'SUSPENDED' || status === 'BANNED') {
+    return status;
+  }
+  return 'ACTIVE';
+}
+
+function buildAccountRestrictionResult(
+  status: unknown,
+  audience: 'advertiser' | 'distributor'
+): AccountRestrictionResult | null {
+  const normalizedStatus = normalizeUserAccountStatus(status);
+  if (normalizedStatus === 'ACTIVE') {
+    return null;
+  }
+
+  const actionText =
+    audience === 'advertiser'
+      ? 'create adverts'
+      : 'view or accept promoter opportunities';
+  const detail =
+    normalizedStatus === 'BANNED'
+      ? `Your account is banned. You cannot ${actionText}.`
+      : `Your account is suspended. You cannot ${actionText} until an administrator reactivates it.`;
+
+  return {
+    error: 'account_restricted',
+    detail,
+    status: normalizedStatus,
+  };
+}
+
+async function getUserAccountRestriction(
+  client: any,
+  userId: string | null | undefined,
+  audience: 'advertiser' | 'distributor'
+) {
+  const normalizedUserId = String(userId ?? '').trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+
+  const userRes = await client.query(
+    `
+    SELECT status
+    FROM users
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [normalizedUserId]
+  );
+  return buildAccountRestrictionResult(
+    userRes.rows[0]?.status ?? 'ACTIVE',
+    audience
+  );
 }
 
 function normalizeUrlOrigin(value?: string) {
@@ -1193,7 +1257,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     return { distributor };
   });
 
-  app.get('/campaigns', { preHandler: [app.authenticate] }, async (request) => {
+  app.get('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string | undefined;
     const role = normalizeActiveRole(
       (request.user as any)?.active_role,
@@ -1211,6 +1275,17 @@ export async function campaignRoutes(app: FastifyInstance) {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
     const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
     const campaigns = await withTransaction(async (client) => {
+      if (role === 'DISTRIBUTOR') {
+        const restriction = await getUserAccountRestriction(
+          client,
+          authUser,
+          'distributor'
+        );
+        if (restriction) {
+          return restriction as any;
+        }
+      }
+
       const params: any[] = [];
       const filters: string[] = [];
       let idx = 1;
@@ -1314,13 +1389,32 @@ export async function campaignRoutes(app: FastifyInstance) {
       }));
       return campaignsWithStatus;
     });
+    if ((campaigns as any)?.error === 'account_restricted') {
+      reply.code(403);
+      return campaigns;
+    }
     return { campaigns };
   });
 
   app.get('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const authUser = (request.user as any)?.sub as string | undefined;
+    const role = normalizeActiveRole(
+      (request.user as any)?.active_role,
+      (request.user as any)?.role
+    );
     const campaign = await withTransaction(async (client) => {
+      if (role === 'DISTRIBUTOR') {
+        const restriction = await getUserAccountRestriction(
+          client,
+          authUser,
+          'distributor'
+        );
+        if (restriction) {
+          return restriction as any;
+        }
+      }
+
       const found = await campaignRepo.getCampaign(client, params.id);
       if (!found) return null;
       if (
@@ -1442,6 +1536,10 @@ export async function campaignRoutes(app: FastifyInstance) {
         status_summary: await buildCampaignStatusSummary(client, found.id, authUser ?? null),
       };
     });
+    if ((campaign as any)?.error === 'account_restricted') {
+      reply.code(403);
+      return campaign as any;
+    }
     if (!campaign) {
       reply.code(404);
       return { error: 'campaign_not_found' };
@@ -1656,6 +1754,13 @@ export async function campaignRoutes(app: FastifyInstance) {
     if (!canAccessAdvertiserFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' };
+    }
+    const restriction = await withTransaction(async (client) =>
+      getUserAccountRestriction(client, authUser, 'advertiser')
+    );
+    if (restriction) {
+      reply.code(403);
+      return restriction;
     }
     let campaign;
     try {
@@ -2906,6 +3011,15 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const result = await withTransaction(async (client) => {
+      const restriction = await getUserAccountRestriction(
+        client,
+        authUser,
+        'distributor'
+      );
+      if (restriction) {
+        return restriction as any;
+      }
+
       const campaign = await campaignRepo.getCampaign(client, body.campaign_id);
       if (!campaign) return { error: 'campaign_not_found' } as any;
       if (campaign.status !== 'ACTIVE') return { error: 'campaign_not_active' } as any;
@@ -3008,6 +3122,11 @@ export async function campaignRoutes(app: FastifyInstance) {
         },
       };
     });
+
+    if ((result as any)?.error === 'account_restricted') {
+      reply.code(403);
+      return result as any;
+    }
 
     if ((result as any).error) {
       const error = (result as any).error as string;

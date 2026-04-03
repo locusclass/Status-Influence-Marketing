@@ -12,7 +12,8 @@ const UpdateUserRoleSchema = z.object({
     role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER'])
 });
 const UpdateUserStatusSchema = z.object({
-    status: z.enum(['ACTIVE', 'SUSPENDED', 'BANNED'])
+    status: z.enum(['ACTIVE', 'SUSPENDED', 'BANNED']),
+    reason: z.string().trim().max(500).optional().nullable(),
 });
 const UpdateUserContractPrivilegeSchema = z.object({
     can_multi_contract: z.boolean()
@@ -1026,22 +1027,54 @@ export async function adminRoutes(app) {
     app.patch('/admin/users/:id/status', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         const body = UpdateUserStatusSchema.parse(request.body);
+        const reason = (body.reason ?? '').trim();
+        if ((body.status === 'SUSPENDED' || body.status === 'BANNED') && reason.length === 0) {
+            reply.code(400);
+            return {
+                error: 'status_reason_required',
+                detail: `Provide a reason when setting an account to ${body.status}.`,
+            };
+        }
         const result = await withTransaction(async (client) => {
             await ensurePublicIdColumns(client);
+            await ensureUserSignalSchema(client);
             const resolvedUserId = await resolveUserId(client, params.id);
             if (!resolvedUserId) {
                 return null;
             }
-            const res = await client.query('UPDATE users SET status=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.status]);
+            const res = await client.query(`
+        UPDATE users
+        SET status = $2,
+            status_reason = CASE
+              WHEN $2 = 'ACTIVE' THEN NULL
+              ELSE NULLIF($3, '')
+            END,
+            status_reason_updated_at = CASE
+              WHEN $2 = 'ACTIVE' THEN NULL
+              ELSE NOW()
+            END
+        WHERE id = $1
+        RETURNING *
+        `, [resolvedUserId, body.status, reason]);
             if (res.rows[0]) {
-                await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', resolvedUserId, { status: body.status });
+                await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', resolvedUserId, {
+                    status: body.status,
+                    reason: reason.length === 0 ? null : reason,
+                });
                 await createUserNotifications(client, [resolvedUserId], {
-                    title: 'Account status updated by admin',
-                    body: `An administrator changed your account status to ${body.status}.`,
+                    title: body.status === 'ACTIVE'
+                        ? 'Account reinstated by admin'
+                        : 'Account status updated by admin',
+                    body: body.status === 'ACTIVE'
+                        ? 'An administrator reinstated your account.'
+                        : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
                     actorId: request.user.sub,
                     targetType: 'user',
                     targetId: resolvedUserId,
-                    meta: { status: body.status },
+                    meta: {
+                        status: body.status,
+                        reason: reason.length === 0 ? null : reason,
+                    },
                 });
             }
             return res.rows[0];
