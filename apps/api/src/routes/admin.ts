@@ -240,7 +240,9 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query.q) {
-        conditions.push(`(action ILIKE $${idx} OR target_type ILIKE $${idx} OR target_c.id::text ILIKE $${idx})`);
+        conditions.push(
+          `(action ILIKE $${idx} OR target_type ILIKE $${idx} OR COALESCE(target_id, '') ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -260,12 +262,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`created_at >= ${idx}`);
+        conditions.push(`created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`created_at <= ${idx}`);
+        conditions.push(`created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -291,7 +293,7 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(source_c.id::text ILIKE $${idx} OR reference ILIKE $${idx})`);
+        conditions.push(`(source_id::text ILIKE $${idx} OR reference ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -301,7 +303,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`status = ${idx}`);
+        conditions.push(`status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -316,12 +318,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`created_at >= ${idx}`);
+        conditions.push(`created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`created_at <= ${idx}`);
+        conditions.push(`created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -538,13 +540,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
       if (query?.q) {
         conditions.push(
-          `(s.c.id::text ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.c.public_id ILIKE $${idx} OR c.title ILIKE $${idx} OR c.public_id ILIKE $${idx} OR s.challenge_code ILIKE $${idx} OR s.challenge_phrase ILIKE $${idx})`
+          `(s.id::text ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx} OR c.title ILIKE $${idx} OR c.public_id ILIKE $${idx} OR s.challenge_code ILIKE $${idx} OR s.challenge_phrase ILIKE $${idx})`
         );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.platform) {
-        conditions.push(`s.c.platform = $${idx}`);
+        conditions.push(`s.platform = $${idx}`);
         params.push(query.platform);
         idx++;
       }
@@ -561,12 +563,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`s.c.created_at >= $${idx}`);
+        conditions.push(`s.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`s.c.created_at <= $${idx}`);
+        conditions.push(`s.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -618,7 +620,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       if (query?.q) {
         conditions.push(
-          `(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.c.public_id ILIKE $${idx} OR d.c.id::text ILIKE $${idx} OR COALESCE(d.payload->>'title', '') ILIKE $${idx})`
+          `(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx} OR d.id::text ILIKE $${idx} OR COALESCE(d.payload->>'title', '') ILIKE $${idx})`
         );
         params.push(`%${query.q}%`);
         idx++;
@@ -686,7 +688,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       if (query?.q) {
         conditions.push(
-          `(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.c.public_id ILIKE $${idx} OR u.c.id::text ILIKE $${idx})`
+          `(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx} OR u.id::text ILIKE $${idx})`
         );
         params.push(`%${query.q}%`);
         idx++;
@@ -784,7 +786,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       if (query?.q) {
         conditions.push(
-          `(df.c.id::text ILIKE $${idx} OR df.fingerprint_hash ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.c.public_id ILIKE $${idx})`
+          `(df.id::text ILIKE $${idx} OR df.fingerprint_hash ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx})`
         );
         params.push(`%${query.q}%`);
         idx++;
@@ -795,12 +797,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`df.c.created_at >= $${idx}`);
+        conditions.push(`df.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`df.c.created_at <= $${idx}`);
+        conditions.push(`df.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -851,13 +853,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
       if (query?.q) {
         conditions.push(
-          `(ww.c.id::text ILIKE $${idx} OR ww.pesapal_reference ILIKE $${idx} OR ww.receiver_u.phone ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.c.public_id ILIKE $${idx})`
+          `(ww.id::text ILIKE $${idx} OR COALESCE(ww.pesapal_reference, '') ILIKE $${idx} OR ww.receiver_phone ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx})`
         );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`ww.status = ${idx}`);
+        conditions.push(`ww.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -877,12 +879,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`ww.c.created_at >= $${idx}`);
+        conditions.push(`ww.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`ww.c.created_at <= $${idx}`);
+        conditions.push(`ww.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -920,7 +922,7 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(u.email ILIKE ${idx} OR u.phone ILIKE ${idx} OR u.id::text ILIKE ${idx} OR u.public_id ILIKE ${idx})`);
+        conditions.push(`(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.id::text ILIKE $${idx} OR u.public_id ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -930,7 +932,7 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`u.status = ${idx}`);
+        conditions.push(`u.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1112,12 +1114,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (query?.status) {
-        conditions.push(`c.status = ${idx}`);
+        conditions.push(`c.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
       if (query?.platform) {
-        conditions.push(`c.platform = ${idx}`);
+        conditions.push(`c.platform = $${idx}`);
         params.push(query.platform);
         idx++;
       }
@@ -1132,12 +1134,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`created_at >= ${idx}`);
+        conditions.push(`c.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`created_at <= ${idx}`);
+        conditions.push(`c.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1241,12 +1243,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(p.c.id::text ILIKE $${idx} OR c.title ILIKE $${idx})`);
+        conditions.push(
+          `(p.id::text ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR c.title ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`p.status = ${idx}`);
+        conditions.push(`p.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1256,12 +1260,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`p.c.created_at >= $${idx}`);
+        conditions.push(`p.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`p.c.created_at <= $${idx}`);
+        conditions.push(`p.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1336,7 +1340,7 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(id::text ILIKE ${idx} OR user_id::text ILIKE ${idx})`);
+        conditions.push(`(id::text ILIKE $${idx} OR user_id::text ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -1351,12 +1355,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`created_at >= ${idx}`);
+        conditions.push(`created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`created_at <= ${idx}`);
+        conditions.push(`created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1424,12 +1428,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(c.title ILIKE $${idx} OR e.c.id::text ILIKE $${idx})`);
+        conditions.push(
+          `(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR e.id::text ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`status = ${idx}`);
+        conditions.push(`e.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1444,12 +1450,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`e.c.created_at >= $${idx}`);
+        conditions.push(`e.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`e.c.created_at <= $${idx}`);
+        conditions.push(`e.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1505,12 +1511,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(p.c.id::text ILIKE $${idx} OR u.email ILIKE $${idx})`);
+        conditions.push(
+          `(p.id::text ILIKE $${idx} OR COALESCE(p.pesapal_reference, '') ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.id::text ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`p.status = ${idx}`);
+        conditions.push(`p.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1525,12 +1533,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`p.c.created_at >= $${idx}`);
+        conditions.push(`p.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`p.c.created_at <= $${idx}`);
+        conditions.push(`p.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1559,22 +1567,24 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(c.title ILIKE $${idx} OR u.email ILIKE $${idx} OR c.id::text ILIKE $${idx})`);
+        conditions.push(
+          `(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR u.email ILIKE $${idx} OR u.id::text ILIKE $${idx} OR adv.email ILIKE $${idx} OR adv.id::text ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`c.ctr.status = ${idx}`);
+        conditions.push(`ctr.status = $${idx}`);
         params.push(query.status);
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.ctr.created_at >= $${idx}`);
+        conditions.push(`ctr.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.ctr.created_at <= $${idx}`);
+        conditions.push(`ctr.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
@@ -1635,12 +1645,12 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.status) {
-        conditions.push(`c.ctr.status = ${idx}`);
+        conditions.push(`status = $${idx}`);
         params.push(query.status);
         idx++;
       }
       if (query?.q) {
-        conditions.push(`(job_type ILIKE $${idx} OR c.id::text ILIKE $${idx})`);
+        conditions.push(`(job_type ILIKE $${idx} OR id::text ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -1756,12 +1766,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(merchant_reference ILIKE $${idx} OR c.id::text ILIKE $${idx})`);
+        conditions.push(
+          `(merchant_reference ILIKE $${idx} OR COALESCE(transaction_reference, '') ILIKE $${idx} OR id::text ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.status) {
-        conditions.push(`c.ctr.status = ${idx}`);
+        conditions.push(`status = $${idx}`);
         params.push(query.status);
         idx++;
       }
@@ -1781,12 +1793,12 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.ctr.created_at >= $${idx}`);
+        conditions.push(`created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.ctr.created_at <= $${idx}`);
+        conditions.push(`created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }

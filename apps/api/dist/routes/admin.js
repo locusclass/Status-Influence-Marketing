@@ -180,7 +180,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query.q) {
-                conditions.push(`(action ILIKE $${idx} OR target_type ILIKE $${idx} OR target_id::text ILIKE $${idx})`);
+                conditions.push(`(action ILIKE $${idx} OR target_type ILIKE $${idx} OR COALESCE(target_id, '') ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -323,12 +323,12 @@ export async function adminRoutes(app) {
             const escrowParams = [];
             let eidx = 1;
             if (range.from) {
-                escrowConditions.push(`created_at >= $${eidx}`);
+                escrowConditions.push(`c.created_at >= $${eidx}`);
                 escrowParams.push(range.from);
                 eidx++;
             }
             if (range.to) {
-                escrowConditions.push(`created_at <= $${eidx}`);
+                escrowConditions.push(`c.created_at <= $${eidx}`);
                 escrowParams.push(range.to);
                 eidx++;
             }
@@ -727,7 +727,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(ww.id::text ILIKE $${idx} OR ww.pesapal_reference ILIKE $${idx} OR ww.receiver_phone ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx})`);
+                conditions.push(`(ww.id::text ILIKE $${idx} OR COALESCE(ww.pesapal_reference, '') ILIKE $${idx} OR ww.receiver_phone ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.public_id ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -789,32 +789,32 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(email ILIKE $${idx} OR phone ILIKE $${idx} OR id::text ILIKE $${idx} OR public_id ILIKE $${idx})`);
+                conditions.push(`(u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.id::text ILIKE $${idx} OR u.public_id ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
             if (query?.role) {
-                conditions.push(`role = $${idx}`);
+                conditions.push(`u.role = $${idx}`);
                 params.push(query.role);
                 idx++;
             }
             if (query?.status) {
-                conditions.push(`status = $${idx}`);
+                conditions.push(`u.status = $${idx}`);
                 params.push(query.status);
                 idx++;
             }
             if (range.from) {
-                conditions.push(`created_at >= $${idx}`);
+                conditions.push(`u.created_at >= $${idx}`);
                 params.push(range.from);
                 idx++;
             }
             if (range.to) {
-                conditions.push(`created_at <= $${idx}`);
+                conditions.push(`u.created_at <= $${idx}`);
                 params.push(range.to);
                 idx++;
             }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT * FROM users ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
+            const res = await client.query(`SELECT u.*, p.avatar_url FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id ${where} ORDER BY u.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
             return { users: res.rows };
         });
     });
@@ -926,42 +926,42 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(title ILIKE $${idx} OR id::text ILIKE $${idx} OR public_id ILIKE $${idx})`);
+                conditions.push(`(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
             if (query?.status) {
-                conditions.push(`status = $${idx}`);
+                conditions.push(`c.status = $${idx}`);
                 params.push(query.status);
                 idx++;
             }
             if (query?.platform) {
-                conditions.push(`platform = $${idx}`);
+                conditions.push(`c.platform = $${idx}`);
                 params.push(query.platform);
                 idx++;
             }
             if (query?.min_amount) {
-                conditions.push(`budget_total >= $${idx}`);
+                conditions.push(`c.budget_total >= $${idx}`);
                 params.push(Number(query.min_amount));
                 idx++;
             }
             if (query?.max_amount) {
-                conditions.push(`budget_total <= $${idx}`);
+                conditions.push(`c.budget_total <= $${idx}`);
                 params.push(Number(query.max_amount));
                 idx++;
             }
             if (range.from) {
-                conditions.push(`created_at >= $${idx}`);
+                conditions.push(`c.created_at >= $${idx}`);
                 params.push(range.from);
                 idx++;
             }
             if (range.to) {
-                conditions.push(`created_at <= $${idx}`);
+                conditions.push(`c.created_at <= $${idx}`);
                 params.push(range.to);
                 idx++;
             }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT * FROM campaigns ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
+            const res = await client.query(`SELECT c.*, adv.email AS advertiser_email, dist.email AS assigned_distributor_email FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
             const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), null);
             return {
                 campaigns: res.rows.map((row) => ({
@@ -1039,7 +1039,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(p.id::text ILIKE $${idx} OR c.title ILIKE $${idx})`);
+                conditions.push(`(p.id::text ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR c.title ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -1181,7 +1181,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(c.title ILIKE $${idx} OR e.id::text ILIKE $${idx})`);
+                conditions.push(`(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR e.id::text ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -1245,7 +1245,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(p.id::text ILIKE $${idx} OR u.email ILIKE $${idx})`);
+                conditions.push(`(p.id::text ILIKE $${idx} OR COALESCE(p.pesapal_reference, '') ILIKE $${idx} OR u.email ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.id::text ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -1293,7 +1293,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(c.title ILIKE $${idx} OR u.email ILIKE $${idx} OR ctr.id::text ILIKE $${idx})`);
+                conditions.push(`(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR u.email ILIKE $${idx} OR u.id::text ILIKE $${idx} OR adv.email ILIKE $${idx} OR adv.id::text ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -1313,10 +1313,7 @@ export async function adminRoutes(app) {
                 idx++;
             }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT ctr.*, c.title AS campaign_title, u.email AS distributor_email
-         FROM contracts ctr
-         JOIN campaigns c ON c.id = ctr.campaign_id
-         JOIN users u ON u.id = ctr.distributor_id
+            const res = await client.query(`SELECT ctr.*, c.title AS campaign_title, u.email AS distributor_email, adv.email AS advertiser_email FROM contracts ctr JOIN campaigns c ON c.id = ctr.campaign_id JOIN users u ON u.id = ctr.distributor_id JOIN users adv ON adv.id = c.advertiser_id
          ${where}
          ORDER BY ctr.created_at DESC
          LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
@@ -1438,7 +1435,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(merchant_reference ILIKE $${idx} OR id::text ILIKE $${idx})`);
+                conditions.push(`(merchant_reference ILIKE $${idx} OR COALESCE(transaction_reference, '') ILIKE $${idx} OR id::text ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
