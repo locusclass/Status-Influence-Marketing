@@ -1234,89 +1234,121 @@ export async function adminRoutes(app: FastifyInstance) {
         detail: `Provide a reason when setting an account to ${body.status}.`,
       };
     }
-    const result = await withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
-      await ensureUserSignalSchema(client);
-      const resolvedUserId = await resolveUserId(client, params.id);
-      if (!resolvedUserId) {
-        return null;
-      }
-      const res = await client.query(
-        `
-        UPDATE users
-        SET status = $2,
-            status_reason = CASE
-              WHEN $2 = 'ACTIVE' THEN NULL
-              ELSE NULLIF($3, '')
-            END,
-            status_reason_updated_at = CASE
-              WHEN $2 = 'ACTIVE' THEN NULL
-              ELSE NOW()
-            END
-        WHERE id = $1
-        RETURNING *
-        `,
-        [resolvedUserId, body.status, reason]
-      );
-      if (res.rows[0]) {
-        try {
-          await logAudit(
-            client,
-            (request.user as any).sub,
-            'UPDATE_USER_STATUS',
-            'user',
-            resolvedUserId,
-            {
-              status: body.status,
-              reason: reason.length === 0 ? null : reason,
-            }
-          );
-        } catch (error) {
-          request.log.warn(
-            {
-              err: error,
-              actorId: (request.user as any).sub,
-              targetUserId: resolvedUserId,
-              status: body.status,
-            },
-            'admin_status_audit_failed'
-          );
-        }
+    let resolvedUserId: string | null = null;
+    let result: any = null;
 
-        try {
-          await createUserNotifications(client, [resolvedUserId], {
-            title: body.status === 'ACTIVE'
-                ? 'Account reinstated by admin'
-                : 'Account status updated by admin',
-            body: body.status === 'ACTIVE'
-                ? 'An administrator reinstated your account.'
-                : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
-            actorId: (request.user as any).sub,
-            targetType: 'user',
-            targetId: resolvedUserId,
-            meta: {
-              status: body.status,
-              reason: reason.length === 0 ? null : reason,
-            },
-          });
-        } catch (error) {
-          request.log.warn(
-            {
-              err: error,
-              actorId: (request.user as any).sub,
-              targetUserId: resolvedUserId,
-              status: body.status,
-            },
-            'admin_status_notification_failed'
-          );
+    try {
+      result = await withTransaction(async (client) => {
+        const resolvedRes = await client.query(
+          `
+          SELECT id
+          FROM users
+          WHERE id::text = $1 OR public_id = $1
+          LIMIT 1
+          `,
+          [params.id]
+        );
+        resolvedUserId = (resolvedRes.rows[0]?.id as string | undefined) ?? null;
+        if (!resolvedUserId) {
+          return null;
         }
-      }
-      return res.rows[0];
-    });
-    if (!result) {
+        const res = await client.query(
+          `
+          UPDATE users
+          SET status = $2,
+              status_reason = CASE
+                WHEN $2 = 'ACTIVE' THEN NULL
+                ELSE NULLIF($3, '')
+              END,
+              status_reason_updated_at = CASE
+                WHEN $2 = 'ACTIVE' THEN NULL
+                ELSE NOW()
+              END
+          WHERE id = $1
+          RETURNING *
+          `,
+          [resolvedUserId, body.status, reason]
+        );
+        return res.rows[0] ?? null;
+      });
+    } catch (error) {
+      request.log.error(
+        {
+          err: error,
+          actorId: (request.user as any).sub,
+          targetUserId: params.id,
+          status: body.status,
+        },
+        'admin_status_update_failed'
+      );
+      reply.code(500);
+      return {
+        error: 'user_status_update_failed',
+        detail: 'Unable to update account status right now.',
+      };
+    }
+
+    if (!result || !resolvedUserId) {
       reply.code(404);
       return { error: 'user_not_found' };
     }
+
+    try {
+      await withTransaction(async (client) => {
+        await logAudit(
+          client,
+          (request.user as any).sub,
+          'UPDATE_USER_STATUS',
+          'user',
+          resolvedUserId,
+          {
+            status: body.status,
+            reason: reason.length === 0 ? null : reason,
+          }
+        );
+      });
+    } catch (error) {
+      request.log.warn(
+        {
+          err: error,
+          actorId: (request.user as any).sub,
+          targetUserId: resolvedUserId,
+          status: body.status,
+        },
+        'admin_status_audit_failed'
+      );
+    }
+
+    try {
+      await withTransaction(async (client) => {
+        await createUserNotifications(client, [resolvedUserId], {
+          title: body.status === 'ACTIVE'
+              ? 'Account reinstated by admin'
+              : 'Account status updated by admin',
+          body: body.status === 'ACTIVE'
+              ? 'An administrator reinstated your account.'
+              : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
+          actorId: (request.user as any).sub,
+          targetType: 'user',
+          targetId: resolvedUserId,
+          meta: {
+            status: body.status,
+            reason: reason.length === 0 ? null : reason,
+          },
+        });
+      });
+    } catch (error) {
+      request.log.warn(
+        {
+          err: error,
+          actorId: (request.user as any).sub,
+          targetUserId: resolvedUserId,
+          status: body.status,
+        },
+        'admin_status_notification_failed'
+      );
+    }
+
     return { user: result };
   });
 
