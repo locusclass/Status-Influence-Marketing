@@ -818,6 +818,117 @@ export async function adminRoutes(app) {
             return { users: res.rows };
         });
     });
+    app.get('/admin/users/:id/detail', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const result = await withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const resolvedUserId = await resolveUserId(client, params.id);
+            if (!resolvedUserId) {
+                return null;
+            }
+            const userRes = await client.query(`
+        SELECT u.*, p.avatar_url
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        WHERE u.id = $1
+        LIMIT 1
+        `, [resolvedUserId]);
+            const user = userRes.rows[0];
+            if (!user) {
+                return null;
+            }
+            const walletsRes = await client.query(`
+        SELECT *
+        FROM wallets
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 20
+        `, [resolvedUserId]);
+            const payoutsRes = await client.query(`
+        SELECT p.*, u.email AS user_email
+        FROM payout_requests p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.user_id = $1
+        ORDER BY p.created_at DESC
+        LIMIT 100
+        `, [resolvedUserId]);
+            const contractsRes = await client.query(`
+        SELECT
+          ctr.*,
+          c.title AS campaign_title,
+          c.public_id AS campaign_public_id,
+          c.status AS campaign_status,
+          u.email AS distributor_email,
+          u.public_id AS distributor_public_id,
+          adv.email AS advertiser_email,
+          adv.public_id AS advertiser_public_id
+        FROM contracts ctr
+        JOIN campaigns c ON c.id = ctr.campaign_id
+        JOIN users u ON u.id = ctr.distributor_id
+        JOIN users adv ON adv.id = c.advertiser_id
+        WHERE c.advertiser_id = $1
+           OR ctr.distributor_id = $1
+        ORDER BY ctr.created_at DESC
+        LIMIT 200
+        `, [resolvedUserId]);
+            const campaignsRes = await client.query(`
+        SELECT
+          c.*,
+          adv.email AS advertiser_email,
+          adv.public_id AS advertiser_public_id,
+          dist.email AS assigned_distributor_email,
+          dist.public_id AS assigned_distributor_public_id,
+          CASE
+            WHEN c.advertiser_id = $1 THEN 'CREATED'
+            WHEN EXISTS (
+              SELECT 1
+              FROM contracts ctr
+              WHERE ctr.campaign_id = c.id
+                AND ctr.distributor_id = $1
+            ) THEN 'TOOK_ON'
+            WHEN c.assigned_distributor_id = $1 THEN 'TAGGED'
+            ELSE 'RELATED'
+          END AS user_relation
+        FROM campaigns c
+        LEFT JOIN users adv ON adv.id = c.advertiser_id
+        LEFT JOIN users dist ON dist.id = c.assigned_distributor_id
+        WHERE c.advertiser_id = $1
+           OR c.assigned_distributor_id = $1
+           OR EXISTS (
+             SELECT 1
+             FROM contracts ctr
+             WHERE ctr.campaign_id = c.id
+               AND ctr.distributor_id = $1
+           )
+        ORDER BY c.created_at DESC
+        LIMIT 200
+        `, [resolvedUserId]);
+            const statusSummaries = await buildCampaignStatusSummaries(client, campaignsRes.rows.map((row) => String(row.id)), null);
+            return {
+                user,
+                wallets: walletsRes.rows,
+                payouts: payoutsRes.rows,
+                contracts: contractsRes.rows,
+                campaigns: campaignsRes.rows.map((row) => ({
+                    ...row,
+                    status_summary: statusSummaries.get(String(row.id)) ?? {
+                        campaign_status: String(row.status ?? 'ACTIVE'),
+                        escrow_status: 'PENDING',
+                        latest_contract_status: 'UNCLAIMED',
+                        my_contract_status: null,
+                        proof_status: 'NOT_SUBMITTED',
+                        settlement_status: 'AWAITING_FUNDING',
+                        is_available: false,
+                    },
+                })),
+            };
+        });
+        if (!result) {
+            reply.code(404);
+            return { error: 'user_not_found' };
+        }
+        return result;
+    });
     app.patch('/admin/users/:id/role', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         const body = UpdateUserRoleSchema.parse(request.body);
