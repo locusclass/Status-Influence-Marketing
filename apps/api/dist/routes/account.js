@@ -8,6 +8,7 @@ import { whatsappVerificationService } from '../services/whatsappVerification.js
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
+import { ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, } from '../services/userSignals.js';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
@@ -31,7 +32,7 @@ const accountAvatarSchema = z.object({
 });
 const accountRoleSchema = z.object({
     role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
-    max_status_viewers_12h: z.number().int().positive().optional(),
+    max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 const distributorCapacitySchema = z.object({
     max_status_viewers_12h: z.number().int().positive(),
@@ -420,6 +421,7 @@ async function ensureWalletTables(client) {
 }
 async function ensureAccountSchema(client) {
     await ensurePublicIdColumns(client);
+    await ensureUserSignalSchema(client);
     await ensureWhatsappColumns(client);
     await ensureUserProfilesTable(client);
     await ensureCreatorMarketingTables(client);
@@ -564,6 +566,13 @@ export async function accountRoutes(app) {
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
           COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+          u.last_login_at,
+          u.last_seen_at,
+          CASE
+            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+              THEN TRUE
+            ELSE FALSE
+          END AS is_online,
           COALESCE(engagements.engagements_24h, 0)::int AS proven_engagements_24h,
           ${fullNameSelect} AS full_name,
           p.avatar_url,
@@ -1364,6 +1373,29 @@ export async function accountRoutes(app) {
                     pending_or_review_count: distributorRes.rows[0]?.pending_or_review_count ?? 0
                 }
             };
+        });
+    });
+    app.get('/account/notifications', { preHandler: [app.authenticate] }, async (request) => {
+        const userId = request.user.sub;
+        const query = request.query;
+        const limit = Math.min(Math.max(Number(query?.limit ?? 20), 1), 100);
+        const unreadOnly = String(query?.unread_only ?? '').trim() === 'true';
+        return withTransaction(async (client) => {
+            const result = await listUserNotifications(client, userId, {
+                limit,
+                unreadOnly,
+            });
+            return {
+                notifications: result.notifications,
+                unread_count: result.unreadCount,
+            };
+        });
+    });
+    app.post('/account/notifications/read-all', { preHandler: [app.authenticate] }, async (request) => {
+        const userId = request.user.sub;
+        return withTransaction(async (client) => {
+            const updated = await markAllUserNotificationsRead(client, userId);
+            return { ok: true, updated };
         });
     });
     app.get('/proofs/:id', { preHandler: [app.authenticate] }, async (request, reply) => {

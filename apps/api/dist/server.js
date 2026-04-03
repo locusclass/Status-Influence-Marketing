@@ -7,7 +7,9 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
+import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
+import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
 export function buildServer() {
     const app = Fastify({
         pluginTimeout: Number(process.env.FASTIFY_PLUGIN_TIMEOUT ?? 30000),
@@ -135,6 +137,10 @@ export function buildServer() {
     app.decorate('authenticate', async (request, reply) => {
         try {
             await request.jwtVerify();
+            const userId = String(request.user?.sub ?? '').trim();
+            if (userId) {
+                void touchUserPresence(userId).catch(() => { });
+            }
         }
         catch {
             reply.code(401).send({ error: 'unauthorized' });
@@ -143,6 +149,10 @@ export function buildServer() {
     app.decorate('adminOnly', async (request, reply) => {
         try {
             await request.jwtVerify();
+            const userId = String(request.user?.sub ?? '').trim();
+            if (userId) {
+                void touchUserPresence(userId).catch(() => { });
+            }
             const role = request.user?.role;
             if (role !== 'ADMIN') {
                 return reply.code(403).send({ error: 'forbidden' });
@@ -177,6 +187,9 @@ export function buildServer() {
     app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
     // Final payment-provider configuration
     app.addHook('onReady', async () => {
+        await withTransaction(async (client) => {
+            await ensureUserSignalSchema(client);
+        });
         const hasSecret = hasFlutterwaveSecretKey();
         const hasClientCreds = hasFlutterwaveClientCredentials();
         app.log.info({

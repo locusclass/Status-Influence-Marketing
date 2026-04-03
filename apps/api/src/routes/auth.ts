@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { buildAuthClaims, buildUserSession } from '../services/roles.js';
+import { touchUserPresenceWithClient } from '../services/userSignals.js';
 
 const registerSchema = z.object({
   full_name: z.string().min(2).max(120),
@@ -16,7 +17,7 @@ const registerSchema = z.object({
   password: z.string().min(8),
   role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
   country: z.string().min(2),
-  max_status_viewers_12h: z.number().int().positive().optional(),
+  max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 
 const loginSchema = z.object({
@@ -31,7 +32,7 @@ const googleAuthSchema = z.object({
   country: z.string().min(2),
   full_name: z.string().min(2).max(120).optional(),
   avatar_url: z.string().url().max(1024).optional(),
-  max_status_viewers_12h: z.number().int().positive().optional(),
+  max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 
 function resolveDistributorCapacity(body: {
@@ -142,10 +143,6 @@ export async function authRoutes(app: FastifyInstance) {
     }
     const body = parsed.data;
     const distributorCapacity = resolveDistributorCapacity(body);
-    if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
-      reply.code(400);
-      return { error: 'max_status_viewers_required' };
-    }
 
     const countryData = resolveCountry(body.country);
 
@@ -211,6 +208,12 @@ export async function authRoutes(app: FastifyInstance) {
       reply.code(401);
       return { error: 'invalid_credentials' };
     }
+
+    await withTransaction(async (client) => {
+      await touchUserPresenceWithClient(client, String(user.id ?? ''), {
+        markLogin: true,
+      });
+    });
 
     const token = app.jwt.sign(buildAuthClaims(user));
 
@@ -335,12 +338,10 @@ export async function authRoutes(app: FastifyInstance) {
           );
         }
         const refreshed = await userRepo.findByEmail(client, email);
+        await touchUserPresenceWithClient(client, existing.id, {
+          markLogin: true,
+        });
         return refreshed ?? existing;
-      }
-
-      if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
-        reply.code(400);
-        return { error: 'max_status_viewers_required' } as any;
       }
 
       const phoneOwner = await client.query(
@@ -366,6 +367,9 @@ export async function authRoutes(app: FastifyInstance) {
       );
       await userRepo.ensureWallet(client, created.id, countryData.currency);
       await upsertSocialProfile(client, created.id, fullName, photoUrl);
+      await touchUserPresenceWithClient(client, created.id, {
+        markLogin: true,
+      });
       return created;
     });
 

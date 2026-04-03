@@ -1,0 +1,233 @@
+import { pool } from '../db.js';
+
+type TouchPresenceOptions = {
+  markLogin?: boolean;
+};
+
+type NotificationInput = {
+  category?: string;
+  title: string;
+  body: string;
+  actorId?: string | null;
+  targetType?: string | null;
+  targetId?: string | null;
+  meta?: Record<string, unknown> | null;
+};
+
+export async function ensureUserSignalSchema(client: any) {
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS user_notifications (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      category TEXT NOT NULL DEFAULT 'ADMIN_ACTION',
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      target_type TEXT,
+      target_id TEXT,
+      meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS user_notifications_user_created_idx
+    ON user_notifications (user_id, created_at DESC)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS user_notifications_user_unread_idx
+    ON user_notifications (user_id, read_at, created_at DESC)
+  `);
+}
+
+export async function touchUserPresenceWithClient(
+  client: any,
+  userId: string,
+  options: TouchPresenceOptions = {}
+) {
+  const normalizedUserId = String(userId ?? '').trim();
+  if (!normalizedUserId) return;
+  await ensureUserSignalSchema(client);
+  await client.query(
+    `
+    UPDATE users
+    SET last_seen_at = NOW(),
+        last_login_at = CASE
+          WHEN $2::boolean THEN NOW()
+          ELSE last_login_at
+        END
+    WHERE id = $1
+    `,
+    [normalizedUserId, options.markLogin === true]
+  );
+}
+
+export async function touchUserPresence(
+  userId: string,
+  options: TouchPresenceOptions = {}
+) {
+  const normalizedUserId = String(userId ?? '').trim();
+  if (!normalizedUserId) return;
+  await pool.query(
+    `
+    UPDATE users
+    SET last_seen_at = NOW(),
+        last_login_at = CASE
+          WHEN $2::boolean THEN NOW()
+          ELSE last_login_at
+        END
+    WHERE id = $1
+    `,
+    [normalizedUserId, options.markLogin === true]
+  );
+}
+
+export async function createUserNotifications(
+  client: any,
+  userIds: unknown[],
+  input: NotificationInput
+) {
+  await ensureUserSignalSchema(client);
+  const uniqueUserIds = Array.from(
+    new Set(
+      userIds
+          .map((value) => String(value ?? '').trim())
+          .filter((value) => value.length > 0)
+    )
+  );
+
+  const actorId =
+    typeof input.actorId === 'string' &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+                .test(input.actorId.trim())
+        ? input.actorId.trim()
+        : null;
+
+  for (const userId of uniqueUserIds) {
+    await client.query(
+      `
+      INSERT INTO user_notifications (
+        user_id,
+        category,
+        title,
+        body,
+        actor_id,
+        target_type,
+        target_id,
+        meta
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+      `,
+      [
+        userId,
+        input.category ?? 'ADMIN_ACTION',
+        input.title,
+        input.body,
+        actorId,
+        input.targetType ?? null,
+        input.targetId ?? null,
+        JSON.stringify(input.meta ?? {}),
+      ]
+    );
+  }
+}
+
+export async function listUserNotifications(
+  client: any,
+  userId: string,
+  options: {
+    limit?: number;
+    unreadOnly?: boolean;
+  } = {}
+) {
+  await ensureUserSignalSchema(client);
+  const normalizedUserId = String(userId ?? '').trim();
+  const limit = Math.min(Math.max(Number(options.limit ?? 20), 1), 100);
+  const unreadOnly = options.unreadOnly === true;
+
+  const notificationsRes = await client.query(
+    `
+    SELECT *
+    FROM user_notifications
+    WHERE user_id = $1
+      ${unreadOnly ? 'AND read_at IS NULL' : ''}
+    ORDER BY created_at DESC
+    LIMIT $2
+    `,
+    [normalizedUserId, limit]
+  );
+  const unreadCountRes = await client.query(
+    `
+    SELECT COUNT(*)::int AS unread_count
+    FROM user_notifications
+    WHERE user_id = $1
+      AND read_at IS NULL
+    `,
+    [normalizedUserId]
+  );
+
+  return {
+    notifications: notificationsRes.rows,
+    unreadCount: Number(unreadCountRes.rows[0]?.unread_count ?? 0),
+  };
+}
+
+export async function markAllUserNotificationsRead(
+  client: any,
+  userId: string
+) {
+  await ensureUserSignalSchema(client);
+  const normalizedUserId = String(userId ?? '').trim();
+  const updated = await client.query(
+    `
+    UPDATE user_notifications
+    SET read_at = NOW()
+    WHERE user_id = $1
+      AND read_at IS NULL
+    RETURNING id
+    `,
+    [normalizedUserId]
+  );
+  return updated.rowCount ?? 0;
+}
+
+export async function collectCampaignNotificationUserIds(
+  client: any,
+  campaignId: string
+) {
+  const normalizedCampaignId = String(campaignId ?? '').trim();
+  if (!normalizedCampaignId) {
+    return [] as string[];
+  }
+  const res = await client.query(
+    `
+    SELECT DISTINCT participant_id
+    FROM (
+      SELECT advertiser_id AS participant_id
+      FROM campaigns
+      WHERE id = $1
+      UNION ALL
+      SELECT assigned_distributor_id AS participant_id
+      FROM campaigns
+      WHERE id = $1
+      UNION ALL
+      SELECT distributor_id AS participant_id
+      FROM contracts
+      WHERE campaign_id = $1
+    ) participants
+    WHERE participant_id IS NOT NULL
+    `,
+    [normalizedCampaignId]
+  );
+  return res.rows
+      .map((row: any) => String(row.participant_id ?? '').trim())
+      .filter((value: string) => value.length > 0);
+}

@@ -19,6 +19,11 @@ import {
   ACCOUNT_ROLE_DUAL_USER,
   normalizeActiveRole,
 } from '../services/roles.js';
+import {
+  collectCampaignNotificationUserIds,
+  createUserNotifications,
+  ensureUserSignalSchema,
+} from '../services/userSignals.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER'])
@@ -206,6 +211,40 @@ async function logAudit(
      VALUES ($1,$2,$3,$4,$5)`,
     [actorId || null, action, targetType, targetId, meta ?? null]
   );
+}
+
+function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
+  const labels: string[] = [];
+  if (typeof input.status === 'string' && input.status.trim().length > 0) {
+    labels.push(`status ${input.status}`);
+  }
+  if (typeof input.title === 'string' && input.title.trim().length > 0) {
+    labels.push('title');
+  }
+  if (typeof input.start_date === 'string' || typeof input.end_date === 'string') {
+    labels.push('schedule');
+  }
+  if (
+    typeof input.budget_total === 'number' ||
+    typeof input.payout_amount === 'number'
+  ) {
+    labels.push('funding');
+  }
+  if (
+    typeof input.media_type === 'string' ||
+    typeof input.media_text === 'string' ||
+    typeof input.media_url === 'string'
+  ) {
+    labels.push('creative');
+  }
+  if (
+    typeof input.terms_keep_hours === 'number' ||
+    typeof input.terms_min_views === 'number' ||
+    typeof input.terms_requirement === 'string'
+  ) {
+    labels.push('terms');
+  }
+  return labels.length > 0 ? labels.join(', ') : 'campaign settings';
 }
 
 export async function adminRoutes(app: FastifyInstance) {
@@ -534,6 +573,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
       await ensurePublicIdColumns(client);
+      await ensureUserSignalSchema(client);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -951,7 +991,21 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT u.*, p.avatar_url FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id ${where} ORDER BY u.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        `
+        SELECT
+          u.*,
+          p.avatar_url,
+          CASE
+            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+              THEN TRUE
+            ELSE FALSE
+          END AS is_online
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${where}
+        ORDER BY u.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `,
         [...params, limit, offset]
       );
       return { users: res.rows };
@@ -962,6 +1016,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const result = await withTransaction(async (client) => {
       await ensurePublicIdColumns(client);
+      await ensureUserSignalSchema(client);
       const resolvedUserId = await resolveUserId(client, params.id);
       if (!resolvedUserId) {
         return null;
@@ -969,7 +1024,14 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const userRes = await client.query(
         `
-        SELECT u.*, p.avatar_url
+        SELECT
+          u.*,
+          p.avatar_url,
+          CASE
+            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+              THEN TRUE
+            ELSE FALSE
+          END AS is_online
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
         WHERE u.id = $1
@@ -1134,6 +1196,14 @@ export async function adminRoutes(app: FastifyInstance) {
           resolvedUserId,
           { role: body.role }
         );
+        await createUserNotifications(client, [resolvedUserId], {
+          title: 'Account role updated by admin',
+          body: `An administrator changed your account role to ${body.role}.`,
+          actorId: (request.user as any).sub,
+          targetType: 'user',
+          targetId: resolvedUserId,
+          meta: { role: body.role },
+        });
       }
       return res.rows[0];
     });
@@ -1166,6 +1236,14 @@ export async function adminRoutes(app: FastifyInstance) {
           resolvedUserId,
           { status: body.status }
         );
+        await createUserNotifications(client, [resolvedUserId], {
+          title: 'Account status updated by admin',
+          body: `An administrator changed your account status to ${body.status}.`,
+          actorId: (request.user as any).sub,
+          targetType: 'user',
+          targetId: resolvedUserId,
+          meta: { status: body.status },
+        });
       }
       return res.rows[0];
     });
@@ -1198,6 +1276,14 @@ export async function adminRoutes(app: FastifyInstance) {
           resolvedUserId,
           {}
         );
+        await createUserNotifications(client, [resolvedUserId], {
+          title: 'Password reset by admin',
+          body: 'An administrator reset your account password. Sign in again if prompted.',
+          actorId: (request.user as any).sub,
+          targetType: 'user',
+          targetId: resolvedUserId,
+          meta: {},
+        });
       }
       return res.rows[0];
     });
@@ -1230,6 +1316,16 @@ export async function adminRoutes(app: FastifyInstance) {
           resolvedUserId,
           { can_multi_contract: body.can_multi_contract }
         );
+        await createUserNotifications(client, [resolvedUserId], {
+          title: 'Contract privilege updated by admin',
+          body: body.can_multi_contract
+              ? 'An administrator enabled multi-contract access on your account.'
+              : 'An administrator disabled multi-contract access on your account.',
+          actorId: (request.user as any).sub,
+          targetType: 'user',
+          targetId: resolvedUserId,
+          meta: { can_multi_contract: body.can_multi_contract },
+        });
       }
       return res.rows[0];
     });
@@ -1367,6 +1463,22 @@ export async function adminRoutes(app: FastifyInstance) {
           resolvedCampaignId,
           body
         );
+        const audience = await collectCampaignNotificationUserIds(
+          client,
+          resolvedCampaignId
+        );
+        await createUserNotifications(client, audience, {
+          title: 'Campaign updated by admin',
+          body: `An administrator updated campaign "${updated.rows[0].title ?? 'Campaign'}" (${summarizeCampaignAdminChanges(body)}).`,
+          actorId: (request.user as any).sub,
+          targetType: 'campaign',
+          targetId: resolvedCampaignId,
+          meta: {
+            title: updated.rows[0].title ?? null,
+            public_id: updated.rows[0].public_id ?? null,
+            changes: body,
+          },
+        });
       }
       return updated.rows[0];
     });

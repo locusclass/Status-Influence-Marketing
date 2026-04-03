@@ -55,8 +55,6 @@ export function buildUserSession(user) {
     const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
     const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
     const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
-    const requiresDistributorCapacitySetup = (activeRole === ACCOUNT_ROLE_DISTRIBUTOR || role === ACCOUNT_ROLE_DUAL_USER)
-        && maxStatusViewers12h <= 0;
     return {
         id: String(user.id ?? ''),
         public_id: String(user.public_id ?? ''),
@@ -75,6 +73,9 @@ export function buildUserSession(user) {
         private_contract_rate_ugx: Math.max(0, Number.isFinite(privateContractRateUgx)
             ? Math.trunc(privateContractRateUgx)
             : 0),
-        requires_distributor_capacity_setup: requiresDistributorCapacitySetup,
+        last_login_at: user.last_login_at ?? null,
+        last_seen_at: user.last_seen_at ?? null,
+        is_online: user.is_online === true,
+        requires_distributor_capacity_setup: false,
     };
 }

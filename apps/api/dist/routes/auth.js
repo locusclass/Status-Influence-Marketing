@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { buildAuthClaims, buildUserSession } from '../services/roles.js';
+import { touchUserPresenceWithClient } from '../services/userSignals.js';
 const registerSchema = z.object({
     full_name: z.string().min(2).max(120),
     email: z.string().email(),
@@ -14,7 +15,7 @@ const registerSchema = z.object({
     password: z.string().min(8),
     role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
     country: z.string().min(2),
-    max_status_viewers_12h: z.number().int().positive().optional(),
+    max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 const loginSchema = z.object({
     email: z.string().email(),
@@ -27,7 +28,7 @@ const googleAuthSchema = z.object({
     country: z.string().min(2),
     full_name: z.string().min(2).max(120).optional(),
     avatar_url: z.string().url().max(1024).optional(),
-    max_status_viewers_12h: z.number().int().positive().optional(),
+    max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 function resolveDistributorCapacity(body) {
     if (body.role !== 'DISTRIBUTOR') {
@@ -109,10 +110,6 @@ export async function authRoutes(app) {
         }
         const body = parsed.data;
         const distributorCapacity = resolveDistributorCapacity(body);
-        if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
-            reply.code(400);
-            return { error: 'max_status_viewers_required' };
-        }
         const countryData = resolveCountry(body.country);
         const user = await withTransaction(async (client) => {
             await ensurePublicIdColumns(client);
@@ -155,6 +152,11 @@ export async function authRoutes(app) {
             reply.code(401);
             return { error: 'invalid_credentials' };
         }
+        await withTransaction(async (client) => {
+            await touchUserPresenceWithClient(client, String(user.id ?? ''), {
+                markLogin: true,
+            });
+        });
         const token = app.jwt.sign(buildAuthClaims(user));
         return {
             token,
@@ -253,11 +255,10 @@ export async function authRoutes(app) {
             `, [existing.id, body.role, distributorCapacity, existingDistributorCapacity]);
                 }
                 const refreshed = await userRepo.findByEmail(client, email);
+                await touchUserPresenceWithClient(client, existing.id, {
+                    markLogin: true,
+                });
                 return refreshed ?? existing;
-            }
-            if (body.role === 'DISTRIBUTOR' && distributorCapacity <= 0) {
-                reply.code(400);
-                return { error: 'max_status_viewers_required' };
             }
             const phoneOwner = await client.query(`SELECT id FROM users WHERE phone=$1 LIMIT 1`, [typedPhone]);
             if (phoneOwner.rows[0]) {
@@ -268,6 +269,9 @@ export async function authRoutes(app) {
             const created = await userRepo.createUser(client, fullName, email, typedPhone, hashPassword(syntheticPassword), body.role, countryData.iso2, countryData.currency, distributorCapacity);
             await userRepo.ensureWallet(client, created.id, countryData.currency);
             await upsertSocialProfile(client, created.id, fullName, photoUrl);
+            await touchUserPresenceWithClient(client, created.id, {
+                markLogin: true,
+            });
             return created;
         });
         if (user?.error) {

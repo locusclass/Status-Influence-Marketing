@@ -7,6 +7,7 @@ import { verifyTransaction } from '../services/flutterwave.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, normalizeActiveRole, } from '../services/roles.js';
+import { collectCampaignNotificationUserIds, createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
 const UpdateUserRoleSchema = z.object({
     role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER'])
 });
@@ -152,6 +153,33 @@ async function ensureCampaignDraftsTable(client) {
 async function logAudit(client, actorId, action, targetType, targetId, meta) {
     await client.query(`INSERT INTO admin_audit_logs (actor_id, action, target_type, target_id, meta)
      VALUES ($1,$2,$3,$4,$5)`, [actorId || null, action, targetType, targetId, meta ?? null]);
+}
+function summarizeCampaignAdminChanges(input) {
+    const labels = [];
+    if (typeof input.status === 'string' && input.status.trim().length > 0) {
+        labels.push(`status ${input.status}`);
+    }
+    if (typeof input.title === 'string' && input.title.trim().length > 0) {
+        labels.push('title');
+    }
+    if (typeof input.start_date === 'string' || typeof input.end_date === 'string') {
+        labels.push('schedule');
+    }
+    if (typeof input.budget_total === 'number' ||
+        typeof input.payout_amount === 'number') {
+        labels.push('funding');
+    }
+    if (typeof input.media_type === 'string' ||
+        typeof input.media_text === 'string' ||
+        typeof input.media_url === 'string') {
+        labels.push('creative');
+    }
+    if (typeof input.terms_keep_hours === 'number' ||
+        typeof input.terms_min_views === 'number' ||
+        typeof input.terms_requirement === 'string') {
+        labels.push('terms');
+    }
+    return labels.length > 0 ? labels.join(', ') : 'campaign settings';
 }
 export async function adminRoutes(app) {
     const jobRepo = new JobRepo();
@@ -446,6 +474,7 @@ export async function adminRoutes(app) {
         const range = parseDateRange(query?.from, query?.to);
         return withTransaction(async (client) => {
             await ensurePublicIdColumns(client);
+            await ensureUserSignalSchema(client);
             const conditions = [];
             const params = [];
             let idx = 1;
@@ -814,7 +843,21 @@ export async function adminRoutes(app) {
                 idx++;
             }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT u.*, p.avatar_url FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id ${where} ORDER BY u.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
+            const res = await client.query(`
+        SELECT
+          u.*,
+          p.avatar_url,
+          CASE
+            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+              THEN TRUE
+            ELSE FALSE
+          END AS is_online
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${where}
+        ORDER BY u.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
             return { users: res.rows };
         });
     });
@@ -822,12 +865,20 @@ export async function adminRoutes(app) {
         const params = request.params;
         const result = await withTransaction(async (client) => {
             await ensurePublicIdColumns(client);
+            await ensureUserSignalSchema(client);
             const resolvedUserId = await resolveUserId(client, params.id);
             if (!resolvedUserId) {
                 return null;
             }
             const userRes = await client.query(`
-        SELECT u.*, p.avatar_url
+        SELECT
+          u.*,
+          p.avatar_url,
+          CASE
+            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+              THEN TRUE
+            ELSE FALSE
+          END AS is_online
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
         WHERE u.id = $1
@@ -955,6 +1006,14 @@ export async function adminRoutes(app) {
             ]);
             if (res.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_USER_ROLE', 'user', resolvedUserId, { role: body.role });
+                await createUserNotifications(client, [resolvedUserId], {
+                    title: 'Account role updated by admin',
+                    body: `An administrator changed your account role to ${body.role}.`,
+                    actorId: request.user.sub,
+                    targetType: 'user',
+                    targetId: resolvedUserId,
+                    meta: { role: body.role },
+                });
             }
             return res.rows[0];
         });
@@ -976,6 +1035,14 @@ export async function adminRoutes(app) {
             const res = await client.query('UPDATE users SET status=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.status]);
             if (res.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', resolvedUserId, { status: body.status });
+                await createUserNotifications(client, [resolvedUserId], {
+                    title: 'Account status updated by admin',
+                    body: `An administrator changed your account status to ${body.status}.`,
+                    actorId: request.user.sub,
+                    targetType: 'user',
+                    targetId: resolvedUserId,
+                    meta: { status: body.status },
+                });
             }
             return res.rows[0];
         });
@@ -997,6 +1064,14 @@ export async function adminRoutes(app) {
             const res = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id, email, role', [resolvedUserId, hashPassword(body.password)]);
             if (res.rows[0]) {
                 await logAudit(client, request.user.sub, 'RESET_USER_PASSWORD', 'user', resolvedUserId, {});
+                await createUserNotifications(client, [resolvedUserId], {
+                    title: 'Password reset by admin',
+                    body: 'An administrator reset your account password. Sign in again if prompted.',
+                    actorId: request.user.sub,
+                    targetType: 'user',
+                    targetId: resolvedUserId,
+                    meta: {},
+                });
             }
             return res.rows[0];
         });
@@ -1018,6 +1093,16 @@ export async function adminRoutes(app) {
             const res = await client.query('UPDATE users SET can_multi_contract=$2 WHERE id=$1 RETURNING *', [resolvedUserId, body.can_multi_contract]);
             if (res.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_USER_CONTRACT_PRIVILEGE', 'user', resolvedUserId, { can_multi_contract: body.can_multi_contract });
+                await createUserNotifications(client, [resolvedUserId], {
+                    title: 'Contract privilege updated by admin',
+                    body: body.can_multi_contract
+                        ? 'An administrator enabled multi-contract access on your account.'
+                        : 'An administrator disabled multi-contract access on your account.',
+                    actorId: request.user.sub,
+                    targetType: 'user',
+                    targetId: resolvedUserId,
+                    meta: { can_multi_contract: body.can_multi_contract },
+                });
             }
             return res.rows[0];
         });
@@ -1132,6 +1217,19 @@ export async function adminRoutes(app) {
             ]);
             if (updated.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_CAMPAIGN', 'campaign', resolvedCampaignId, body);
+                const audience = await collectCampaignNotificationUserIds(client, resolvedCampaignId);
+                await createUserNotifications(client, audience, {
+                    title: 'Campaign updated by admin',
+                    body: `An administrator updated campaign "${updated.rows[0].title ?? 'Campaign'}" (${summarizeCampaignAdminChanges(body)}).`,
+                    actorId: request.user.sub,
+                    targetType: 'campaign',
+                    targetId: resolvedCampaignId,
+                    meta: {
+                        title: updated.rows[0].title ?? null,
+                        public_id: updated.rows[0].public_id ?? null,
+                        changes: body,
+                    },
+                });
             }
             return updated.rows[0];
         });

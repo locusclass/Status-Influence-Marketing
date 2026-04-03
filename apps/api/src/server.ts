@@ -14,6 +14,7 @@ import {
   hasValidFlutterwaveKeys,
   resolveFlutterwaveBaseUrl,
 } from './config.js';
+import { withTransaction } from './db.js';
 import {
   authRoutes,
   campaignRoutes,
@@ -25,6 +26,10 @@ import {
   accountRoutes,
   adminRoutes
 } from './routes/index.js';
+import {
+  ensureUserSignalSchema,
+  touchUserPresence,
+} from './services/userSignals.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -178,6 +183,10 @@ export function buildServer() {
   app.decorate('authenticate', async (request: any, reply: any) => {
     try {
       await request.jwtVerify();
+      const userId = String((request.user as any)?.sub ?? '').trim();
+      if (userId) {
+        void touchUserPresence(userId).catch(() => {});
+      }
     } catch {
       reply.code(401).send({ error: 'unauthorized' });
     }
@@ -186,6 +195,10 @@ export function buildServer() {
   app.decorate('adminOnly', async (request: any, reply: any) => {
     try {
       await request.jwtVerify();
+      const userId = String((request.user as any)?.sub ?? '').trim();
+      if (userId) {
+        void touchUserPresence(userId).catch(() => {});
+      }
       const role = (request.user as any)?.role as string | undefined;
       if (role !== 'ADMIN') {
         return reply.code(403).send({ error: 'forbidden' });
@@ -224,6 +237,10 @@ export function buildServer() {
 
   // Final payment-provider configuration
   app.addHook('onReady', async () => {
+    await withTransaction(async (client) => {
+      await ensureUserSignalSchema(client);
+    });
+
     const hasSecret = hasFlutterwaveSecretKey();
     const hasClientCreds = hasFlutterwaveClientCredentials();
 
