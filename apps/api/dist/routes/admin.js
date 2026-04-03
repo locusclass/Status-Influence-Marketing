@@ -1026,7 +1026,15 @@ export async function adminRoutes(app) {
     });
     app.patch('/admin/users/:id/status', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
-        const body = UpdateUserStatusSchema.parse(request.body);
+        const parsed = UpdateUserStatusSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return {
+                error: 'validation_failed',
+                issues: parsed.error.issues,
+            };
+        }
+        const body = parsed.data;
         const reason = (body.reason ?? '').trim();
         if ((body.status === 'SUSPENDED' || body.status === 'BANNED') && reason.length === 0) {
             reply.code(400);
@@ -1057,25 +1065,45 @@ export async function adminRoutes(app) {
         RETURNING *
         `, [resolvedUserId, body.status, reason]);
             if (res.rows[0]) {
-                await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', resolvedUserId, {
-                    status: body.status,
-                    reason: reason.length === 0 ? null : reason,
-                });
-                await createUserNotifications(client, [resolvedUserId], {
-                    title: body.status === 'ACTIVE'
-                        ? 'Account reinstated by admin'
-                        : 'Account status updated by admin',
-                    body: body.status === 'ACTIVE'
-                        ? 'An administrator reinstated your account.'
-                        : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
-                    actorId: request.user.sub,
-                    targetType: 'user',
-                    targetId: resolvedUserId,
-                    meta: {
+                try {
+                    await logAudit(client, request.user.sub, 'UPDATE_USER_STATUS', 'user', resolvedUserId, {
                         status: body.status,
                         reason: reason.length === 0 ? null : reason,
-                    },
-                });
+                    });
+                }
+                catch (error) {
+                    request.log.warn({
+                        err: error,
+                        actorId: request.user.sub,
+                        targetUserId: resolvedUserId,
+                        status: body.status,
+                    }, 'admin_status_audit_failed');
+                }
+                try {
+                    await createUserNotifications(client, [resolvedUserId], {
+                        title: body.status === 'ACTIVE'
+                            ? 'Account reinstated by admin'
+                            : 'Account status updated by admin',
+                        body: body.status === 'ACTIVE'
+                            ? 'An administrator reinstated your account.'
+                            : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
+                        actorId: request.user.sub,
+                        targetType: 'user',
+                        targetId: resolvedUserId,
+                        meta: {
+                            status: body.status,
+                            reason: reason.length === 0 ? null : reason,
+                        },
+                    });
+                }
+                catch (error) {
+                    request.log.warn({
+                        err: error,
+                        actorId: request.user.sub,
+                        targetUserId: resolvedUserId,
+                        status: body.status,
+                    }, 'admin_status_notification_failed');
+                }
             }
             return res.rows[0];
         });
