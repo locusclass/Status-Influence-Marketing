@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { withTransaction } from '../db.js';
+import { pool, withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
@@ -1046,18 +1046,15 @@ export async function adminRoutes(app) {
         let resolvedUserId = null;
         let result = null;
         try {
-            result = await withTransaction(async (client) => {
-                const resolvedRes = await client.query(`
-          SELECT id
-          FROM users
-          WHERE id::text = $1 OR public_id = $1
-          LIMIT 1
-          `, [params.id]);
-                resolvedUserId = resolvedRes.rows[0]?.id ?? null;
-                if (!resolvedUserId) {
-                    return null;
-                }
-                const res = await client.query(`
+            const resolvedRes = await pool.query(`
+        SELECT id
+        FROM users
+        WHERE id::text = $1 OR public_id = $1
+        LIMIT 1
+        `, [params.id]);
+            resolvedUserId = resolvedRes.rows[0]?.id ?? null;
+            if (resolvedUserId) {
+                const res = await pool.query(`
           UPDATE users
           SET status = $2,
               status_reason = CASE
@@ -1071,20 +1068,24 @@ export async function adminRoutes(app) {
           WHERE id = $1
           RETURNING *
           `, [resolvedUserId, body.status, reason]);
-                return res.rows[0] ?? null;
-            });
+                result = res.rows[0] ?? null;
+            }
         }
         catch (error) {
+            const detail = error instanceof Error && error.message.trim().length > 0
+                ? error.message.trim()
+                : 'Unable to update account status right now.';
             request.log.error({
                 err: error,
                 actorId: request.user.sub,
                 targetUserId: params.id,
                 status: body.status,
+                detail,
             }, 'admin_status_update_failed');
             reply.code(500);
             return {
                 error: 'user_status_update_failed',
-                detail: 'Unable to update account status right now.',
+                detail,
             };
         }
         if (!result || !resolvedUserId) {

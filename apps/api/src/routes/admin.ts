@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { withTransaction } from '../db.js';
+import { pool, withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
@@ -1238,21 +1238,18 @@ export async function adminRoutes(app: FastifyInstance) {
     let result: any = null;
 
     try {
-      result = await withTransaction(async (client) => {
-        const resolvedRes = await client.query(
-          `
-          SELECT id
-          FROM users
-          WHERE id::text = $1 OR public_id = $1
-          LIMIT 1
-          `,
-          [params.id]
-        );
-        resolvedUserId = (resolvedRes.rows[0]?.id as string | undefined) ?? null;
-        if (!resolvedUserId) {
-          return null;
-        }
-        const res = await client.query(
+      const resolvedRes = await pool.query(
+        `
+        SELECT id
+        FROM users
+        WHERE id::text = $1 OR public_id = $1
+        LIMIT 1
+        `,
+        [params.id]
+      );
+      resolvedUserId = (resolvedRes.rows[0]?.id as string | undefined) ?? null;
+      if (resolvedUserId) {
+        const res = await pool.query(
           `
           UPDATE users
           SET status = $2,
@@ -1269,22 +1266,27 @@ export async function adminRoutes(app: FastifyInstance) {
           `,
           [resolvedUserId, body.status, reason]
         );
-        return res.rows[0] ?? null;
-      });
+        result = res.rows[0] ?? null;
+      }
     } catch (error) {
+      const detail =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message.trim()
+          : 'Unable to update account status right now.';
       request.log.error(
         {
           err: error,
           actorId: (request.user as any).sub,
           targetUserId: params.id,
           status: body.status,
+          detail,
         },
         'admin_status_update_failed'
       );
       reply.code(500);
       return {
         error: 'user_status_update_failed',
-        detail: 'Unable to update account status right now.',
+        detail,
       };
     }
 
