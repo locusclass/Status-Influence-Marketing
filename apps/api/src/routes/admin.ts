@@ -56,7 +56,7 @@ const UpdateCampaignSchema = z.object({
   budget_total: z.number().int().positive().optional(),
   start_date: z.string().optional(),
   end_date: z.string().optional(),
-  media_type: z.enum(['IMAGE', 'VIDEO']).optional(),
+  media_type: z.enum(['TEXT', 'IMAGE', 'VIDEO']).optional(),
   media_text: z.string().trim().max(2000).nullable().optional(),
   media_url: z.string().url().nullable().optional(),
   terms_keep_hours: z.number().int().positive().max(168).optional(),
@@ -1109,7 +1109,9 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx})`);
+        conditions.push(
+          `(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR adv.email ILIKE $${idx} OR adv.public_id ILIKE $${idx} OR c.advertiser_id::text ILIKE $${idx} OR dist.email ILIKE $${idx} OR dist.public_id ILIKE $${idx} OR COALESCE(c.assigned_distributor_id::text, '') ILIKE $${idx})`
+        );
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -1146,7 +1148,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT c.*, adv.email AS advertiser_email, dist.email AS assigned_distributor_email FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        `SELECT c.*, adv.email AS advertiser_email, adv.public_id AS advertiser_public_id, dist.email AS assigned_distributor_email, dist.public_id AS assigned_distributor_public_id FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
         [...params, limit, offset]
       );
       const statusSummaries = await buildCampaignStatusSummaries(
