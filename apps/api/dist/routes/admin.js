@@ -1056,13 +1056,13 @@ export async function adminRoutes(app) {
             if (resolvedUserId) {
                 const res = await pool.query(`
           UPDATE users
-          SET status = $2,
+          SET status = $2::text,
               status_reason = CASE
-                WHEN $2 = 'ACTIVE' THEN NULL
-                ELSE NULLIF($3, '')
+                WHEN $2::text = 'ACTIVE' THEN NULL
+                ELSE NULLIF($3::text, '')
               END,
               status_reason_updated_at = CASE
-                WHEN $2 = 'ACTIVE' THEN NULL
+                WHEN $2::text = 'ACTIVE' THEN NULL
                 ELSE NOW()
               END
           WHERE id = $1
