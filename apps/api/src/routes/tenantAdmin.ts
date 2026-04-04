@@ -1,6 +1,7 @@
-import { buildAuthClaims, buildUserSession } from '../services/roles.js';
-import countries from 'i18n-iso-countries';`nimport { FastifyInstance } from 'fastify';
+import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import countries from 'i18n-iso-countries';
+import { buildAuthClaims, buildUserSession } from '../services/roles.js';
 import {
   ADMIN_ROLE_COUNTRY_ADMIN,
   ADMIN_ROLE_DIVISION_ADMIN,
@@ -121,7 +122,64 @@ async function ensureWalletForUser(client: any, userId: string) {
   return created.rows[0];
 }
 
-export async function tenantAdminRoutes(app: FastifyInstance) {  app.get('/admin/available-countries', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async () => { return { countries: Object.entries(countries.getNames('en', { select: 'official' })).map(([code, name]) => ({ code, name })) }; });  app.post('/admin/countries/:id/access', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => { const params = request.params as { id: string }; return withTransaction(async (client) => { const countryRes = await client.query('SELECT id, name, code FROM countries WHERE id = $1 LIMIT 1', [params.id]); const country = countryRes.rows[0]; if (!country) { reply.code(404); return { error: 'country_not_found' }; } const access = getRequestDashboardAccess(request); const userRes = await client.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [access.user_id]); const user = userRes.rows[0]; if (!user) { reply.code(404); return { error: 'user_not_found' }; } const claims = buildAuthClaims(user); claims.country_id = country.id; claims.admin_role = ADMIN_ROLE_COUNTRY_ADMIN; const token = app.jwt.sign(claims); return { token, user: { ...buildUserSession(user), admin_role: ADMIN_ROLE_COUNTRY_ADMIN, country_id: country.id, country_name: country.name, country_code: country.code } }; }); });
+export async function tenantAdminRoutes(app: FastifyInstance) {
+  app.get(
+    '/admin/available-countries',
+    { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] },
+    async () => {
+      return {
+        countries: Object.entries(
+          countries.getNames('en', { select: 'official' })
+        ).map(([code, name]) => ({ code, name })),
+      };
+    }
+  );
+
+  app.post(
+    '/admin/countries/:id/access',
+    { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] },
+    async (request, reply) => {
+      const params = request.params as { id: string };
+      return withTransaction(async (client) => {
+        const countryRes = await client.query(
+          'SELECT id, name, code FROM countries WHERE id = $1 LIMIT 1',
+          [params.id]
+        );
+        const country = countryRes.rows[0];
+        if (!country) {
+          reply.code(404);
+          return { error: 'country_not_found' };
+        }
+
+        const access = getRequestDashboardAccess(request);
+        const userRes = await client.query(
+          'SELECT * FROM users WHERE id = $1 LIMIT 1',
+          [access.user_id]
+        );
+        const user = userRes.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+
+        const claims: any = buildAuthClaims(user);
+        claims.country_id = country.id;
+        claims.admin_role = ADMIN_ROLE_COUNTRY_ADMIN;
+
+        const token = app.jwt.sign(claims);
+        return {
+          token,
+          user: {
+            ...buildUserSession(user),
+            admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+            country_id: country.id,
+            country_name: country.name,
+            country_code: country.code,
+          },
+        };
+      });
+    }
+  );
   app.get(
     '/dashboard/access',
     {
