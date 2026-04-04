@@ -8,6 +8,7 @@ import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
 import {
+  generateMonthlyPayouts,
   deriveEngagementRate,
   doesSubmissionExist,
   extractMetricsSnapshot,
@@ -27,6 +28,7 @@ import {
   isCreatorPlatform,
   isSubmissionPublic,
   normalizeCampaignPlatform,
+  recordCampaignRevenueEntry,
 } from '@prime/shared';
 
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
@@ -40,6 +42,7 @@ const verifier =
     : new MockVerifier();
 let lastContractExpirySweepAt = 0;
 let lastOpenAllocatorSweepAt = 0;
+let lastMonthlyPayoutSweepAt = 0;
 
 type EligibleDistributor = {
   id: string;
@@ -1227,6 +1230,7 @@ async function markContractCompletedForVerifiedProof(client: any, proofId: strin
     `,
     [proofContext.campaign_id]
   );
+  await recordCampaignRevenueEntry(client, proofContext.campaign_id);
 }
 
 async function preparePayoutRequest(client: any, proof: any, campaign: any) {
@@ -2050,6 +2054,21 @@ async function runOpenContractAllocatorIfDue() {
   });
 }
 
+async function runMonthlyManagerPayoutsIfDue() {
+  const now = Date.now();
+  if (now - lastMonthlyPayoutSweepAt < 60 * 60 * 1000) return;
+  lastMonthlyPayoutSweepAt = now;
+
+  const current = new Date();
+  if (current.getUTCDate() !== 1) {
+    return;
+  }
+
+  await withTransaction(async (client) => {
+    await generateMonthlyPayouts(client, current);
+  });
+}
+
 async function loop() {
   while (true) {
     try {
@@ -2062,6 +2081,12 @@ async function loop() {
       await runOpenContractAllocatorIfDue();
     } catch (err) {
       console.error('open_contract_allocator_failed', err);
+    }
+
+    try {
+      await runMonthlyManagerPayoutsIfDue();
+    } catch (err) {
+      console.error('monthly_manager_payouts_failed', err);
     }
 
     const job = await fetchNextJob();

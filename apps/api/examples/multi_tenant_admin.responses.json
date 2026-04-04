@@ -1,0 +1,94 @@
+{
+  "dashboard_access": {
+    "access": {
+      "user_id": "9f1d0f7a-1c5d-4dbe-b7b8-f8a77af6f940",
+      "email": "uganda.manager@primestatus.site",
+      "role": "ADMIN",
+      "active_role": "ADMIN",
+      "admin_role": "COUNTRY_ADMIN",
+      "country_id": "b2b8f1d0-3d70-4fd5-b0f8-1f8c31ad84a8",
+      "division_id": null,
+      "country_code": "UG",
+      "country_name": "Uganda",
+      "division_name": null
+    }
+  },
+  "admin_global_stats": {
+    "summary": {
+      "total_countries": 3,
+      "total_users": 842,
+      "total_campaigns": 126,
+      "gross_revenue": 15400000,
+      "platform_fee": 2310000,
+      "net_platform_revenue": 1617000
+    },
+    "revenue_by_country": [
+      {
+        "country_id": "b2b8f1d0-3d70-4fd5-b0f8-1f8c31ad84a8",
+        "country_name": "Uganda",
+        "country_code": "UG",
+        "gross_revenue": 9400000,
+        "platform_fee": 1410000,
+        "net_platform_revenue": 987000
+      }
+    ],
+    "users_by_country": [
+      {
+        "country_id": "b2b8f1d0-3d70-4fd5-b0f8-1f8c31ad84a8",
+        "country_name": "Uganda",
+        "country_code": "UG",
+        "user_count": 401
+      }
+    ],
+    "campaigns_by_country": [
+      {
+        "country_id": "b2b8f1d0-3d70-4fd5-b0f8-1f8c31ad84a8",
+        "country_name": "Uganda",
+        "country_code": "UG",
+        "campaign_count": 58
+      }
+    ]
+  },
+  "country_analytics": {
+    "country": {
+      "id": "b2b8f1d0-3d70-4fd5-b0f8-1f8c31ad84a8",
+      "name": "Uganda",
+      "code": "UG",
+      "status": "ACTIVE"
+    },
+    "analytics": {
+      "total_users": 401,
+      "active_users": 388,
+      "total_campaigns": 58,
+      "gross_revenue": 9400000,
+      "platform_fee": 1410000,
+      "net_platform_revenue": 987000
+    },
+    "divisions": [
+      {
+        "id": "57fb9622-9f86-4d4e-8cf7-84df6fd987e4",
+        "name": "Kampala",
+        "type": "CITY",
+        "user_count": 214,
+        "campaign_count": 29,
+        "division_revenue": 211500
+      }
+    ]
+  },
+  "division_overview": {
+    "division": {
+      "id": "57fb9622-9f86-4d4e-8cf7-84df6fd987e4",
+      "name": "Kampala",
+      "type": "CITY",
+      "country_name": "Uganda",
+      "country_code": "UG"
+    },
+    "analytics": {
+      "total_users": 214,
+      "active_users": 207,
+      "total_campaigns": 29,
+      "gross_revenue": 940000,
+      "division_manager_earnings": 211500
+    }
+  }
+}

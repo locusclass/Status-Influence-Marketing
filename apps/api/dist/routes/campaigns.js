@@ -1,4 +1,4 @@
-import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, isCreatorPlatform, normalizeExecutionMeta, resolveDeliveryModel, } from '@prime/shared';
+import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, isCreatorPlatform, normalizeExecutionMeta, recordCampaignRevenueEntry, resolveDeliveryModel, } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
@@ -2469,6 +2469,7 @@ export async function campaignRoutes(app) {
            AND visibility='PRIVATE'`, [contract.campaign_id]);
             if (!updated.rows[0])
                 return { error: 'contract_not_active' };
+            await recordCampaignRevenueEntry(client, contract.campaign_id);
             return { contract: updated.rows[0], campaign_platform: contract.platform, campaign_id: contract.campaign_id };
         });
         if (!result) {

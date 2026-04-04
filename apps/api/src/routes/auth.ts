@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { buildAuthClaims, buildUserSession } from '../services/roles.js';
+import { canAccessAdminDashboard } from '@prime/shared';
 import { touchUserPresenceWithClient } from '../services/userSignals.js';
 
 const registerSchema = z.object({
@@ -122,6 +123,9 @@ function buildSyntheticPassword(sub: string, email: string) {
 }
 
 function isAdminSessionUser(user: Record<string, unknown> | null | undefined) {
+  if (canAccessAdminDashboard(user?.admin_role)) {
+    return true;
+  }
   const role = String(user?.role ?? '')
     .trim()
     .toUpperCase();

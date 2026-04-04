@@ -2,3 +2,4 @@ node_modules/
 .pnpm-store/
 apps/*/node_modules/
 **/.vite/
+.codex-tmp/FlareLine/

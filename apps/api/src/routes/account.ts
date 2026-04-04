@@ -708,9 +708,15 @@ export async function accountRoutes(app: FastifyInstance) {
           u.status_reason_updated_at,
           u.role,
           u.active_role,
+          u.admin_role,
           u.phone,
           COALESCE(u.whatsapp_verified, FALSE) AS whatsapp_verified,
           u.country,
+          u.country_id,
+          u.division_id,
+          country_meta.code AS country_code,
+          country_meta.name AS country_name,
+          division_meta.name AS division_name,
           u.preferred_currency AS currency,
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
@@ -728,6 +734,8 @@ export async function accountRoutes(app: FastifyInstance) {
           p.updated_at
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
+        LEFT JOIN countries country_meta ON country_meta.id = u.country_id
+        LEFT JOIN divisions division_meta ON division_meta.id = u.division_id
         LEFT JOIN LATERAL (
           SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS engagements_24h
           FROM proofs pr

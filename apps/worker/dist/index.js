@@ -7,7 +7,7 @@ import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-import { deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getMinEngagementRate, getPrimaryMetricTarget, getPublicContractUnitRate, getRequiredLiveHours, getSubmissionActionType, getSubmissionLiveHours, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, isSubmissionPublic, normalizeCampaignPlatform, } from '@prime/shared';
+import { generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getMinEngagementRate, getPrimaryMetricTarget, getPublicContractUnitRate, getRequiredLiveHours, getSubmissionActionType, getSubmissionLiveHours, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, isSubmissionPublic, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
@@ -18,6 +18,7 @@ const verifier = verifierProvider === 'gemini'
             : new MockVerifier();
 let lastContractExpirySweepAt = 0;
 let lastOpenAllocatorSweepAt = 0;
+let lastMonthlyPayoutSweepAt = 0;
 if (process.env.NODE_ENV === 'production' && verifierProvider === 'mock') {
     throw new Error('VERIFIER_PROVIDER=mock is not allowed in production');
 }
@@ -955,6 +956,7 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     SET status='COMPLETED'
     WHERE id=$1
     `, [proofContext.campaign_id]);
+    await recordCampaignRevenueEntry(client, proofContext.campaign_id);
 }
 async function preparePayoutRequest(client, proof, campaign) {
     const escrowCampaignId = getEscrowCampaignId(campaign);
@@ -1565,6 +1567,19 @@ async function runOpenContractAllocatorIfDue() {
         }
     });
 }
+async function runMonthlyManagerPayoutsIfDue() {
+    const now = Date.now();
+    if (now - lastMonthlyPayoutSweepAt < 60 * 60 * 1000)
+        return;
+    lastMonthlyPayoutSweepAt = now;
+    const current = new Date();
+    if (current.getUTCDate() !== 1) {
+        return;
+    }
+    await withTransaction(async (client) => {
+        await generateMonthlyPayouts(client, current);
+    });
+}
 async function loop() {
     while (true) {
         try {
@@ -1578,6 +1593,12 @@ async function loop() {
         }
         catch (err) {
             console.error('open_contract_allocator_failed', err);
+        }
+        try {
+            await runMonthlyManagerPayoutsIfDue();
+        }
+        catch (err) {
+            console.error('monthly_manager_payouts_failed', err);
         }
         const job = await fetchNextJob();
         if (!job) {

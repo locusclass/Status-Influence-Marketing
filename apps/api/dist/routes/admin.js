@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { recordCampaignRevenueEntry } from '@prime/shared';
 import { pool, withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
@@ -112,6 +113,7 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     SET status='COMPLETED'
     WHERE id=$1
     `, [proofContext.campaign_id]);
+    await recordCampaignRevenueEntry(client, proofContext.campaign_id);
 }
 function parsePaging(query) {
     const limitRaw = Number(query?.limit ?? 50);
@@ -189,14 +191,18 @@ export async function adminRoutes(app) {
         AdminAccessSchema.parse(request.body);
         const token = app.jwt.sign({
             sub: 'ariaka-access',
-            role: 'ADMIN'
+            role: 'ADMIN',
+            active_role: 'ADMIN',
+            admin_role: 'SUPER_ADMIN'
         });
         return {
             token,
             user: {
                 id: 'ariaka-access',
                 email: 'ariaka-access@local',
-                role: 'ADMIN'
+                role: 'ADMIN',
+                active_role: 'ADMIN',
+                admin_role: 'SUPER_ADMIN'
             }
         };
     });
@@ -1530,7 +1536,7 @@ export async function adminRoutes(app) {
         }
         return { escrow: res };
     });
-    app.get('/admin/payouts', { preHandler: [app.adminOnly] }, async (request) => {
+    app.get('/admin/payout-requests', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const range = parseDateRange(query?.from, query?.to);
@@ -1704,7 +1710,7 @@ export async function adminRoutes(app) {
         }
         return { job: res };
     });
-    app.patch('/admin/payouts/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    app.patch('/admin/payout-requests/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         const body = UpdatePayoutSchema.parse(request.body);
         const res = await withTransaction(async (client) => {

@@ -8,6 +8,10 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import {
+  ADMIN_ROLE_SUPER_ADMIN,
+  normalizeAdminDashboardRole,
+} from '@prime/shared';
+import {
   config,
   hasFlutterwaveClientCredentials,
   hasFlutterwaveSecretKey,
@@ -24,7 +28,8 @@ import {
   uploadRoutes,
   verificationRoutes,
   accountRoutes,
-  adminRoutes
+  adminRoutes,
+  tenantAdminRoutes
 } from './routes/index.js';
 import {
   ensureUserSignalSchema,
@@ -200,7 +205,10 @@ export function buildServer() {
         void touchUserPresence(userId).catch(() => {});
       }
       const role = (request.user as any)?.role as string | undefined;
-      if (role !== 'ADMIN') {
+      const adminRole = normalizeAdminDashboardRole(
+        (request.user as any)?.admin_role
+      );
+      if (adminRole !== ADMIN_ROLE_SUPER_ADMIN && role !== 'ADMIN') {
         return reply.code(403).send({ error: 'forbidden' });
       }
     } catch {
@@ -229,6 +237,7 @@ export function buildServer() {
     instance.register(paymentRoutes);
     instance.register(accountRoutes);
     instance.register(adminRoutes);
+    instance.register(tenantAdminRoutes);
   };
 
   // Routes

@@ -9,6 +9,7 @@ import {
   getCampaignBurstMode,
   isCreatorPlatform,
   normalizeExecutionMeta,
+  recordCampaignRevenueEntry,
   resolveDeliveryModel,
 } from '@prime/shared';
 import { z } from 'zod';
@@ -3308,6 +3309,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         [contract.campaign_id]
       );
       if (!updated.rows[0]) return { error: 'contract_not_active' } as any;
+      await recordCampaignRevenueEntry(client, contract.campaign_id);
       return { contract: updated.rows[0], campaign_platform: contract.platform, campaign_id: contract.campaign_id };
     });
     if (!result) {

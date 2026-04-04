@@ -6,9 +6,10 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
+import { ADMIN_ROLE_SUPER_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
-import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes } from './routes/index.js';
+import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
 export function buildServer() {
     const app = Fastify({
@@ -154,7 +155,8 @@ export function buildServer() {
                 void touchUserPresence(userId).catch(() => { });
             }
             const role = request.user?.role;
-            if (role !== 'ADMIN') {
+            const adminRole = normalizeAdminDashboardRole(request.user?.admin_role);
+            if (adminRole !== ADMIN_ROLE_SUPER_ADMIN && role !== 'ADMIN') {
                 return reply.code(403).send({ error: 'forbidden' });
             }
         }
@@ -181,6 +183,7 @@ export function buildServer() {
         instance.register(paymentRoutes);
         instance.register(accountRoutes);
         instance.register(adminRoutes);
+        instance.register(tenantAdminRoutes);
     };
     // Routes
     registerRoutes(app);

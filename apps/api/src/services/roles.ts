@@ -1,3 +1,9 @@
+import {
+  ADMIN_ROLE_SUPER_ADMIN,
+  ADMIN_ROLE_USER,
+  normalizeAdminDashboardRole,
+} from '@prime/shared';
+
 export const ACCOUNT_ROLE_ADMIN = 'ADMIN';
 export const ACCOUNT_ROLE_ADVERTISER = 'ADVERTISER';
 export const ACCOUNT_ROLE_DISTRIBUTOR = 'DISTRIBUTOR';
@@ -60,19 +66,43 @@ export function buildAuthClaims(user: {
   id: string;
   role?: unknown;
   active_role?: unknown;
+  admin_role?: unknown;
+  country_id?: unknown;
+  division_id?: unknown;
+  country_code?: unknown;
+  country_name?: unknown;
+  division_name?: unknown;
 }) {
   const role = normalizeAccountRole(user.role);
   const activeRole = normalizeActiveRole(user.active_role, role);
+  const adminRole =
+    normalizeAdminDashboardRole(user.admin_role) !== ADMIN_ROLE_USER
+      ? normalizeAdminDashboardRole(user.admin_role)
+      : role === ACCOUNT_ROLE_ADMIN || activeRole === ACCOUNT_ROLE_ADMIN
+          ? ADMIN_ROLE_SUPER_ADMIN
+          : ADMIN_ROLE_USER;
   return {
     sub: user.id,
     role,
     active_role: activeRole,
+    admin_role: adminRole,
+    country_id: user.country_id ?? null,
+    division_id: user.division_id ?? null,
+    country_code: user.country_code ?? null,
+    country_name: user.country_name ?? null,
+    division_name: user.division_name ?? null,
   };
 }
 
 export function buildUserSession(user: Record<string, unknown>) {
   const role = normalizeAccountRole(user.role);
   const activeRole = normalizeActiveRole(user.active_role, role);
+  const adminRole =
+    normalizeAdminDashboardRole(user.admin_role) !== ADMIN_ROLE_USER
+      ? normalizeAdminDashboardRole(user.admin_role)
+      : role === ACCOUNT_ROLE_ADMIN || activeRole === ACCOUNT_ROLE_ADMIN
+          ? ADMIN_ROLE_SUPER_ADMIN
+          : ADMIN_ROLE_USER;
   const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
   const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
   const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
@@ -90,9 +120,18 @@ export function buildUserSession(user: Record<string, unknown>) {
     status_reason_updated_at: user.status_reason_updated_at ?? null,
     role,
     active_role: activeRole,
+    admin_role: adminRole,
     phone: String(user.phone ?? ''),
     whatsapp_verified: Boolean(user.whatsapp_verified ?? false),
     country: String(user.country ?? ''),
+    country_id: user.country_id == null ? null : String(user.country_id),
+    division_id: user.division_id == null ? null : String(user.division_id),
+    country_code:
+      user.country_code == null ? null : String(user.country_code),
+    country_name:
+      user.country_name == null ? null : String(user.country_name),
+    division_name:
+      user.division_name == null ? null : String(user.division_name),
     currency: String(user.currency ?? user.preferred_currency ?? 'UGX'),
     can_multi_contract: Boolean(user.can_multi_contract ?? false),
     max_status_viewers_12h: Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0),

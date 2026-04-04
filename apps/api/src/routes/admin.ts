@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { recordCampaignRevenueEntry } from '@prime/shared';
 import { pool, withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
@@ -154,6 +155,7 @@ async function markContractCompletedForVerifiedProof(client: any, proofId: strin
     `,
     [proofContext.campaign_id]
   );
+  await recordCampaignRevenueEntry(client, proofContext.campaign_id);
 }
 
 function parsePaging(query: any) {
@@ -257,7 +259,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const token = app.jwt.sign({
       sub: 'ariaka-access',
-      role: 'ADMIN'
+      role: 'ADMIN',
+      active_role: 'ADMIN',
+      admin_role: 'SUPER_ADMIN'
     });
 
     return {
@@ -265,7 +269,9 @@ export async function adminRoutes(app: FastifyInstance) {
       user: {
         id: 'ariaka-access',
         email: 'ariaka-access@local',
-        role: 'ADMIN'
+        role: 'ADMIN',
+        active_role: 'ADMIN',
+        admin_role: 'SUPER_ADMIN'
       }
     };
   });
@@ -1857,7 +1863,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { escrow: res };
   });
 
-  app.get('/admin/payouts', { preHandler: [app.adminOnly] }, async (request) => {
+  app.get('/admin/payout-requests', { preHandler: [app.adminOnly] }, async (request) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
@@ -2085,7 +2091,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { job: res };
   });
 
-  app.patch('/admin/payouts/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+  app.patch('/admin/payout-requests/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const params = request.params as { id: string };
     const body = UpdatePayoutSchema.parse(request.body);
     const res = await withTransaction(async (client) => {
