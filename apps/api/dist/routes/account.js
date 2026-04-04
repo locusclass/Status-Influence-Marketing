@@ -8,7 +8,7 @@ import { whatsappVerificationService } from '../services/whatsappVerification.js
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
-import { ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, } from '../services/userSignals.js';
+import { deleteUserNotification, ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
@@ -39,6 +39,9 @@ const distributorCapacitySchema = z.object({
 });
 const accountWhatsappVerifySchema = z.object({
     phone: z.string().trim().min(7).max(20).optional(),
+});
+const accountNotificationUpdateSchema = z.object({
+    read: z.boolean(),
 });
 const walletWithdrawSchema = z.object({
     amount: z.number().int().positive(),
@@ -1402,6 +1405,49 @@ export async function accountRoutes(app) {
         return withTransaction(async (client) => {
             const updated = await markAllUserNotificationsRead(client, userId);
             return { ok: true, updated };
+        });
+    });
+    app.patch('/account/notifications/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.sub;
+        const params = request.params;
+        const parsed = accountNotificationUpdateSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        return withTransaction(async (client) => {
+            const notification = await updateUserNotificationReadState(client, userId, params.id, parsed.data.read);
+            if (!notification) {
+                reply.code(404);
+                return { error: 'notification_not_found' };
+            }
+            const result = await listUserNotifications(client, userId, {
+                limit: 1,
+            });
+            return {
+                ok: true,
+                notification,
+                unread_count: result.unreadCount,
+            };
+        });
+    });
+    app.delete('/account/notifications/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.sub;
+        const params = request.params;
+        return withTransaction(async (client) => {
+            const deletedId = await deleteUserNotification(client, userId, params.id);
+            if (!deletedId) {
+                reply.code(404);
+                return { error: 'notification_not_found' };
+            }
+            const result = await listUserNotifications(client, userId, {
+                limit: 1,
+            });
+            return {
+                ok: true,
+                id: deletedId,
+                unread_count: result.unreadCount,
+            };
         });
     });
     app.get('/proofs/:id', { preHandler: [app.authenticate] }, async (request, reply) => {

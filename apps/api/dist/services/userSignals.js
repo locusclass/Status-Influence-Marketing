@@ -140,6 +140,40 @@ export async function markAllUserNotificationsRead(client, userId) {
     `, [normalizedUserId]);
     return updated.rowCount ?? 0;
 }
+export async function updateUserNotificationReadState(client, userId, notificationId, read) {
+    await ensureUserSignalSchema(client);
+    const normalizedUserId = String(userId ?? '').trim();
+    const normalizedNotificationId = String(notificationId ?? '').trim();
+    if (!normalizedUserId || !normalizedNotificationId) {
+        return null;
+    }
+    const updated = await client.query(`
+    UPDATE user_notifications
+    SET read_at = CASE
+      WHEN $3::boolean THEN COALESCE(read_at, NOW())
+      ELSE NULL
+    END
+    WHERE user_id = $1
+      AND id = $2
+    RETURNING *
+    `, [normalizedUserId, normalizedNotificationId, read]);
+    return updated.rows[0] ?? null;
+}
+export async function deleteUserNotification(client, userId, notificationId) {
+    await ensureUserSignalSchema(client);
+    const normalizedUserId = String(userId ?? '').trim();
+    const normalizedNotificationId = String(notificationId ?? '').trim();
+    if (!normalizedUserId || !normalizedNotificationId) {
+        return null;
+    }
+    const deleted = await client.query(`
+    DELETE FROM user_notifications
+    WHERE user_id = $1
+      AND id = $2
+    RETURNING id
+    `, [normalizedUserId, normalizedNotificationId]);
+    return deleted.rows[0]?.id ?? null;
+}
 export async function collectCampaignNotificationUserIds(client, campaignId) {
     const normalizedCampaignId = String(campaignId ?? '').trim();
     if (!normalizedCampaignId) {
