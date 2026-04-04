@@ -30,6 +30,9 @@ const googleAuthSchema = z.object({
     avatar_url: z.string().url().max(1024).optional(),
     max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
+const googleAdminAuthSchema = z.object({
+    id_token: z.string().min(20),
+});
 function resolveDistributorCapacity(body) {
     if (body.role !== 'DISTRIBUTOR') {
         return 0;
@@ -87,6 +90,15 @@ function buildSyntheticPassword(sub, email) {
         .update(`prime_status_google::${sub}::${email}`)
         .digest('hex');
     return `Gp!${seed.substring(0, 18)}a9`;
+}
+function isAdminSessionUser(user) {
+    const role = String(user?.role ?? '')
+        .trim()
+        .toUpperCase();
+    const activeRole = String(user?.active_role ?? user?.role ?? '')
+        .trim()
+        .toUpperCase();
+    return role === 'ADMIN' || activeRole === 'ADMIN';
 }
 export async function authRoutes(app) {
     const userRepo = new UserRepo();
@@ -287,6 +299,77 @@ export async function authRoutes(app) {
                 full_name: sessionUser.full_name ?? fullName,
                 avatar_url: photoUrl || null,
                 dialCode: countryData.dialCode,
+            },
+        };
+    });
+    app.post('/auth/google/admin', async (request, reply) => {
+        const parsed = googleAdminAuthSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        if (googleAudience.length === 0) {
+            reply.code(500);
+            return {
+                error: 'google_auth_not_configured',
+                detail: 'Set GOOGLE_CLIENT_ID on the API server to the Google OAuth web client ID used by Firebase Auth.',
+            };
+        }
+        let payload;
+        try {
+            const ticket = await googleClient.verifyIdToken({
+                idToken: parsed.data.id_token,
+                audience: googleAudience,
+            });
+            payload = ticket.getPayload();
+        }
+        catch {
+            reply.code(401);
+            return {
+                error: 'invalid_google_token',
+                detail: 'The Google ID token could not be verified against the configured client ID.',
+            };
+        }
+        const email = String(payload?.email ?? '').trim().toLowerCase();
+        const sub = String(payload?.sub ?? '').trim();
+        const verified = Boolean(payload?.email_verified);
+        if (!email || !verified || !sub) {
+            reply.code(401);
+            return { error: 'invalid_google_identity' };
+        }
+        const fullName = String(payload?.name ?? '')
+            .trim()
+            .slice(0, 120);
+        const photoUrl = String(payload?.picture ?? '')
+            .trim()
+            .slice(0, 1024);
+        const user = await withTransaction(async (client) => {
+            await ensurePublicIdColumns(client);
+            const existing = await userRepo.findByEmail(client, email);
+            if (!existing || !isAdminSessionUser(existing)) {
+                reply.code(403);
+                return {
+                    error: 'admin_access_required',
+                    detail: 'This Google account has not been enabled for the admin dashboard yet.',
+                };
+            }
+            await upsertSocialProfile(client, existing.id, fullName || email, photoUrl);
+            await touchUserPresenceWithClient(client, String(existing.id), {
+                markLogin: true,
+            });
+            const refreshed = await userRepo.findByEmail(client, email);
+            return refreshed ?? existing;
+        });
+        if (user?.error) {
+            return user;
+        }
+        const token = app.jwt.sign(buildAuthClaims(user));
+        return {
+            token,
+            user: {
+                ...buildUserSession(user),
+                full_name: String(user.full_name ?? fullName),
+                avatar_url: photoUrl || null,
             },
         };
     });
