@@ -49,6 +49,8 @@ export function buildServer() {
     'https://*.primestatus.site',
     'https://prime-status-1f0ad.firebaseapp.com',
     'https://prime-status-1f0ad.web.app',
+    'https://admindashboard-77cc3.firebaseapp.com',
+    'https://admindashboard-77cc3.web.app',
     'http://localhost:*',
     'http://127.0.0.1:*',
   ];
