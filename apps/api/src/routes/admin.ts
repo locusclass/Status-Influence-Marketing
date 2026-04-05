@@ -1,6 +1,11 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { recordCampaignRevenueEntry } from '@prime/shared';
+import {
+  recordCampaignRevenueEntry,
+  ADMIN_ROLE_SUPER_ADMIN,
+  ADMIN_ROLE_COUNTRY_ADMIN,
+  ADMIN_ROLE_DIVISION_ADMIN,
+} from '@prime/shared';
 import { pool, withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
@@ -20,6 +25,7 @@ import {
   ACCOUNT_ROLE_DUAL_USER,
   normalizeActiveRole,
 } from '../services/roles.js';
+import { getRequestDashboardAccess } from '../services/adminTenant.js';
 import {
   collectCampaignNotificationUserIds,
   createUserNotifications,
@@ -996,12 +1002,23 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
-      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const res = await client.query(
-        `
-        SELECT
-          u.*,
-          p.avatar_url,
+      
+        const access = getRequestDashboardAccess(request);
+        if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN && access.country_id) {
+          conditions.push(`u.country_id = ${idx}`);
+          params.push(access.country_id);
+          idx++;
+        } else if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN && access.division_id) {
+          conditions.push(`u.division_id = ${idx}`);
+          params.push(access.division_id);
+          idx++;
+        }
+        const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+        const res = await client.query(
+          `
+          SELECT
+            u.*,
+            p.avatar_url,
           CASE
             WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
               THEN TRUE

@@ -210,7 +210,12 @@ export function buildServer() {
       const adminRole = normalizeAdminDashboardRole(
         (request.user as any)?.admin_role
       );
-      if (adminRole !== ADMIN_ROLE_SUPER_ADMIN && role !== 'ADMIN') {
+      if (
+        adminRole !== ADMIN_ROLE_SUPER_ADMIN &&
+        adminRole !== ADMIN_ROLE_COUNTRY_ADMIN &&
+        adminRole !== ADMIN_ROLE_DIVISION_ADMIN &&
+        role !== 'ADMIN'
+      ) {
         return reply.code(403).send({ error: 'forbidden' });
       }
     } catch {
