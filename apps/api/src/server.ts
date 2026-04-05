@@ -9,6 +9,8 @@ import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import {
   ADMIN_ROLE_SUPER_ADMIN,
+  ADMIN_ROLE_COUNTRY_ADMIN,
+  ADMIN_ROLE_DIVISION_ADMIN,
   normalizeAdminDashboardRole,
 } from '@prime/shared';
 import {
