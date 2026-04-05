@@ -1259,7 +1259,8 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
 
   app.get('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = normalizeActiveRole(
       (request.user as any)?.active_role,
       (request.user as any)?.role
@@ -1399,7 +1400,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.get('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = normalizeActiveRole(
       (request.user as any)?.active_role,
       (request.user as any)?.role
@@ -1550,7 +1552,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.get('/campaign-bundles/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -1579,7 +1582,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.get('/campaigns/:id/proofs', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     if (!authUser) {
       reply.code(401);
       return { error: 'unauthorized' };
@@ -1628,7 +1632,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.get('/campaigns/:id/proofs/summary', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     if (!authUser) {
       reply.code(401);
       return { error: 'unauthorized' };
@@ -1746,7 +1751,8 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { error: 'validation_failed', issues: parsedBody.error.issues };
     }
     const body = parsedBody.data;
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -2074,7 +2080,8 @@ export async function campaignRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateCampaignSchema.parse(request.body);
     const platformKey = String(body.platform);
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -2413,7 +2420,8 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
   app.delete('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -2579,7 +2587,8 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const result = await withTransaction(async (client) => {
-      const authUser = (request.user as any)?.sub as string | undefined;
+      const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
       const role = (request.user as any)?.role as string | undefined;
       if (!authUser) {
         reply.code(401);
@@ -2813,7 +2822,8 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const result = await withTransaction(async (client) => {
-      const authUser = (request.user as any)?.sub as string | undefined;
+      const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
       const role = (request.user as any)?.role as string | undefined;
       const userEmailRes = authUser
         ? await client.query(
@@ -3000,7 +3010,8 @@ export async function campaignRoutes(app: FastifyInstance) {
   app.post('/campaigns/:id/accept', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const body = AcceptContractSchema.parse({ campaign_id: params.id });
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -3147,7 +3158,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.post('/contracts/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -3229,7 +3241,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.post('/contracts/:id/complete', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);
@@ -3334,7 +3347,8 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.post('/campaigns/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authUser = (request.user as any)?.sub as string | undefined;
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
     if (!authUser) {
       reply.code(401);

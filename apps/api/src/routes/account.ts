@@ -691,7 +691,8 @@ export async function accountRoutes(app: FastifyInstance) {
   };
 
   app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     return withTransaction(async (client) => {
       const hasFullName = await usersHasColumn(client, 'full_name');
       const fullNameSelect = hasFullName
@@ -798,7 +799,8 @@ export async function accountRoutes(app: FastifyInstance) {
     '/account/me',
     { preHandler: [app.authenticate] },
     async (request, reply) => {
-      const userId = (request.user as any).sub as string;
+      const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
       const parsed = accountProfileSchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
@@ -892,7 +894,8 @@ export async function accountRoutes(app: FastifyInstance) {
     '/account/avatar',
     { preHandler: [app.authenticate] },
     async (request, reply) => {
-      const userId = (request.user as any).sub as string;
+      const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
       const parsed = accountAvatarSchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
@@ -920,7 +923,8 @@ export async function accountRoutes(app: FastifyInstance) {
     '/account/whatsapp/verify',
     { preHandler: [app.authenticate] },
     async (request, reply) => {
-      const userId = (request.user as any).sub as string;
+      const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
       const parsed = accountWhatsappVerifySchema.safeParse(request.body ?? {});
       if (!parsed.success) {
         reply.code(400);
@@ -1016,7 +1020,8 @@ export async function accountRoutes(app: FastifyInstance) {
     '/account/password',
     { preHandler: [app.authenticate] },
     async (request, reply) => {
-      const userId = (request.user as any).sub as string;
+      const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
       const parsed = accountPasswordSchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
@@ -1046,7 +1051,8 @@ export async function accountRoutes(app: FastifyInstance) {
     '/account/role',
     { preHandler: [app.authenticate] },
     async (request, reply) => {
-      const userId = (request.user as any).sub as string;
+      const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
       const parsed = accountRoleSchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
@@ -1156,7 +1162,8 @@ export async function accountRoutes(app: FastifyInstance) {
     '/account/distributor-capacity',
     { preHandler: [app.authenticate] },
     async (request, reply) => {
-      const userId = (request.user as any).sub as string;
+      const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
       const parsed = distributorCapacitySchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
@@ -1189,7 +1196,8 @@ export async function accountRoutes(app: FastifyInstance) {
   );
 
   app.delete('/account/me', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const deletion = await withTransaction(async (client) => {
       await ensureUserProfilesTable(client);
 
@@ -1404,7 +1412,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const accountRole = (request.user as any).role as string;
     const activeRole = normalizeActiveRole(
       (request.user as any).active_role,
@@ -1448,7 +1457,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.post('/wallet/deposit', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const parsed = walletDepositSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -1586,7 +1596,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.post('/wallet/withdraw', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const parsed = walletWithdrawSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -1746,7 +1757,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.get('/proofs', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const proofs = await withTransaction(async (client) => {
@@ -1777,13 +1789,20 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.get('/dashboard/summary', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
-    const accountRole = (request.user as any).role as string;
-    const activeRole = normalizeActiveRole(
-      (request.user as any).active_role,
-      accountRole
-    );
-    return withTransaction(async (client) => {
+          const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
+      const accountRole = (request.user as any).role as string;
+      const activeRole = normalizeActiveRole(
+        (request.user as any).active_role,
+        accountRole
+      );
+      if (userId === 'ariaka-access') {
+        return {
+          advertiser_campaigns: [],
+          distributor: { pending_or_review_count: 0 }
+        };
+      }
+      return withTransaction(async (client) => {
       if (activeRole === ACCOUNT_ROLE_ADVERTISER && canAccessAdvertiserFeatures(accountRole)) {
         const campaignsRes = await client.query(
           `SELECT c.id,
@@ -1821,7 +1840,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.get('/account/notifications', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const query = request.query as any;
     const limit = Math.min(Math.max(Number(query?.limit ?? 20), 1), 100);
     const unreadOnly = String(query?.unread_only ?? '').trim() === 'true';
@@ -1838,7 +1858,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.post('/account/notifications/read-all', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     return withTransaction(async (client) => {
       const updated = await markAllUserNotificationsRead(client, userId);
       return { ok: true, updated };
@@ -1846,7 +1867,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.patch('/account/notifications/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const params = request.params as { id: string };
     const parsed = accountNotificationUpdateSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -1878,7 +1900,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.delete('/account/notifications/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const params = request.params as { id: string };
 
     return withTransaction(async (client) => {
@@ -1900,7 +1923,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.get('/proofs/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const params = request.params as { id: string };
     const proof = await withTransaction(async (client) => {
       const res = await client.query(
@@ -1933,7 +1957,8 @@ export async function accountRoutes(app: FastifyInstance) {
   });
 
   app.get('/contracts/me', { preHandler: [app.authenticate] }, async (request) => {
-    const userId = (request.user as any).sub as string;
+    const userSub = (request.user as any).sub as string;
+      const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const status = (query?.status ?? '').toString().toUpperCase();
