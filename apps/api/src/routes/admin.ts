@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
@@ -6,7 +7,7 @@ import {
   ADMIN_ROLE_COUNTRY_ADMIN,
   ADMIN_ROLE_DIVISION_ADMIN,
 } from '@prime/shared';
-import { pool, withTransaction } from '../db.js';
+import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
@@ -25,7 +26,11 @@ import {
   ACCOUNT_ROLE_DUAL_USER,
   normalizeActiveRole,
 } from '../services/roles.js';
-import { getRequestDashboardAccess } from '../services/adminTenant.js';
+import {
+  getRequestDashboardAccess,
+  loadDashboardAccessContext,
+  type DashboardAccessContext,
+} from '../services/adminTenant.js';
 import {
   collectCampaignNotificationUserIds,
   createUserNotifications,
@@ -110,6 +115,177 @@ const AuditQuerySchema = z.object({
   limit: z.string().optional(),
   offset: z.string().optional()
 });
+
+type FilterState = {
+  conditions: string[];
+  params: any[];
+  idx: number;
+};
+
+function pushScopedCondition(
+  state: FilterState,
+  condition: string,
+  value: unknown
+) {
+  state.conditions.push(condition.replaceAll('?', `$${state.idx}`));
+  state.params.push(value);
+  state.idx += 1;
+}
+
+function appendTenantScope(
+  state: FilterState,
+  access: DashboardAccessContext,
+  scope: {
+    country: string;
+    division?: string | null;
+  }
+) {
+  if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
+    if (!access.country_id) {
+      state.conditions.push('1 = 0');
+      return;
+    }
+    pushScopedCondition(state, `${scope.country} = ?`, access.country_id);
+    return;
+  }
+
+  if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
+    if (!access.division_id || !scope.division) {
+      state.conditions.push('1 = 0');
+      return;
+    }
+    pushScopedCondition(state, `${scope.division} = ?`, access.division_id);
+  }
+}
+
+function matchesTenantScope(
+  access: DashboardAccessContext,
+  row: {
+    country_id?: unknown;
+    division_id?: unknown;
+  } | null | undefined
+) {
+  if (!row) return false;
+  if (access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
+    return true;
+  }
+  if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
+    return (
+      Boolean(access.country_id) &&
+      String(row.country_id ?? '') === String(access.country_id)
+    );
+  }
+  if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
+    return (
+      Boolean(access.division_id) &&
+      String(row.division_id ?? '') === String(access.division_id)
+    );
+  }
+  return false;
+}
+
+function isSuperDashboardAccess(access: DashboardAccessContext) {
+  return access.admin_role === ADMIN_ROLE_SUPER_ADMIN;
+}
+
+function isManagedAdminAccount(row: {
+  role?: unknown;
+  admin_role?: unknown;
+} | null | undefined) {
+  const role = String(row?.role ?? '').trim().toUpperCase();
+  const adminRole = String(row?.admin_role ?? '').trim().toUpperCase();
+  return role === 'ADMIN' || adminRole !== 'USER';
+}
+
+function verifyEmergencyPhrase(input: string) {
+  const expected = config.adminAccessPhrase.trim();
+  const candidate = input.trim();
+  if (!expected || !candidate) {
+    return false;
+  }
+  const left = Buffer.from(candidate, 'utf8');
+  const right = Buffer.from(expected, 'utf8');
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+async function getLiveDashboardAccess(client: any, request: any) {
+  const access = getRequestDashboardAccess(request);
+  if (!access.user_id || access.user_id === 'ariaka-access') {
+    return access;
+  }
+  return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
+}
+
+async function requireSuperDashboardAccess(
+  client: any,
+  request: any,
+  reply: any
+) {
+  const access = await getLiveDashboardAccess(client, request);
+  if (!isSuperDashboardAccess(access)) {
+    reply.code(403);
+    return null;
+  }
+  return access;
+}
+
+async function loadScopedUser(
+  client: any,
+  access: DashboardAccessContext,
+  rawUserId: string
+) {
+  await ensurePublicIdColumns(client);
+  const resolvedUserId = await resolveUserId(client, rawUserId);
+  if (!resolvedUserId) {
+    return null;
+  }
+  const res = await client.query(
+    `
+    SELECT id, role, admin_role, country_id, division_id
+    FROM users
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [resolvedUserId]
+  );
+  const user = res.rows[0] ?? null;
+  if (!matchesTenantScope(access, user)) {
+    return null;
+  }
+  return {
+    resolvedUserId,
+    user,
+  };
+}
+
+async function loadScopedCampaign(
+  client: any,
+  access: DashboardAccessContext,
+  rawCampaignId: string
+) {
+  await ensurePublicIdColumns(client);
+  const resolvedCampaignId = await resolveCampaignId(client, rawCampaignId);
+  if (!resolvedCampaignId) {
+    return null;
+  }
+  const res = await client.query(
+    `
+    SELECT id, country_id, division_id
+    FROM campaigns
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [resolvedCampaignId]
+  );
+  const campaign = res.rows[0] ?? null;
+  if (!matchesTenantScope(access, campaign)) {
+    return null;
+  }
+  return {
+    resolvedCampaignId,
+    campaign,
+  };
+}
 
 async function markContractCompletedForVerifiedProof(client: any, proofId: string) {
   const proofContextRes = await client.query(
@@ -256,12 +432,25 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
   return labels.length > 0 ? labels.join(', ') : 'campaign settings';
 }
 
-export async function adminRoutes(app: FastifyInstance) {
+  export async function adminRoutes(app: FastifyInstance) {
   const jobRepo = new JobRepo();
   const paymentRepo = new PaymentRepo();
 
   app.post('/admin/access', async (request, reply) => {
-    AdminAccessSchema.parse(request.body);
+    const body = AdminAccessSchema.parse(request.body);
+
+    if (!config.adminAccessPhrase.trim()) {
+      reply.code(503);
+      return {
+        error: 'admin_access_disabled',
+        detail: 'Emergency admin access is not configured on this server.',
+      };
+    }
+
+    if (!verifyEmergencyPhrase(body.phrase)) {
+      reply.code(403);
+      return { error: 'invalid_phrase' };
+    }
 
     const token = app.jwt.sign({
       sub: 'ariaka-access',
@@ -282,11 +471,14 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/admin/audit', { preHandler: [app.adminOnly] }, async (request) => {
+  app.get('/admin/audit', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const query = AuditQuerySchema.parse(request.query ?? {});
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query.from, query.to);
     return withTransaction(async (client) => {
+      if (!(await requireSuperDashboardAccess(client, request, reply))) {
+        return { error: 'forbidden' };
+      }
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -333,13 +525,16 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get('/admin/finance', { preHandler: [app.adminOnly] }, async (request) => {
+  app.get('/admin/finance', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     const groupByRaw = (query?.group_by ?? '').toString().toLowerCase();
     const groupBy = groupByRaw === 'day' || groupByRaw === 'month' ? groupByRaw : null;
     return withTransaction(async (client) => {
+      if (!(await requireSuperDashboardAccess(client, request, reply))) {
+        return { error: 'forbidden' };
+      }
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -549,8 +744,11 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get('/admin/overview', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/overview', { preHandler: [app.adminOnly] }, async (request, reply) => {
     return withTransaction(async (client) => {
+      if (!(await requireSuperDashboardAccess(client, request, reply))) {
+        return { error: 'forbidden' };
+      }
       await ensureCampaignDraftsTable(client);
       const users = await client.query('SELECT COUNT(*)::int AS count FROM users');
       const campaigns = await client.query('SELECT COUNT(*)::int AS count FROM campaigns');
@@ -585,6 +783,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       await ensureUserSignalSchema(client);
       const conditions: string[] = [];
@@ -626,6 +825,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `
@@ -665,6 +871,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensureCampaignDraftsTable(client);
       await ensurePublicIdColumns(client);
       const conditions: string[] = [];
@@ -688,6 +895,13 @@ export async function adminRoutes(app: FastifyInstance) {
         params.push(range.to);
         idx++;
       }
+
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
@@ -734,6 +948,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     const scoreRange = parseNumberRange(query?.min_score, query?.max_score);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -776,6 +991,13 @@ export async function adminRoutes(app: FastifyInstance) {
         params.push(range.to);
         idx++;
       }
+
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
@@ -832,6 +1054,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -862,6 +1085,13 @@ export async function adminRoutes(app: FastifyInstance) {
       if (query?.collision_only === 'true') {
         conditions.push(`COALESCE(collision.user_count, 0) > 1`);
       }
+
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
@@ -899,6 +1129,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     const amountRange = parseNumberRange(query?.min_amount, query?.max_amount);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -942,6 +1173,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `
@@ -969,6 +1207,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -1002,34 +1241,30 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
-      
-        const access = getRequestDashboardAccess(request);
-        if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN && access.country_id) {
-          conditions.push(`u.country_id = ${idx}`);
-          params.push(access.country_id);
-          idx++;
-        } else if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN && access.division_id) {
-          conditions.push(`u.division_id = ${idx}`);
-          params.push(access.division_id);
-          idx++;
-        }
-        const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-        const res = await client.query(
-          `
-          SELECT
-            u.*,
-            p.avatar_url,
-          CASE
-            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
-              THEN TRUE
-            ELSE FALSE
-          END AS is_online
-        FROM users u
-        LEFT JOIN user_profiles p ON p.user_id = u.id
-        ${where}
-        ORDER BY u.created_at DESC
-        LIMIT $${idx} OFFSET $${idx + 1}
-        `,
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await client.query(
+        `
+        SELECT
+          u.*,
+          p.avatar_url,
+        CASE
+          WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+            THEN TRUE
+          ELSE FALSE
+        END AS is_online
+      FROM users u
+      LEFT JOIN user_profiles p ON p.user_id = u.id
+      ${where}
+      ORDER BY u.created_at DESC
+      LIMIT $${idx} OFFSET $${idx + 1}
+      `,
         [...params, limit, offset]
       );
       return { users: res.rows };
@@ -1039,12 +1274,14 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/admin/users/:id/detail', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const params = request.params as { id: string };
     const result = await withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       await ensureUserSignalSchema(client);
-      const resolvedUserId = await resolveUserId(client, params.id);
-      if (!resolvedUserId) {
+      const scopedUser = await loadScopedUser(client, access, params.id);
+      if (!scopedUser) {
         return null;
       }
+      const { resolvedUserId } = scopedUser;
 
       const userRes = await client.query(
         `
@@ -1106,12 +1343,25 @@ export async function adminRoutes(app: FastifyInstance) {
         JOIN campaigns c ON c.id = ctr.campaign_id
         JOIN users u ON u.id = ctr.distributor_id
         JOIN users adv ON adv.id = c.advertiser_id
-        WHERE c.advertiser_id = $1
-           OR ctr.distributor_id = $1
+        WHERE (
+          c.advertiser_id = $1
+          OR ctr.distributor_id = $1
+        )
+          AND ${
+            access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
+              ? 'c.country_id = $2'
+              : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
+                ? 'c.division_id = $2'
+                : 'TRUE'
+          }
         ORDER BY ctr.created_at DESC
         LIMIT 200
         `,
-        [resolvedUserId]
+        access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
+          ? [resolvedUserId, access.country_id]
+          : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
+            ? [resolvedUserId, access.division_id]
+            : [resolvedUserId]
       );
 
       const campaignsRes = await client.query(
@@ -1136,18 +1386,31 @@ export async function adminRoutes(app: FastifyInstance) {
         FROM campaigns c
         LEFT JOIN users adv ON adv.id = c.advertiser_id
         LEFT JOIN users dist ON dist.id = c.assigned_distributor_id
-        WHERE c.advertiser_id = $1
-           OR c.assigned_distributor_id = $1
-           OR EXISTS (
-             SELECT 1
-             FROM contracts ctr
-             WHERE ctr.campaign_id = c.id
-               AND ctr.distributor_id = $1
-           )
+        WHERE (
+          c.advertiser_id = $1
+          OR c.assigned_distributor_id = $1
+          OR EXISTS (
+            SELECT 1
+            FROM contracts ctr
+            WHERE ctr.campaign_id = c.id
+              AND ctr.distributor_id = $1
+          )
+        )
+          AND ${
+            access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
+              ? 'c.country_id = $2'
+              : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
+                ? 'c.division_id = $2'
+                : 'TRUE'
+          }
         ORDER BY c.created_at DESC
         LIMIT 200
         `,
-        [resolvedUserId]
+        access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
+          ? [resolvedUserId, access.country_id]
+          : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
+            ? [resolvedUserId, access.division_id]
+            : [resolvedUserId]
       );
 
       const statusSummaries = await buildCampaignStatusSummaries(
@@ -1188,10 +1451,18 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateUserRoleSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
-      const resolvedUserId = await resolveUserId(client, params.id);
-      if (!resolvedUserId) {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopedUser = await loadScopedUser(client, access, params.id);
+      if (!scopedUser) {
         return null;
+      }
+      const { resolvedUserId, user } = scopedUser;
+      if (
+        !isSuperDashboardAccess(access) &&
+        (body.role === ACCOUNT_ROLE_ADMIN || isManagedAdminAccount(user))
+      ) {
+        reply.code(403);
+        return { error: 'forbidden' } as any;
       }
       const res = await client.query(
         `UPDATE users
@@ -1231,6 +1502,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       return res.rows[0];
     });
+    if ((result as any)?.error === 'forbidden') {
+      return result;
+    }
     if (!result) {
       reply.code(404);
       return { error: 'user_not_found' };
@@ -1257,123 +1531,75 @@ export async function adminRoutes(app: FastifyInstance) {
         detail: `Provide a reason when setting an account to ${body.status}.`,
       };
     }
-    let resolvedUserId: string | null = null;
-    let result: any = null;
-
-    try {
-      const resolvedRes = await pool.query(
-        `
-        SELECT id
-        FROM users
-        WHERE id::text = $1 OR public_id = $1
-        LIMIT 1
-        `,
-        [params.id]
-      );
-      resolvedUserId = (resolvedRes.rows[0]?.id as string | undefined) ?? null;
-      if (resolvedUserId) {
-        const res = await pool.query(
-          `
-          UPDATE users
-          SET status = $2::text,
-              status_reason = CASE
-                WHEN $2::text = 'ACTIVE' THEN NULL
-                ELSE NULLIF($3::text, '')
-              END,
-              status_reason_updated_at = CASE
-                WHEN $2::text = 'ACTIVE' THEN NULL
-                ELSE NOW()
-              END
-          WHERE id = $1
-          RETURNING *
-          `,
-          [resolvedUserId, body.status, reason]
-        );
-        result = res.rows[0] ?? null;
+    const result = await withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopedUser = await loadScopedUser(client, access, params.id);
+      if (!scopedUser) {
+        return null;
       }
-    } catch (error) {
-      const detail =
-        error instanceof Error && error.message.trim().length > 0
-          ? error.message.trim()
-          : 'Unable to update account status right now.';
-      request.log.error(
-        {
-          err: error,
-          actorId: (request.user as any).sub,
-          targetUserId: params.id,
-          status: body.status,
-          detail,
-        },
-        'admin_status_update_failed'
-      );
-      reply.code(500);
-      return {
-        error: 'user_status_update_failed',
-        detail,
-      };
-    }
+      const { resolvedUserId, user } = scopedUser;
+      if (!isSuperDashboardAccess(access) && isManagedAdminAccount(user)) {
+        reply.code(403);
+        return { error: 'forbidden' } as any;
+      }
 
-    if (!result || !resolvedUserId) {
+      const res = await client.query(
+        `
+        UPDATE users
+        SET status = $2::text,
+            status_reason = CASE
+              WHEN $2::text = 'ACTIVE' THEN NULL
+              ELSE NULLIF($3::text, '')
+            END,
+            status_reason_updated_at = CASE
+              WHEN $2::text = 'ACTIVE' THEN NULL
+              ELSE NOW()
+            END
+        WHERE id = $1
+        RETURNING *
+        `,
+        [resolvedUserId, body.status, reason]
+      );
+      if (!res.rows[0]) {
+        return null;
+      }
+
+      await logAudit(
+        client,
+        (request.user as any).sub,
+        'UPDATE_USER_STATUS',
+        'user',
+        resolvedUserId,
+        {
+          status: body.status,
+          reason: reason.length === 0 ? null : reason,
+        }
+      );
+      await createUserNotifications(client, [resolvedUserId], {
+        title: body.status === 'ACTIVE'
+            ? 'Account reinstated by admin'
+            : 'Account status updated by admin',
+        body: body.status === 'ACTIVE'
+            ? 'An administrator reinstated your account.'
+            : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
+        actorId: (request.user as any).sub,
+        targetType: 'user',
+        targetId: resolvedUserId,
+        meta: {
+          status: body.status,
+          reason: reason.length === 0 ? null : reason,
+        },
+      });
+      return res.rows[0];
+    });
+
+    if ((result as any)?.error === 'forbidden') {
+      return result;
+    }
+    if (!result) {
       reply.code(404);
       return { error: 'user_not_found' };
     }
-
-    try {
-      await withTransaction(async (client) => {
-        await logAudit(
-          client,
-          (request.user as any).sub,
-          'UPDATE_USER_STATUS',
-          'user',
-          resolvedUserId,
-          {
-            status: body.status,
-            reason: reason.length === 0 ? null : reason,
-          }
-        );
-      });
-    } catch (error) {
-      request.log.warn(
-        {
-          err: error,
-          actorId: (request.user as any).sub,
-          targetUserId: resolvedUserId,
-          status: body.status,
-        },
-        'admin_status_audit_failed'
-      );
-    }
-
-    try {
-      await withTransaction(async (client) => {
-        await createUserNotifications(client, [resolvedUserId], {
-          title: body.status === 'ACTIVE'
-              ? 'Account reinstated by admin'
-              : 'Account status updated by admin',
-          body: body.status === 'ACTIVE'
-              ? 'An administrator reinstated your account.'
-              : `An administrator changed your account status to ${body.status}. Reason: ${reason}`,
-          actorId: (request.user as any).sub,
-          targetType: 'user',
-          targetId: resolvedUserId,
-          meta: {
-            status: body.status,
-            reason: reason.length === 0 ? null : reason,
-          },
-        });
-      });
-    } catch (error) {
-      request.log.warn(
-        {
-          err: error,
-          actorId: (request.user as any).sub,
-          targetUserId: resolvedUserId,
-          status: body.status,
-        },
-        'admin_status_notification_failed'
-      );
-    }
-
     return { user: result };
   });
 
@@ -1381,10 +1607,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = ResetPasswordSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
-      const resolvedUserId = await resolveUserId(client, params.id);
-      if (!resolvedUserId) {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopedUser = await loadScopedUser(client, access, params.id);
+      if (!scopedUser) {
         return null;
+      }
+      const { resolvedUserId, user } = scopedUser;
+      if (!isSuperDashboardAccess(access) && isManagedAdminAccount(user)) {
+        reply.code(403);
+        return { error: 'forbidden' } as any;
       }
       const res = await client.query(
         'UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id, email, role',
@@ -1410,6 +1641,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       return res.rows[0];
     });
+    if ((result as any)?.error === 'forbidden') {
+      return result;
+    }
     if (!result) {
       reply.code(404);
       return { error: 'user_not_found' };
@@ -1421,10 +1655,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateUserContractPrivilegeSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
-      const resolvedUserId = await resolveUserId(client, params.id);
-      if (!resolvedUserId) {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopedUser = await loadScopedUser(client, access, params.id);
+      if (!scopedUser) {
         return null;
+      }
+      const { resolvedUserId, user } = scopedUser;
+      if (!isSuperDashboardAccess(access) && isManagedAdminAccount(user)) {
+        reply.code(403);
+        return { error: 'forbidden' } as any;
       }
       const res = await client.query(
         'UPDATE users SET can_multi_contract=$2 WHERE id=$1 RETURNING *',
@@ -1452,6 +1691,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       return res.rows[0];
     });
+    if ((result as any)?.error === 'forbidden') {
+      return result;
+    }
     if (!result) {
       reply.code(404);
       return { error: 'user_not_found' };
@@ -1464,6 +1706,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       await ensurePublicIdColumns(client);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -1507,6 +1750,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT c.*, adv.email AS advertiser_email, adv.public_id AS advertiser_public_id, dist.email AS assigned_distributor_email, dist.public_id AS assigned_distributor_public_id FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -1538,11 +1788,12 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateCampaignSchema.parse(request.body);
     const res = await withTransaction(async (client) => {
-      await ensurePublicIdColumns(client);
-      const resolvedCampaignId = await resolveCampaignId(client, params.id);
-      if (!resolvedCampaignId) {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopedCampaign = await loadScopedCampaign(client, access, params.id);
+      if (!scopedCampaign) {
         return null;
       }
+      const { resolvedCampaignId } = scopedCampaign;
       const updated = await client.query(
         `UPDATE campaigns SET
           title=COALESCE($2, title),
@@ -1617,6 +1868,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -1649,6 +1901,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT
@@ -1676,6 +1935,24 @@ export async function adminRoutes(app: FastifyInstance) {
       return { error: 'missing_fields' };
     }
     const res = await withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const proofScope = await client.query(
+        `
+        SELECT
+          p.id,
+          c.country_id,
+          c.division_id
+        FROM proofs p
+        JOIN verification_sessions s ON s.id = p.session_id
+        JOIN campaigns c ON c.id = s.campaign_id
+        WHERE p.id = $1
+        LIMIT 1
+        `,
+        [params.id]
+      );
+      if (!matchesTenantScope(access, proofScope.rows[0])) {
+        return null;
+      }
       const updated = await client.query(
         `UPDATE proofs
          SET status=COALESCE($2, status),
@@ -1714,39 +1991,52 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(id::text ILIKE $${idx} OR user_id::text ILIKE $${idx})`);
+        conditions.push(`(w.id::text ILIKE $${idx} OR w.user_id::text ILIKE $${idx})`);
         params.push(`%${query.q}%`);
         idx++;
       }
       if (query?.min_amount) {
-        conditions.push(`balance >= $${idx}`);
+        conditions.push(`w.balance >= $${idx}`);
         params.push(Number(query.min_amount));
         idx++;
       }
       if (query?.max_amount) {
-        conditions.push(`balance <= $${idx}`);
+        conditions.push(`w.balance <= $${idx}`);
         params.push(Number(query.max_amount));
         idx++;
       }
       if (range.from) {
-        conditions.push(`created_at >= $${idx}`);
+        conditions.push(`w.created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`created_at <= $${idx}`);
+        conditions.push(`w.created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT * FROM wallets ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+        `SELECT w.*, u.email AS user_email
+         FROM wallets w
+         JOIN users u ON u.id = w.user_id
+         ${where}
+         ORDER BY w.created_at DESC
+         LIMIT $${idx} OFFSET $${idx + 1}`,
         [...params, limit, offset]
       );
       return { wallets: res.rows };
@@ -1757,14 +2047,37 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = AdjustWalletSchema.parse(request.body);
     const result = await withTransaction(async (client) => {
-      const walletRes = await client.query('SELECT * FROM wallets WHERE id=$1', [params.id]);
+      const access = await getLiveDashboardAccess(client, request);
+      const walletRes = await client.query(
+        `
+        SELECT
+          w.*,
+          u.country_id,
+          u.division_id
+        FROM wallets w
+        JOIN users u ON u.id = w.user_id
+        WHERE w.id = $1
+        LIMIT 1
+        `,
+        [params.id]
+      );
       const wallet = walletRes.rows[0];
-      if (!wallet) return null;
+      if (!matchesTenantScope(access, wallet)) return null;
       const delta = body.direction === 'CREDIT' ? body.amount : -body.amount;
       const updated = await client.query(
-        'UPDATE wallets SET balance = balance + $2 WHERE id=$1 RETURNING *',
+        `UPDATE wallets
+         SET balance_available = balance_available + $2,
+             balance = balance + $2
+         WHERE id = $1
+           AND balance_available + $2 >= 0
+           AND balance + $2 >= 0
+         RETURNING *`,
         [params.id, delta]
       );
+      if (!updated.rows[0]) {
+        reply.code(400);
+        return { error: 'wallet_balance_too_low' } as any;
+      }
       await client.query(
         'INSERT INTO wallet_txns (wallet_id, amount, direction, reference) VALUES ($1,$2,$3,$4)',
         [params.id, body.amount, body.direction, body.reference ?? 'ADMIN_ADJUST']
@@ -1776,9 +2089,12 @@ export async function adminRoutes(app: FastifyInstance) {
         'wallet',
         params.id,
         { amount: body.amount, direction: body.direction, reference: body.reference }
-      );
+        );
       return updated.rows[0];
     });
+    if ((result as any)?.error === 'wallet_balance_too_low') {
+      return result;
+    }
     if (!result) {
       reply.code(404);
       return { error: 'wallet_not_found' };
@@ -1789,9 +2105,32 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/admin/wallets/:id/txns', { preHandler: [app.adminOnly] }, async (request) => {
     const params = request.params as { id: string };
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopeFilter =
+        access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
+          ? {
+              sql: 'AND u.country_id = $2',
+              params: [access.country_id],
+            }
+          : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
+            ? {
+                sql: 'AND u.division_id = $2',
+                params: [access.division_id],
+              }
+            : {
+                sql: '',
+                params: [],
+              };
       const res = await client.query(
-        'SELECT * FROM wallet_txns WHERE wallet_id=$1 ORDER BY created_at DESC LIMIT 200',
-        [params.id]
+        `SELECT wt.*
+         FROM wallet_txns wt
+         JOIN wallets w ON w.id = wt.wallet_id
+         JOIN users u ON u.id = w.user_id
+         WHERE wt.wallet_id = $1
+         ${scopeFilter.sql}
+         ORDER BY wt.created_at DESC
+         LIMIT 200`,
+        [params.id, ...scopeFilter.params]
       );
       return { txns: res.rows };
     });
@@ -1802,6 +2141,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -1839,6 +2179,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT e.*, c.title AS campaign_title
@@ -1857,6 +2204,23 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateEscrowSchema.parse(request.body);
     const res = await withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopeRes = await client.query(
+        `
+        SELECT
+          e.id,
+          c.country_id,
+          c.division_id
+        FROM escrow_ledger e
+        JOIN campaigns c ON c.id = e.campaign_id
+        WHERE e.id = $1
+        LIMIT 1
+        `,
+        [params.id]
+      );
+      if (!matchesTenantScope(access, scopeRes.rows[0])) {
+        return null;
+      }
       const updated = await client.query(
         'UPDATE escrow_ledger SET status=$2 WHERE id=$1 RETURNING *',
         [params.id, body.status]
@@ -1885,6 +2249,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -1922,6 +2287,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT p.*, u.email AS user_email
@@ -1941,6 +2313,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -1968,6 +2341,13 @@ export async function adminRoutes(app: FastifyInstance) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
         `SELECT ctr.*, c.title AS campaign_title, u.email AS distributor_email, adv.email AS advertiser_email FROM contracts ctr JOIN campaigns c ON c.id = ctr.campaign_id JOIN users u ON u.id = ctr.distributor_id JOIN users adv ON adv.id = c.advertiser_id
@@ -1988,6 +2368,52 @@ export async function adminRoutes(app: FastifyInstance) {
       return { error: 'missing_fields' };
     }
     const res = await withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopeRes = await client.query(
+        `
+        SELECT
+          ctr.id,
+          c.country_id,
+          c.division_id
+        FROM contracts ctr
+        JOIN campaigns c ON c.id = ctr.campaign_id
+        WHERE ctr.id = $1
+        LIMIT 1
+        `,
+        [params.id]
+      );
+      const scopedContract = scopeRes.rows[0] ?? null;
+      if (!matchesTenantScope(access, scopedContract)) {
+        return null;
+      }
+      if (body.distributor_id) {
+        const distributorRes = await client.query(
+          `
+          SELECT id, country_id, division_id
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [body.distributor_id]
+        );
+        const distributor = distributorRes.rows[0] ?? null;
+        if (!distributor) {
+          reply.code(404);
+          return { error: 'distributor_not_found' } as any;
+        }
+        const sameTenant =
+          String(distributor.country_id ?? '') ===
+            String(scopedContract.country_id ?? '') &&
+          (
+            !scopedContract.division_id ||
+            String(distributor.division_id ?? '') ===
+              String(scopedContract.division_id ?? '')
+          );
+        if (!sameTenant || !matchesTenantScope(access, distributor)) {
+          reply.code(409);
+          return { error: 'distributor_scope_mismatch' } as any;
+        }
+      }
       const updated = await client.query(
         `UPDATE contracts
          SET status=COALESCE($2, status),
@@ -2008,6 +2434,12 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       return updated.rows[0];
     });
+    if (
+      (res as any)?.error === 'distributor_not_found' ||
+      (res as any)?.error === 'distributor_scope_mismatch'
+    ) {
+      return res;
+    }
     if (!res) {
       reply.code(404);
       return { error: 'contract_not_found' };
@@ -2015,10 +2447,14 @@ export async function adminRoutes(app: FastifyInstance) {
     return { contract: res };
   });
 
-  app.get('/admin/jobs', { preHandler: [app.adminOnly] }, async (request) => {
+  app.get('/admin/jobs', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     return withTransaction(async (client) => {
+      const access = await requireSuperDashboardAccess(client, request, reply);
+      if (!access) {
+        return { error: 'forbidden' };
+      }
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2046,6 +2482,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateJobSchema.parse(request.body);
     const res = await withTransaction(async (client) => {
+      const access = await requireSuperDashboardAccess(client, request, reply);
+      if (!access) {
+        return { error: 'forbidden' } as any;
+      }
       const updated = await client.query(
         `UPDATE job_queue
          SET status=COALESCE($2, status),
@@ -2068,6 +2508,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       return updated.rows[0];
     });
+    if ((res as any)?.error === 'forbidden') {
+      return res;
+    }
     if (!res) {
       reply.code(404);
       return { error: 'job_not_found' };
@@ -2079,6 +2522,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = (request.body ?? {}) as { reason?: string };
     const res = await withTransaction(async (client) => {
+      const access = await requireSuperDashboardAccess(client, request, reply);
+      if (!access) {
+        return { error: 'forbidden' } as any;
+      }
       const updated = await client.query(
         `UPDATE job_queue
          SET status='QUEUED',
@@ -2101,6 +2548,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       return updated.rows[0];
     });
+    if ((res as any)?.error === 'forbidden') {
+      return res;
+    }
     if (!res) {
       reply.code(404);
       return { error: 'job_not_found' };
@@ -2112,6 +2562,23 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdatePayoutSchema.parse(request.body);
     const res = await withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const scopeRes = await client.query(
+        `
+        SELECT
+          p.id,
+          u.country_id,
+          u.division_id
+        FROM payout_requests p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.id = $1
+        LIMIT 1
+        `,
+        [params.id]
+      );
+      if (!matchesTenantScope(access, scopeRes.rows[0])) {
+        return null;
+      }
       const updated = await client.query(
         'UPDATE payout_requests SET status=$2 WHERE id=$1 RETURNING *',
         [params.id, body.status]
@@ -2135,11 +2602,15 @@ export async function adminRoutes(app: FastifyInstance) {
     return { payout: res };
   });
 
-  app.get('/admin/flutterwave/transactions', { preHandler: [app.adminOnly] }, async (request) => {
+  app.get('/admin/flutterwave/transactions', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await requireSuperDashboardAccess(client, request, reply);
+      if (!access) {
+        return { error: 'forbidden' };
+      }
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2191,11 +2662,15 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get('/admin/flutterwave/webhooks', { preHandler: [app.adminOnly] }, async (request) => {
+  app.get('/admin/flutterwave/webhooks', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
+      const access = await requireSuperDashboardAccess(client, request, reply);
+      if (!access) {
+        return { error: 'forbidden' };
+      }
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2228,6 +2703,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/admin/flutterwave/webhooks/:eventId/replay', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const params = request.params as { eventId: string };
     return withTransaction(async (client) => {
+      const access = await requireSuperDashboardAccess(client, request, reply);
+      if (!access) {
+        return { error: 'forbidden' };
+      }
       const res = await client.query(
         'SELECT * FROM pesapal_webhook_events WHERE event_id=$1',
         [params.eventId]

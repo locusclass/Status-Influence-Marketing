@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import countries from 'i18n-iso-countries';
+import { buildAuthClaims, buildUserSession } from '../services/roles.js';
 import { ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, ADMIN_ROLE_SUPER_ADMIN, } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { assignCountryAdmin, assignDivisionAdmin, getRequestDashboardAccess, loadDashboardAccessContext, requireRole, } from '../services/adminTenant.js';
@@ -57,6 +59,44 @@ async function getLiveAccess(client, request) {
     }
     return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
 }
+function pushScopedCondition(state, condition, value) {
+    state.conditions.push(condition.replace('?', `$${state.idx}`));
+    state.params.push(value);
+    state.idx += 1;
+}
+function appendTenantScope(state, access, scope) {
+    if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
+        if (!access.country_id) {
+            state.conditions.push('1 = 0');
+            return;
+        }
+        pushScopedCondition(state, `${scope.country} = ?`, access.country_id);
+        return;
+    }
+    if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
+        if (!access.division_id || !scope.division) {
+            state.conditions.push('1 = 0');
+            return;
+        }
+        pushScopedCondition(state, `${scope.division} = ?`, access.division_id);
+    }
+}
+function matchesTenantScope(access, row) {
+    if (!row)
+        return false;
+    if (access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
+        return true;
+    }
+    if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
+        return (Boolean(access.country_id) &&
+            String(row.country_id ?? '') === String(access.country_id));
+    }
+    if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
+        return (Boolean(access.division_id) &&
+            String(row.division_id ?? '') === String(access.division_id));
+    }
+    return false;
+}
 async function ensureWalletForUser(client, userId) {
     const existing = await client.query(`SELECT * FROM wallets WHERE user_id = $1 LIMIT 1`, [userId]);
     if (existing.rows[0]) {
@@ -79,6 +119,55 @@ async function ensureWalletForUser(client, userId) {
     return created.rows[0];
 }
 export async function tenantAdminRoutes(app) {
+    app.get('/admin/available-countries', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async () => {
+        return {
+            countries: Object.entries(countries.getNames('en', { select: 'official' })).map(([code, name]) => ({ code, name })),
+        };
+    });
+    app.post('/admin/countries/:id/access', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
+        const params = request.params;
+        return withTransaction(async (client) => {
+            const countryRes = await client.query('SELECT id, name, code FROM countries WHERE id = $1 LIMIT 1', [params.id]);
+            const country = countryRes.rows[0];
+            if (!country) {
+                reply.code(404);
+                return { error: 'country_not_found' };
+            }
+            const access = getRequestDashboardAccess(request);
+            let user;
+            if (access.user_id === 'ariaka-access') {
+                user = {
+                    id: 'ariaka-access',
+                    email: 'ariaka-access@local',
+                    role: 'ADMIN',
+                    active_role: 'ADMIN',
+                    admin_role: ADMIN_ROLE_SUPER_ADMIN,
+                };
+            }
+            else {
+                const userRes = await client.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [access.user_id]);
+                user = userRes.rows[0];
+                if (!user) {
+                    reply.code(404);
+                    return { error: 'user_not_found' };
+                }
+            }
+            const claims = buildAuthClaims(user);
+            claims.country_id = country.id;
+            claims.admin_role = ADMIN_ROLE_COUNTRY_ADMIN;
+            const token = app.jwt.sign(claims);
+            return {
+                token,
+                user: {
+                    ...buildUserSession(user),
+                    admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+                    country_id: country.id,
+                    country_name: country.name,
+                    country_code: country.code,
+                },
+            };
+        });
+    });
     app.get('/dashboard/access', {
         preHandler: [
             requireRole([
@@ -231,10 +320,31 @@ export async function tenantAdminRoutes(app) {
             };
         });
     });
-    app.get('/admin/payouts', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request) => {
+    app.get('/admin/payouts', {
+        preHandler: [
+            requireRole([
+                ADMIN_ROLE_SUPER_ADMIN,
+                ADMIN_ROLE_COUNTRY_ADMIN,
+                ADMIN_ROLE_DIVISION_ADMIN,
+            ]),
+        ],
+    }, async (request) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         return withTransaction(async (client) => {
+            const access = await getLiveAccess(client, request);
+            const state = {
+                conditions: [],
+                params: [],
+                idx: 1,
+            };
+            appendTenantScope(state, access, {
+                country: 'p.country_id',
+                division: 'p.division_id',
+            });
+            const where = state.conditions.length
+                ? `WHERE ${state.conditions.join(' AND ')}`
+                : '';
             const res = await client.query(`
           SELECT
             p.*,
@@ -247,13 +357,22 @@ export async function tenantAdminRoutes(app) {
           JOIN users u ON u.id = p.user_id
           LEFT JOIN countries c ON c.id = p.country_id
           LEFT JOIN divisions d ON d.id = p.division_id
+          ${where}
           ORDER BY p.created_at DESC
-          LIMIT $1 OFFSET $2
-          `, [limit, offset]);
+          LIMIT $${state.idx} OFFSET $${state.idx + 1}
+          `, [...state.params, limit, offset]);
             return { payouts: res.rows };
         });
     });
-    app.post('/admin/payouts/:id/pay', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
+    app.post('/admin/payouts/:id/pay', {
+        preHandler: [
+            requireRole([
+                ADMIN_ROLE_SUPER_ADMIN,
+                ADMIN_ROLE_COUNTRY_ADMIN,
+                ADMIN_ROLE_DIVISION_ADMIN,
+            ]),
+        ],
+    }, async (request, reply) => {
         const params = request.params;
         return withTransaction(async (client) => {
             const access = await getLiveAccess(client, request);
@@ -265,6 +384,10 @@ export async function tenantAdminRoutes(app) {
           `, [params.id]);
             const payout = payoutRes.rows[0];
             if (!payout) {
+                reply.code(404);
+                return { error: 'payout_not_found' };
+            }
+            if (!matchesTenantScope(access, payout)) {
                 reply.code(404);
                 return { error: 'payout_not_found' };
             }
@@ -291,7 +414,7 @@ export async function tenantAdminRoutes(app) {
                 paid_at = NOW(),
                 paid_by = $2
             WHERE id = $1
-            `, [params.id, access.user_id || null]);
+            `, [params.id, (access.user_id === 'ariaka-access' ? null : (access.user_id || null))]);
             }
             const updated = await client.query(`
           SELECT *
@@ -444,7 +567,7 @@ export async function tenantAdminRoutes(app) {
                 access.country_id,
                 body.name.trim(),
                 body.type,
-                access.user_id || null,
+                (access.user_id === 'ariaka-access' ? null : (access.user_id || null)),
             ]);
             return { division: inserted.rows[0] };
         });

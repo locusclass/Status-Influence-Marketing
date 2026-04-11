@@ -14,6 +14,7 @@ import {
   getRequestDashboardAccess,
   loadDashboardAccessContext,
   requireRole,
+  type DashboardAccessContext,
 } from '../services/adminTenant.js';
 
 const CreateCountrySchema = z.object({
@@ -88,6 +89,74 @@ async function getLiveAccess(client: any, request: any) {
     return access;
   }
   return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
+}
+
+type ScopeState = {
+  conditions: string[];
+  params: any[];
+  idx: number;
+};
+
+function pushScopedCondition(
+  state: ScopeState,
+  condition: string,
+  value: unknown
+) {
+  state.conditions.push(condition.replace('?', `$${state.idx}`));
+  state.params.push(value);
+  state.idx += 1;
+}
+
+function appendTenantScope(
+  state: ScopeState,
+  access: DashboardAccessContext,
+  scope: {
+    country: string;
+    division?: string | null;
+  }
+) {
+  if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
+    if (!access.country_id) {
+      state.conditions.push('1 = 0');
+      return;
+    }
+    pushScopedCondition(state, `${scope.country} = ?`, access.country_id);
+    return;
+  }
+
+  if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
+    if (!access.division_id || !scope.division) {
+      state.conditions.push('1 = 0');
+      return;
+    }
+    pushScopedCondition(state, `${scope.division} = ?`, access.division_id);
+  }
+}
+
+function matchesTenantScope(
+  access: DashboardAccessContext,
+  row: {
+    country_id?: unknown;
+    division_id?: unknown;
+  } | null | undefined
+) {
+  if (!row) return false;
+  if (access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
+    return true;
+  }
+  if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
+    return (
+      Boolean(access.country_id) &&
+      String(row.country_id ?? '') === String(access.country_id)
+    );
+  }
+  if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
+    return (
+      Boolean(access.division_id) &&
+      String(row.division_id ?? '') === String(access.division_id)
+    );
+  }
+  return false;
 }
 
 async function ensureWalletForUser(client: any, userId: string) {
@@ -397,11 +466,32 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
 
   app.get(
     '/admin/payouts',
-    { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] },
+    {
+      preHandler: [
+        requireRole([
+          ADMIN_ROLE_SUPER_ADMIN,
+          ADMIN_ROLE_COUNTRY_ADMIN,
+          ADMIN_ROLE_DIVISION_ADMIN,
+        ]),
+      ],
+    },
     async (request) => {
       const query = request.query as any;
       const { limit, offset } = parsePaging(query);
       return withTransaction(async (client) => {
+        const access = await getLiveAccess(client, request);
+        const state: ScopeState = {
+          conditions: [],
+          params: [],
+          idx: 1,
+        };
+        appendTenantScope(state, access, {
+          country: 'p.country_id',
+          division: 'p.division_id',
+        });
+        const where = state.conditions.length
+          ? `WHERE ${state.conditions.join(' AND ')}`
+          : '';
         const res = await client.query(
           `
           SELECT
@@ -415,10 +505,11 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
           JOIN users u ON u.id = p.user_id
           LEFT JOIN countries c ON c.id = p.country_id
           LEFT JOIN divisions d ON d.id = p.division_id
+          ${where}
           ORDER BY p.created_at DESC
-          LIMIT $1 OFFSET $2
+          LIMIT $${state.idx} OFFSET $${state.idx + 1}
           `,
-          [limit, offset]
+          [...state.params, limit, offset]
         );
         return { payouts: res.rows };
       });
@@ -427,7 +518,15 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
 
   app.post(
     '/admin/payouts/:id/pay',
-    { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] },
+    {
+      preHandler: [
+        requireRole([
+          ADMIN_ROLE_SUPER_ADMIN,
+          ADMIN_ROLE_COUNTRY_ADMIN,
+          ADMIN_ROLE_DIVISION_ADMIN,
+        ]),
+      ],
+    },
     async (request, reply) => {
       const params = request.params as { id: string };
       return withTransaction(async (client) => {
@@ -443,6 +542,10 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
         );
         const payout = payoutRes.rows[0];
         if (!payout) {
+          reply.code(404);
+          return { error: 'payout_not_found' };
+        }
+        if (!matchesTenantScope(access, payout)) {
           reply.code(404);
           return { error: 'payout_not_found' };
         }

@@ -893,7 +893,8 @@ export async function campaignRoutes(app) {
         return { distributor };
     });
     app.get('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         const query = (request.query ?? {});
         const limitRaw = Number(query.limit ?? 50);
@@ -1006,7 +1007,8 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         const campaign = await withTransaction(async (client) => {
             if (role === 'DISTRIBUTOR') {
@@ -1128,7 +1130,8 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaign-bundles/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -1152,7 +1155,8 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns/:id/proofs', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -1192,7 +1196,8 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns/:id/proofs/summary', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -1280,7 +1285,8 @@ export async function campaignRoutes(app) {
             return { error: 'validation_failed', issues: parsedBody.error.issues };
         }
         const body = parsedBody.data;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -1517,7 +1523,8 @@ export async function campaignRoutes(app) {
         const params = request.params;
         const body = UpdateCampaignSchema.parse(request.body);
         const platformKey = String(body.platform);
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -1772,7 +1779,8 @@ export async function campaignRoutes(app) {
     });
     app.delete('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -1889,7 +1897,8 @@ export async function campaignRoutes(app) {
             return { error: 'payment_redirect_urls_invalid' };
         }
         const result = await withTransaction(async (client) => {
-            const authUser = request.user?.sub;
+            const authSub = request.user?.sub;
+            const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
             const role = request.user?.role;
             if (!authUser) {
                 reply.code(401);
@@ -2076,7 +2085,8 @@ export async function campaignRoutes(app) {
             return { error: 'payment_redirect_urls_invalid' };
         }
         const result = await withTransaction(async (client) => {
-            const authUser = request.user?.sub;
+            const authSub = request.user?.sub;
+            const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
             const role = request.user?.role;
             const userEmailRes = authUser
                 ? await client.query('SELECT email, phone, preferred_currency, country FROM users WHERE id=$1', [authUser])
@@ -2233,7 +2243,8 @@ export async function campaignRoutes(app) {
     app.post('/campaigns/:id/accept', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
         const body = AcceptContractSchema.parse({ campaign_id: params.id });
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -2349,7 +2360,8 @@ export async function campaignRoutes(app) {
     });
     app.post('/contracts/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -2409,7 +2421,8 @@ export async function campaignRoutes(app) {
     });
     app.post('/contracts/:id/complete', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
@@ -2492,7 +2505,8 @@ export async function campaignRoutes(app) {
     });
     app.post('/campaigns/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);

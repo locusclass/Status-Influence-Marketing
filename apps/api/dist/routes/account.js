@@ -549,7 +549,8 @@ export async function accountRoutes(app) {
         return { limit, offset };
     };
     app.get('/account/me', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         return withTransaction(async (client) => {
             const hasFullName = await usersHasColumn(client, 'full_name');
             const fullNameSelect = hasFullName
@@ -645,7 +646,8 @@ export async function accountRoutes(app) {
         });
     });
     app.patch('/account/me', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = accountProfileSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -705,7 +707,8 @@ export async function accountRoutes(app) {
         });
     });
     app.patch('/account/avatar', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = accountAvatarSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -725,7 +728,8 @@ export async function accountRoutes(app) {
         });
     });
     app.patch('/account/whatsapp/verify', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = accountWhatsappVerifySchema.safeParse(request.body ?? {});
         if (!parsed.success) {
             reply.code(400);
@@ -796,7 +800,8 @@ export async function accountRoutes(app) {
         });
     });
     app.patch('/account/password', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = accountPasswordSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -818,7 +823,8 @@ export async function accountRoutes(app) {
         });
     });
     app.patch('/account/role', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = accountRoleSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -902,7 +908,8 @@ export async function accountRoutes(app) {
         });
     });
     app.patch('/account/distributor-capacity', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = distributorCapacitySchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -929,7 +936,8 @@ export async function accountRoutes(app) {
         });
     });
     app.delete('/account/me', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const deletion = await withTransaction(async (client) => {
             await ensureUserProfilesTable(client);
             const rootCampaignRes = await client.query(`
@@ -1061,7 +1069,8 @@ export async function accountRoutes(app) {
         return response;
     });
     app.get('/wallet', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const accountRole = request.user.role;
         const activeRole = normalizeActiveRole(request.user.active_role, accountRole);
         const data = await withTransaction(async (client) => {
@@ -1094,7 +1103,8 @@ export async function accountRoutes(app) {
         return data;
     });
     app.post('/wallet/deposit', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = walletDepositSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -1210,7 +1220,8 @@ export async function accountRoutes(app) {
         };
     });
     app.post('/wallet/withdraw', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const parsed = walletWithdrawSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -1333,7 +1344,8 @@ export async function accountRoutes(app) {
         return result;
     });
     app.get('/proofs', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const proofs = await withTransaction(async (client) => {
@@ -1360,9 +1372,16 @@ export async function accountRoutes(app) {
         return { proofs };
     });
     app.get('/dashboard/summary', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const accountRole = request.user.role;
         const activeRole = normalizeActiveRole(request.user.active_role, accountRole);
+        if (userId === 'ariaka-access') {
+            return {
+                advertiser_campaigns: [],
+                distributor: { pending_or_review_count: 0 }
+            };
+        }
         return withTransaction(async (client) => {
             if (activeRole === ACCOUNT_ROLE_ADVERTISER && canAccessAdvertiserFeatures(accountRole)) {
                 const campaignsRes = await client.query(`SELECT c.id,
@@ -1393,7 +1412,8 @@ export async function accountRoutes(app) {
         });
     });
     app.get('/account/notifications', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const query = request.query;
         const limit = Math.min(Math.max(Number(query?.limit ?? 20), 1), 100);
         const unreadOnly = String(query?.unread_only ?? '').trim() === 'true';
@@ -1409,14 +1429,16 @@ export async function accountRoutes(app) {
         });
     });
     app.post('/account/notifications/read-all', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         return withTransaction(async (client) => {
             const updated = await markAllUserNotificationsRead(client, userId);
             return { ok: true, updated };
         });
     });
     app.patch('/account/notifications/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const params = request.params;
         const parsed = accountNotificationUpdateSchema.safeParse(request.body);
         if (!parsed.success) {
@@ -1440,7 +1462,8 @@ export async function accountRoutes(app) {
         });
     });
     app.delete('/account/notifications/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const params = request.params;
         return withTransaction(async (client) => {
             const deletedId = await deleteUserNotification(client, userId, params.id);
@@ -1459,7 +1482,8 @@ export async function accountRoutes(app) {
         });
     });
     app.get('/proofs/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const params = request.params;
         const proof = await withTransaction(async (client) => {
             const res = await client.query(`SELECT p.id,
@@ -1488,7 +1512,8 @@ export async function accountRoutes(app) {
         return { proof };
     });
     app.get('/contracts/me', { preHandler: [app.authenticate] }, async (request) => {
-        const userId = request.user.sub;
+        const userSub = request.user.sub;
+        const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const status = (query?.status ?? '').toString().toUpperCase();

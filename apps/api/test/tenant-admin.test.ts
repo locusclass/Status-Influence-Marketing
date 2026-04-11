@@ -122,6 +122,76 @@ async function insertCampaign(input: {
   return result.rows[0];
 }
 
+async function insertVerificationSession(input: {
+  user_id: string;
+  campaign_id: string;
+}) {
+  const result = await pool!.query(
+    `
+    INSERT INTO verification_sessions (
+      user_id,
+      campaign_id,
+      platform,
+      challenge_code,
+      challenge_phrase,
+      expires_at
+    )
+    VALUES ($1,$2,'WHATSAPP_STATUS','123456','prime-proof', now() + interval '1 day')
+    RETURNING *
+    `,
+    [input.user_id, input.campaign_id]
+  );
+  return result.rows[0];
+}
+
+async function insertProof(input: {
+  session_id: string;
+  user_id: string;
+  status?: string;
+}) {
+  const result = await pool!.query(
+    `
+    INSERT INTO proofs (
+      session_id,
+      user_id,
+      video_url,
+      status
+    )
+    VALUES ($1,$2,'https://example.com/proof.mp4',$3)
+    RETURNING *
+    `,
+    [input.session_id, input.user_id, input.status ?? 'VERIFIED']
+  );
+  return result.rows[0];
+}
+
+async function insertPayoutRequest(input: {
+  proof_id: string;
+  user_id: string;
+  amount?: number;
+  status?: string;
+}) {
+  const result = await pool!.query(
+    `
+    INSERT INTO payout_requests (
+      proof_id,
+      user_id,
+      amount,
+      status
+    )
+    VALUES ($1,$2,$3,$4)
+    RETURNING *
+    `,
+    [
+      input.proof_id,
+      input.user_id,
+      input.amount ?? 100,
+      input.status ?? 'REQUESTED',
+    ]
+  );
+  return result.rows[0];
+}
+
 describe('Tenant admin architecture', () => {
   if (!pool) {
     it('skipped: TEST_DATABASE_URL not set', () => expect(true).toBe(true));
@@ -130,6 +200,7 @@ describe('Tenant admin architecture', () => {
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
+    process.env.ADMIN_ACCESS_PHRASE ??= 'prime-status-emergency';
     const serverModule = await import('../src/server.js');
     app = serverModule.buildServer();
     await applySchema(pool);
@@ -143,6 +214,29 @@ describe('Tenant admin architecture', () => {
   afterAll(async () => {
     await app.close();
     await pool.end();
+  });
+
+  it('validates the emergency admin access phrase before issuing a token', async () => {
+    const invalid = await app.inject({
+      method: 'POST',
+      url: '/admin/access',
+      payload: { phrase: 'wrong-phrase' },
+    });
+    expect(invalid.statusCode).toBe(403);
+    expect(invalid.json()).toMatchObject({ error: 'invalid_phrase' });
+
+    const valid = await app.inject({
+      method: 'POST',
+      url: '/admin/access',
+      payload: { phrase: 'prime-status-emergency' },
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(valid.json()).toMatchObject({
+      user: {
+        admin_role: 'SUPER_ADMIN',
+      },
+    });
+    expect(valid.json().token).toEqual(expect.any(String));
   });
 
   it('enforces RBAC boundaries for super, country, and division admins', async () => {
@@ -289,6 +383,208 @@ describe('Tenant admin architecture', () => {
     expect(campaignsBody.campaigns.map((campaign) => campaign.title)).toEqual([
       'UG Campaign',
     ]);
+  });
+
+  it('scopes shared admin users routes to the manager tenant', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const ke = await insertCountry('KE', 'Kenya');
+
+    const ugAdmin = await insertUser({
+      email: 'ug-scope-admin@prime.test',
+      phone: '+256700000221',
+      admin_role: 'COUNTRY_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const ugUser = await insertUser({
+      email: 'ug-library-user@prime.test',
+      phone: '+256700000222',
+      role: 'ADVERTISER',
+      active_role: 'ADVERTISER',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const keUser = await insertUser({
+      email: 'ke-library-user@prime.test',
+      phone: '+254700000223',
+      role: 'ADVERTISER',
+      active_role: 'ADVERTISER',
+      country: 'KE',
+      country_id: ke.id,
+    });
+
+    const token = app.jwt.sign(
+      buildAuthClaims({
+        ...ugAdmin,
+        country_id: ug.id,
+      })
+    );
+
+    const usersResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/users',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(usersResponse.statusCode).toBe(200);
+    const usersBody = usersResponse.json() as { users: Array<{ email: string }> };
+    expect(usersBody.users.some((user) => user.email == ugUser.email)).toBe(true);
+    expect(usersBody.users.some((user) => user.email == keUser.email)).toBe(false);
+
+    const blockedDetail = await app.inject({
+      method: 'GET',
+      url: `/admin/users/${keUser.id}/detail`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(blockedDetail.statusCode).toBe(404);
+  });
+
+  it('blocks tenant managers from promoting users into global admin accounts', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const manager = await insertUser({
+      email: 'tenant-manager@prime.test',
+      phone: '+256700000231',
+      admin_role: 'COUNTRY_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const target = await insertUser({
+      email: 'target-user@prime.test',
+      phone: '+256700000232',
+      role: 'ADVERTISER',
+      active_role: 'ADVERTISER',
+      country: 'UG',
+      country_id: ug.id,
+    });
+
+    const token = app.jwt.sign(
+      buildAuthClaims({
+        ...manager,
+        country_id: ug.id,
+      })
+    );
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/admin/users/${target.id}/role`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { role: 'ADMIN' },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ error: 'forbidden' });
+
+    const userRes = await pool.query(
+      'SELECT role, active_role FROM users WHERE id = $1 LIMIT 1',
+      [target.id]
+    );
+    expect(userRes.rows[0]).toMatchObject({
+      role: 'ADVERTISER',
+      active_role: 'ADVERTISER',
+    });
+  });
+
+  it('scopes shared payout request moderation to the caller tenant', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const ke = await insertCountry('KE', 'Kenya');
+
+    const manager = await insertUser({
+      email: 'ug-payout-manager@prime.test',
+      phone: '+256700000241',
+      admin_role: 'COUNTRY_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const ugAdvertiser = await insertUser({
+      email: 'ug-payout-user@prime.test',
+      phone: '+256700000242',
+      role: 'ADVERTISER',
+      active_role: 'ADVERTISER',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const keAdvertiser = await insertUser({
+      email: 'ke-payout-user@prime.test',
+      phone: '+254700000243',
+      role: 'ADVERTISER',
+      active_role: 'ADVERTISER',
+      country: 'KE',
+      country_id: ke.id,
+    });
+
+    const ugCampaign = await insertCampaign({
+      advertiser_id: ugAdvertiser.id,
+      title: 'UG payout campaign',
+      country_id: ug.id,
+    });
+    const keCampaign = await insertCampaign({
+      advertiser_id: keAdvertiser.id,
+      title: 'KE payout campaign',
+      country_id: ke.id,
+    });
+    const ugSession = await insertVerificationSession({
+      user_id: ugAdvertiser.id,
+      campaign_id: ugCampaign.id,
+    });
+    const keSession = await insertVerificationSession({
+      user_id: keAdvertiser.id,
+      campaign_id: keCampaign.id,
+    });
+    const ugProof = await insertProof({
+      session_id: ugSession.id,
+      user_id: ugAdvertiser.id,
+    });
+    const keProof = await insertProof({
+      session_id: keSession.id,
+      user_id: keAdvertiser.id,
+    });
+    const ugRequest = await insertPayoutRequest({
+      proof_id: ugProof.id,
+      user_id: ugAdvertiser.id,
+    });
+    const keRequest = await insertPayoutRequest({
+      proof_id: keProof.id,
+      user_id: keAdvertiser.id,
+    });
+
+    const token = app.jwt.sign(
+      buildAuthClaims({
+        ...manager,
+        country_id: ug.id,
+      })
+    );
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/payout-requests',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(listResponse.statusCode).toBe(200);
+    const listBody = listResponse.json() as {
+      payouts: Array<{ id: string }>;
+    };
+    expect(listBody.payouts.map((item) => item.id)).toContain(ugRequest.id);
+    expect(listBody.payouts.map((item) => item.id)).not.toContain(keRequest.id);
+
+    const blockedUpdate = await app.inject({
+      method: 'PATCH',
+      url: `/admin/payout-requests/${keRequest.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { status: 'PROCESSING' },
+    });
+    expect(blockedUpdate.statusCode).toBe(404);
+
+    const allowedUpdate = await app.inject({
+      method: 'PATCH',
+      url: `/admin/payout-requests/${ugRequest.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { status: 'PROCESSING' },
+    });
+    expect(allowedUpdate.statusCode).toBe(200);
+    expect(allowedUpdate.json()).toMatchObject({
+      payout: {
+        id: ugRequest.id,
+        status: 'PROCESSING',
+      },
+    });
   });
 
   it('isolates division dashboard data and moderation to the current division', async () => {
@@ -556,5 +852,164 @@ describe('Tenant admin architecture', () => {
     expect(
       wallets.rows.map((row) => Number(row.balance)).sort((a, b) => a - b)
     ).toEqual([23, 23]);
+  });
+
+  it('limits manager payout visibility and payment actions to the active tenant', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const ke = await insertCountry('KE', 'Kenya');
+    const kampala = (
+      await pool.query(
+        `
+        INSERT INTO divisions (country_id, name, type)
+        VALUES ($1,'Kampala','CITY')
+        RETURNING *
+        `,
+        [ug.id]
+      )
+    ).rows[0];
+    const gulu = (
+      await pool.query(
+        `
+        INSERT INTO divisions (country_id, name, type)
+        VALUES ($1,'Gulu','CITY')
+        RETURNING *
+        `,
+        [ug.id]
+      )
+    ).rows[0];
+
+    const ugCountryManager = await insertUser({
+      email: 'country-payout-manager@prime.test',
+      phone: '+256700000511',
+      admin_role: 'COUNTRY_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const kampalaManager = await insertUser({
+      email: 'kampala-payout-manager@prime.test',
+      phone: '+256700000512',
+      admin_role: 'DIVISION_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+      division_id: kampala.id,
+    });
+    const guluManager = await insertUser({
+      email: 'gulu-payout-manager@prime.test',
+      phone: '+256700000513',
+      admin_role: 'DIVISION_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+      division_id: gulu.id,
+    });
+    const kenyaManager = await insertUser({
+      email: 'kenya-payout-manager@prime.test',
+      phone: '+254700000514',
+      admin_role: 'COUNTRY_ADMIN',
+      country: 'KE',
+      country_id: ke.id,
+    });
+
+    await pool.query(
+      `
+      INSERT INTO payouts (
+        user_id,
+        role,
+        amount,
+        period_start,
+        period_end,
+        status,
+        country_id,
+        division_id
+      )
+      VALUES
+        ($1,'DIVISION_ADMIN',25,'2026-03-01','2026-03-31','PENDING',$2,$3),
+        ($4,'DIVISION_ADMIN',30,'2026-03-01','2026-03-31','PENDING',$2,$5),
+        ($6,'COUNTRY_ADMIN',35,'2026-03-01','2026-03-31','PENDING',$7,NULL)
+      `,
+      [kampalaManager.id, ug.id, kampala.id, guluManager.id, gulu.id, kenyaManager.id, ke.id]
+    );
+
+    const kampalaPayoutRes = await pool.query(
+      'SELECT * FROM payouts WHERE user_id = $1 LIMIT 1',
+      [kampalaManager.id]
+    );
+    const guluPayoutRes = await pool.query(
+      'SELECT * FROM payouts WHERE user_id = $1 LIMIT 1',
+      [guluManager.id]
+    );
+    const kenyaPayoutRes = await pool.query(
+      'SELECT * FROM payouts WHERE user_id = $1 LIMIT 1',
+      [kenyaManager.id]
+    );
+    const kampalaPayout = kampalaPayoutRes.rows[0];
+    const guluPayout = guluPayoutRes.rows[0];
+    const kenyaPayout = kenyaPayoutRes.rows[0];
+
+    const countryToken = app.jwt.sign(
+      buildAuthClaims({
+        ...ugCountryManager,
+        country_id: ug.id,
+      })
+    );
+    const divisionToken = app.jwt.sign(
+      buildAuthClaims({
+        ...kampalaManager,
+        country_id: ug.id,
+        division_id: kampala.id,
+      })
+    );
+
+    const countryList = await app.inject({
+      method: 'GET',
+      url: '/admin/payouts',
+      headers: { authorization: `Bearer ${countryToken}` },
+    });
+    expect(countryList.statusCode).toBe(200);
+    const countryBody = countryList.json() as {
+      payouts: Array<{ id: string }>;
+    };
+    expect(countryBody.payouts.map((item) => item.id)).toContain(kampalaPayout.id);
+    expect(countryBody.payouts.map((item) => item.id)).toContain(guluPayout.id);
+    expect(countryBody.payouts.map((item) => item.id)).not.toContain(kenyaPayout.id);
+
+    const divisionList = await app.inject({
+      method: 'GET',
+      url: '/admin/payouts',
+      headers: { authorization: `Bearer ${divisionToken}` },
+    });
+    expect(divisionList.statusCode).toBe(200);
+    const divisionBody = divisionList.json() as {
+      payouts: Array<{ id: string }>;
+    };
+    expect(divisionBody.payouts.map((item) => item.id)).toEqual([kampalaPayout.id]);
+
+    const blockedPayment = await app.inject({
+      method: 'POST',
+      url: `/admin/payouts/${guluPayout.id}/pay`,
+      headers: { authorization: `Bearer ${divisionToken}` },
+    });
+    expect(blockedPayment.statusCode).toBe(404);
+
+    const allowedPayment = await app.inject({
+      method: 'POST',
+      url: `/admin/payouts/${kampalaPayout.id}/pay`,
+      headers: { authorization: `Bearer ${divisionToken}` },
+    });
+    expect(allowedPayment.statusCode).toBe(200);
+    expect(allowedPayment.json()).toMatchObject({
+      payout: {
+        id: kampalaPayout.id,
+        status: 'PAID',
+      },
+    });
+
+    const walletRes = await pool.query(
+      'SELECT balance_available, balance FROM wallets WHERE user_id = $1 LIMIT 1',
+      [kampalaManager.id]
+    );
+    expect(walletRes.rows[0]).toMatchObject({
+      balance_available: '25',
+      balance: '25',
+    });
   });
 });

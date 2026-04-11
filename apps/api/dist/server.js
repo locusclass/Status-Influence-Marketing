@@ -6,7 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
-import { ADMIN_ROLE_SUPER_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
+import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
@@ -23,6 +23,8 @@ export function buildServer() {
         'https://*.primestatus.site',
         'https://prime-status-1f0ad.firebaseapp.com',
         'https://prime-status-1f0ad.web.app',
+        'https://admindashboard-77cc3.firebaseapp.com',
+        'https://admindashboard-77cc3.web.app',
         'http://localhost:*',
         'http://127.0.0.1:*',
     ];
@@ -156,7 +158,10 @@ export function buildServer() {
             }
             const role = request.user?.role;
             const adminRole = normalizeAdminDashboardRole(request.user?.admin_role);
-            if (adminRole !== ADMIN_ROLE_SUPER_ADMIN && role !== 'ADMIN') {
+            if (adminRole !== ADMIN_ROLE_SUPER_ADMIN &&
+                adminRole !== ADMIN_ROLE_COUNTRY_ADMIN &&
+                adminRole !== ADMIN_ROLE_DIVISION_ADMIN &&
+                role !== 'ADMIN') {
                 return reply.code(403).send({ error: 'forbidden' });
             }
         }
