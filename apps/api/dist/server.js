@@ -9,7 +9,7 @@ import multipart from '@fastify/multipart';
 import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
-import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
+import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
 export function buildServer() {
     const app = Fastify({
@@ -186,6 +186,7 @@ export function buildServer() {
         instance.register(verificationRoutes);
         instance.register(uploadRoutes);
         instance.register(paymentRoutes);
+        instance.register(chatRoutes);
         instance.register(accountRoutes);
         instance.register(adminRoutes);
         instance.register(tenantAdminRoutes);

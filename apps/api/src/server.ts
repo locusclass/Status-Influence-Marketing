@@ -29,6 +29,7 @@ import {
   paymentRoutes,
   uploadRoutes,
   verificationRoutes,
+  chatRoutes,
   accountRoutes,
   adminRoutes,
   tenantAdminRoutes
@@ -244,6 +245,7 @@ export function buildServer() {
     instance.register(verificationRoutes);
     instance.register(uploadRoutes);
     instance.register(paymentRoutes);
+    instance.register(chatRoutes);
     instance.register(accountRoutes);
     instance.register(adminRoutes);
     instance.register(tenantAdminRoutes);
