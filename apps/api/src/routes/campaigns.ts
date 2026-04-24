@@ -34,6 +34,9 @@ const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
 const CREATOR_DEFAULT_TARGET_METRIC = 100;
+const ACTIVE_CAMPAIGN_PLATFORM = 'WHATSAPP_STATUS' as const;
+const TEMPORARY_PLATFORM_INCORPORATION_DETAIL =
+  'TikTok and X campaigns are being incorporated. WhatsApp Status is currently the only supported campaign platform.';
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
   .map((platform) => `'${platform}'`)
   .join(', ')}))`;
@@ -315,6 +318,10 @@ function normalizePlatformList(values: unknown[]) {
         .filter((value) => value.length > 0)
     )
   );
+}
+
+function hasOnlyActiveCampaignPlatforms(platforms: string[]) {
+  return platforms.every((platform) => platform === ACTIVE_CAMPAIGN_PLATFORM);
 }
 
 function resolveRequestedPlatforms(body: any) {
@@ -1392,6 +1399,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         params.push(query.status);
         idx++;
       }
+      filters.push(`c.platform = '${ACTIVE_CAMPAIGN_PLATFORM}'`);
 
       if (role === 'DISTRIBUTOR') {
         filters.push(`(
@@ -1511,6 +1519,13 @@ export async function campaignRoutes(app: FastifyInstance) {
 
       const found = await campaignRepo.getCampaign(client, params.id);
       if (!found) return null;
+      if (
+        String(found.platform ?? '').trim().toUpperCase() !==
+          ACTIVE_CAMPAIGN_PLATFORM &&
+        role !== 'ADMIN'
+      ) {
+        return null;
+      }
       if (
         found.visibility === 'PRIVATE' &&
         found.assigned_distributor_id &&
@@ -1842,6 +1857,14 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { error: 'validation_failed', issues: parsedBody.error.issues };
     }
     const body = parsedBody.data;
+    const requestedPlatforms = resolveRequestedPlatforms(body);
+    if (!hasOnlyActiveCampaignPlatforms(requestedPlatforms)) {
+      reply.code(400);
+      return {
+        error: 'platform_temporarily_unavailable',
+        detail: TEMPORARY_PLATFORM_INCORPORATION_DETAIL,
+      };
+    }
     const authSub = (request.user as any)?.sub as string | undefined;
     const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
     const role = (request.user as any)?.role as string | undefined;
@@ -1864,10 +1887,10 @@ export async function campaignRoutes(app: FastifyInstance) {
     try {
         campaign = await withTransaction(async (client) => {
           const bundleItems = buildBundleItems(body);
-          const requestedPlatforms = normalizePlatformList(
+          const bundlePlatforms = normalizePlatformList(
           bundleItems.map((item: any) => item.platform)
           );
-        if (requestedPlatforms.length !== bundleItems.length) {
+        if (bundlePlatforms.length !== bundleItems.length) {
           throw new Error('duplicate_bundle_platform');
         }
 
@@ -2169,7 +2192,19 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   app.patch('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const body = UpdateCampaignSchema.parse(request.body);
+    const parsedBody = UpdateCampaignSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsedBody.error.issues };
+    }
+    const body = parsedBody.data;
+    if (!hasOnlyActiveCampaignPlatforms(normalizePlatformList([body.platform]))) {
+      reply.code(400);
+      return {
+        error: 'platform_temporarily_unavailable',
+        detail: TEMPORARY_PLATFORM_INCORPORATION_DETAIL,
+      };
+    }
     const platformKey = String(body.platform);
     const authSub = (request.user as any)?.sub as string | undefined;
     const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;

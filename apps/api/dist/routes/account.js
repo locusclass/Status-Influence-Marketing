@@ -15,13 +15,6 @@ const accountProfileSchema = z.object({
     country: z.string().trim().min(2).max(3).optional(),
     current_advertiser_viewers: z.number().int().min(0).optional(),
     private_contract_rate_ugx: z.number().int().min(0).optional(),
-    promoter_platforms: z
-        .array(z.object({
-        platform: z.enum(['TIKTOK', 'X']),
-        profile_url: z.string().trim().url().max(1024),
-    }))
-        .max(2)
-        .optional(),
 });
 const accountPasswordSchema = z.object({
     current_password: z.string().min(8),
@@ -606,18 +599,6 @@ export async function accountRoutes(app) {
         WHERE u.id = $1
         LIMIT 1
         `, [userId]);
-            const platformProfilesRes = await client.query(`
-        SELECT
-          ca.platform,
-          ca.profile_url,
-          ca.handle,
-          ca.active
-        FROM creators c
-        JOIN creator_accounts ca ON ca.creator_id = c.id
-        WHERE c.user_id = $1
-          AND ca.platform IN ('TIKTOK', 'X')
-        ORDER BY ca.platform ASC
-        `, [userId]);
             const promoterPlatforms = [
                 {
                     platform: 'WHATSAPP_STATUS',
@@ -626,14 +607,6 @@ export async function accountRoutes(app) {
                     profile_url: null,
                     handle: null,
                 },
-                ...platformProfilesRes.rows.map((row) => ({
-                    platform: String(row.platform ?? '').trim().toUpperCase(),
-                    active: Boolean(row.active),
-                    qualified: Boolean(row.active) &&
-                        String(row.profile_url ?? row.handle ?? '').trim().length > 0,
-                    profile_url: row.profile_url ? String(row.profile_url) : null,
-                    handle: row.handle ? String(row.handle) : null,
-                })),
             ];
             return {
                 profile: res.rows[0]
@@ -654,8 +627,6 @@ export async function accountRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         const body = parsed.data;
-        const shouldSyncPromoterPlatforms = Array.isArray(body.promoter_platforms);
-        const promoterPlatforms = normalizePromoterPlatformProfiles(body.promoter_platforms);
         return withTransaction(async (client) => {
             await client.query(`
           INSERT INTO user_profiles (user_id, full_name, updated_at)
@@ -699,9 +670,6 @@ export async function accountRoutes(app) {
                     return { error: 'distributor_profile_required' };
                 }
                 await client.query('UPDATE users SET private_contract_rate_ugx=$2 WHERE id=$1', [userId, Math.max(0, body.private_contract_rate_ugx)]);
-            }
-            if (shouldSyncPromoterPlatforms) {
-                await replacePromoterPlatformProfiles(client, userId, promoterPlatforms);
             }
             return { ok: true };
         });

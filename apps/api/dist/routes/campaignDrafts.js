@@ -24,15 +24,15 @@ function normalizeDraftPayload(rawDraft, savedAt) {
     const selectedPlatforms = Array.isArray(rawDraft['selected_platforms'])
         ? Array.from(new Set(rawDraft['selected_platforms']
             .map((value) => String(value ?? '').trim().toUpperCase())
+            .filter((value) => value === 'WHATSAPP_STATUS')
             .filter((value) => value.length > 0)))
         : [];
     const normalizedPlatformDrafts = rawDraft['platform_drafts'] &&
         typeof rawDraft['platform_drafts'] === 'object' &&
         !Array.isArray(rawDraft['platform_drafts'])
-        ? Object.fromEntries(Object.entries(rawDraft['platform_drafts']).map(([key, value]) => [
-            key.toString().trim().toUpperCase(),
-            value,
-        ]))
+        ? Object.fromEntries(Object.entries(rawDraft['platform_drafts'])
+            .filter(([key]) => key.toString().trim().toUpperCase() === 'WHATSAPP_STATUS')
+            .map(([key, value]) => [key.toString().trim().toUpperCase(), value]))
         : {};
     const activePlatform = String(rawDraft['active_platform'] ?? '')
         .trim()

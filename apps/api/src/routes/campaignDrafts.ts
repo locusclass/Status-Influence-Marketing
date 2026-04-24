@@ -31,6 +31,7 @@ function normalizeDraftPayload(rawDraft: Record<string, unknown>, savedAt: strin
         new Set(
           (rawDraft['selected_platforms'] as unknown[])
             .map((value) => String(value ?? '').trim().toUpperCase())
+            .filter((value) => value === 'WHATSAPP_STATUS')
             .filter((value) => value.length > 0)
         )
       )
@@ -41,10 +42,9 @@ function normalizeDraftPayload(rawDraft: Record<string, unknown>, savedAt: strin
     typeof rawDraft['platform_drafts'] === 'object' &&
     !Array.isArray(rawDraft['platform_drafts'])
       ? Object.fromEntries(
-          Object.entries(rawDraft['platform_drafts'] as Record<string, unknown>).map(([key, value]) => [
-            key.toString().trim().toUpperCase(),
-            value,
-          ])
+          Object.entries(rawDraft['platform_drafts'] as Record<string, unknown>)
+            .filter(([key]) => key.toString().trim().toUpperCase() === 'WHATSAPP_STATUS')
+            .map(([key, value]) => [key.toString().trim().toUpperCase(), value])
         )
       : {};
 

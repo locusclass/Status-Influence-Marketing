@@ -12,6 +12,8 @@ const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
 const CREATOR_DEFAULT_TARGET_METRIC = 100;
+const ACTIVE_CAMPAIGN_PLATFORM = 'WHATSAPP_STATUS';
+const TEMPORARY_PLATFORM_INCORPORATION_DETAIL = 'TikTok and X campaigns are being incorporated. WhatsApp Status is currently the only supported campaign platform.';
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
     .map((platform) => `'${platform}'`)
     .join(', ')}))`;
@@ -194,6 +196,9 @@ function normalizePlatformList(values) {
     return Array.from(new Set(values
         .map((value) => String(value ?? '').trim().toUpperCase())
         .filter((value) => value.length > 0)));
+}
+function hasOnlyActiveCampaignPlatforms(platforms) {
+    return platforms.every((platform) => platform === ACTIVE_CAMPAIGN_PLATFORM);
 }
 function resolveRequestedPlatforms(body) {
     const bundleItemPlatforms = Array.isArray(body?.bundle_items)
@@ -996,6 +1001,7 @@ export async function campaignRoutes(app) {
                 params.push(query.status);
                 idx++;
             }
+            filters.push(`c.platform = '${ACTIVE_CAMPAIGN_PLATFORM}'`);
             if (role === 'DISTRIBUTOR') {
                 filters.push(`(
           (c.parent_campaign_id IS NOT NULL AND c.assigned_distributor_id = $${idx})
@@ -1096,6 +1102,11 @@ export async function campaignRoutes(app) {
             const found = await campaignRepo.getCampaign(client, params.id);
             if (!found)
                 return null;
+            if (String(found.platform ?? '').trim().toUpperCase() !==
+                ACTIVE_CAMPAIGN_PLATFORM &&
+                role !== 'ADMIN') {
+                return null;
+            }
             if (found.visibility === 'PRIVATE' &&
                 found.assigned_distributor_id &&
                 found.assigned_distributor_id !== authUser &&
@@ -1361,6 +1372,14 @@ export async function campaignRoutes(app) {
             return { error: 'validation_failed', issues: parsedBody.error.issues };
         }
         const body = parsedBody.data;
+        const requestedPlatforms = resolveRequestedPlatforms(body);
+        if (!hasOnlyActiveCampaignPlatforms(requestedPlatforms)) {
+            reply.code(400);
+            return {
+                error: 'platform_temporarily_unavailable',
+                detail: TEMPORARY_PLATFORM_INCORPORATION_DETAIL,
+            };
+        }
         const authSub = request.user?.sub;
         const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
@@ -1381,8 +1400,8 @@ export async function campaignRoutes(app) {
         try {
             campaign = await withTransaction(async (client) => {
                 const bundleItems = buildBundleItems(body);
-                const requestedPlatforms = normalizePlatformList(bundleItems.map((item) => item.platform));
-                if (requestedPlatforms.length !== bundleItems.length) {
+                const bundlePlatforms = normalizePlatformList(bundleItems.map((item) => item.platform));
+                if (bundlePlatforms.length !== bundleItems.length) {
                     throw new Error('duplicate_bundle_platform');
                 }
                 const bundleId = bundleItems.length > 1 ? uuid() : null;
@@ -1597,7 +1616,19 @@ export async function campaignRoutes(app) {
     });
     app.patch('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const body = UpdateCampaignSchema.parse(request.body);
+        const parsedBody = UpdateCampaignSchema.safeParse(request.body);
+        if (!parsedBody.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsedBody.error.issues };
+        }
+        const body = parsedBody.data;
+        if (!hasOnlyActiveCampaignPlatforms(normalizePlatformList([body.platform]))) {
+            reply.code(400);
+            return {
+                error: 'platform_temporarily_unavailable',
+                detail: TEMPORARY_PLATFORM_INCORPORATION_DETAIL,
+            };
+        }
         const platformKey = String(body.platform);
         const authSub = request.user?.sub;
         const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
