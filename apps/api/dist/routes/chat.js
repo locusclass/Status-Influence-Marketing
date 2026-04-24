@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
-import { ensureChatSchema } from '../services/chat.js';
+import { ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
+import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_GROUP_ROOM, ensureChatSchema, } from '../services/chat.js';
 import { createUserNotifications } from '../services/userSignals.js';
 const directThreadSchema = z.object({
     participant_id: z.string().uuid(),
@@ -12,11 +13,48 @@ const updateTypingSchema = z.object({
     draft_text: z.string().max(4000).default(''),
     is_typing: z.boolean().optional(),
 });
+const createGroupSchema = z.object({
+    name: z.string().trim().min(2).max(80),
+    description: z.string().trim().max(400).default(''),
+    logo_url: z.string().trim().max(1024).default(''),
+    public_price_ugx: z.number().int().min(0).default(0),
+    invitee_ids: z.array(z.string().uuid()).max(50).default([]),
+});
+const updateGroupSchema = z
+    .object({
+    name: z.string().trim().min(2).max(80).optional(),
+    description: z.string().trim().max(400).optional(),
+    logo_url: z.string().trim().max(1024).optional(),
+    public_price_ugx: z.number().int().min(0).optional(),
+})
+    .refine((value) => typeof value.name === 'string' ||
+    typeof value.description === 'string' ||
+    typeof value.logo_url === 'string' ||
+    typeof value.public_price_ugx === 'number', {
+    message: 'At least one group field must be provided.',
+    path: ['name'],
+});
+const inviteMembersSchema = z.object({
+    member_ids: z.array(z.string().uuid()).min(1).max(50),
+});
+const respondInviteSchema = z.object({
+    action: z.enum(['ACCEPT', 'DECLINE']),
+});
+const setGroupPriceSchema = z.object({
+    advertiser_id: z.string().uuid(),
+    override_price_ugx: z.number().int().min(0),
+});
 function authUserId(request) {
     const authSub = request.user?.sub;
     return authSub === 'ariaka-access'
         ? '00000000-0000-0000-0000-000000000000'
         : authSub;
+}
+function authAccountRole(request) {
+    return String(request.user?.role ?? '').trim().toUpperCase();
+}
+function authActiveRole(request) {
+    return normalizeActiveRole(request.user?.active_role, request.user?.role);
 }
 function timestampText(value) {
     if (value == null)
@@ -25,21 +63,6 @@ function timestampText(value) {
     if (Number.isNaN(date.getTime()))
         return null;
     return date.toISOString();
-}
-function maxCursor(values) {
-    let latest = null;
-    let latestMs = -1;
-    for (const value of values) {
-        const iso = timestampText(value);
-        if (iso == null)
-            continue;
-        const millis = Date.parse(iso);
-        if (Number.isNaN(millis) || millis <= latestMs)
-            continue;
-        latest = iso;
-        latestMs = millis;
-    }
-    return latest ?? new Date(0).toISOString();
 }
 function parseCursor(value) {
     const raw = String(value ?? '').trim();
@@ -50,62 +73,81 @@ function parseCursor(value) {
         return null;
     return parsed.toISOString();
 }
-function counterpartyName(row) {
-    return String(row.counterpart_name ??
-        row.display_name ??
-        row.full_name ??
-        row.email ??
-        row.phone ??
+function maxCursor(values) {
+    let latest = null;
+    let latestMs = -1;
+    for (const value of values) {
+        const iso = timestampText(value);
+        if (!iso)
+            continue;
+        const millis = Date.parse(iso);
+        if (Number.isNaN(millis) || millis <= latestMs)
+            continue;
+        latest = iso;
+        latestMs = millis;
+    }
+    return latest ?? new Date(0).toISOString();
+}
+function toInt(value) {
+    const numberValue = Number(value ?? 0);
+    if (!Number.isFinite(numberValue))
+        return 0;
+    return Math.max(0, Math.trunc(numberValue));
+}
+function displayNameFromRow(row) {
+    return String(row?.display_name ??
+        row?.full_name ??
+        row?.email ??
+        row?.phone ??
         'Participant').trim();
 }
-function serializeThreadSummary(row) {
-    const counterpartId = String(row.counterpart_id ?? '').trim();
+function serializeUserSummary(row) {
     return {
-        id: String(row.id ?? ''),
-        kind: String(row.kind ?? 'DIRECT'),
-        title: String(row.title ?? ''),
-        created_at: timestampText(row.created_at),
-        last_activity_at: timestampText(row.last_activity_at ?? row.last_message_at ?? row.created_at),
-        unread_count: Math.max(0, Number(row.unread_count ?? 0)),
-        live_draft_text: String(row.live_draft_text ?? '').trim(),
-        counterpart: counterpartId.length === 0
-            ? null
-            : {
-                id: counterpartId,
-                public_id: String(row.counterpart_public_id ?? ''),
-                display_name: counterpartyName(row),
-                role: String(row.counterpart_role ?? 'DISTRIBUTOR'),
-                active_role: String(row.counterpart_active_role ?? 'DISTRIBUTOR'),
-                is_online: row.counterpart_is_online === true,
-                last_seen_at: timestampText(row.counterpart_last_seen_at),
-            },
-        last_message: row.last_message_id == null
-            ? null
-            : {
-                id: String(row.last_message_id),
-                body: String(row.last_message_body ?? ''),
-                sender_id: String(row.last_message_sender_id ?? ''),
-                created_at: timestampText(row.last_message_created_at),
-            },
+        id: String(row?.id ?? ''),
+        public_id: String(row?.public_id ?? ''),
+        display_name: displayNameFromRow(row),
+        role: String(row?.role ?? 'DISTRIBUTOR'),
+        active_role: String(row?.active_role ?? row?.role ?? 'DISTRIBUTOR'),
+        is_online: row?.is_online === true,
+        last_seen_at: timestampText(row?.last_seen_at),
     };
 }
 function serializeMessage(row) {
     return {
-        id: String(row.id ?? ''),
-        body: String(row.body ?? ''),
-        sender_id: String(row.sender_id ?? ''),
-        sender_name: String(row.sender_name ?? ''),
-        created_at: timestampText(row.created_at),
+        id: String(row?.id ?? ''),
+        body: String(row?.body ?? ''),
+        sender_id: String(row?.sender_id ?? ''),
+        sender_name: displayNameFromRow(row),
+        created_at: timestampText(row?.created_at),
     };
 }
 function serializeTypingState(row) {
     return {
-        user_id: String(row.user_id ?? ''),
-        draft_text: String(row.draft_text ?? ''),
-        updated_at: timestampText(row.updated_at),
-        display_name: String(row.display_name ?? ''),
-        public_id: String(row.public_id ?? ''),
+        user_id: String(row?.user_id ?? ''),
+        draft_text: String(row?.draft_text ?? ''),
+        updated_at: timestampText(row?.updated_at),
+        display_name: displayNameFromRow(row),
+        public_id: String(row?.public_id ?? ''),
     };
+}
+function roundPercent(value) {
+    return Math.round(value * 100) / 100;
+}
+async function loadUserSummary(client, userId) {
+    const res = await client.query(`
+    SELECT
+      u.id,
+      u.public_id,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
+      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      u.last_seen_at,
+      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
+    FROM users u
+    WHERE u.id = $1
+    LIMIT 1
+    `, [userId]);
+    return res.rows[0] ? serializeUserSummary(res.rows[0]) : null;
 }
 async function usersCanChatDirectly(client, userId, participantId) {
     const relationRes = await client.query(`
@@ -138,11 +180,11 @@ async function ensureDirectThread(client, userId, participantId) {
     const directKey = [userId, participantId].sort().join(':');
     const threadRes = await client.query(`
     INSERT INTO chat_threads (kind, direct_key, created_by)
-    VALUES ('DIRECT', $1, $2)
+    VALUES ($1, $2, $3)
     ON CONFLICT (direct_key) DO UPDATE
       SET direct_key = EXCLUDED.direct_key
     RETURNING *
-    `, [directKey, userId]);
+    `, [CHAT_THREAD_KIND_DIRECT, directKey, userId]);
     const thread = threadRes.rows[0];
     await client.query(`
     INSERT INTO chat_thread_members (thread_id, user_id)
@@ -151,79 +193,315 @@ async function ensureDirectThread(client, userId, participantId) {
     `, [thread.id, userId, participantId]);
     return thread;
 }
-async function listThreadSummaries(client, userId, options = {}) {
-    const params = [userId];
-    let threadFilterSql = '';
-    if (options.threadId) {
-        params.push(options.threadId);
-        threadFilterSql = `AND t.id = $2`;
-    }
+async function assertThreadMember(client, threadId, userId) {
+    const res = await client.query(`
+    SELECT t.*
+    FROM chat_threads t
+    JOIN chat_thread_members member ON member.thread_id = t.id
+    WHERE t.id = $1
+      AND member.user_id = $2
+    LIMIT 1
+    `, [threadId, userId]);
+    return res.rows[0] ?? null;
+}
+async function loadLastMessage(client, threadId) {
     const res = await client.query(`
     SELECT
-      t.id,
-      t.kind,
-      t.title,
-      t.created_at,
-      COALESCE(t.last_message_at, t.created_at) AS last_activity_at,
-      other.user_id AS counterpart_id,
-      other.public_id AS counterpart_public_id,
-      other.display_name AS counterpart_name,
-      other.role AS counterpart_role,
-      other.active_role AS counterpart_active_role,
-      other.last_seen_at AS counterpart_last_seen_at,
-      (other.last_seen_at >= NOW() - interval '2 minutes') AS counterpart_is_online,
-      lm.id AS last_message_id,
-      lm.body AS last_message_body,
-      lm.sender_id AS last_message_sender_id,
-      lm.created_at AS last_message_created_at,
-      COALESCE(unread.unread_count, 0)::int AS unread_count,
-      COALESCE(typing.draft_text, '') AS live_draft_text
-    FROM chat_thread_members self
-    JOIN chat_threads t ON t.id = self.thread_id
-    LEFT JOIN LATERAL (
-      SELECT
-        member.user_id,
-        u.public_id,
-        COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-        COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-        COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
-        u.last_seen_at
-      FROM chat_thread_members member
-      JOIN users u ON u.id = member.user_id
-      WHERE member.thread_id = t.id
-        AND member.user_id <> self.user_id
-      ORDER BY member.joined_at ASC
-      LIMIT 1
-    ) other ON TRUE
-    LEFT JOIN LATERAL (
-      SELECT msg.id, msg.body, msg.sender_id, msg.created_at
-      FROM chat_messages msg
-      WHERE msg.thread_id = t.id
+      msg.id,
+      msg.body,
+      msg.sender_id,
+      msg.created_at,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name
+    FROM chat_messages msg
+    JOIN users u ON u.id = msg.sender_id
+    WHERE msg.thread_id = $1
+    ORDER BY msg.created_at DESC
+    LIMIT 1
+    `, [threadId]);
+    return res.rows[0] ?? null;
+}
+async function loadUnreadCount(client, threadId, userId) {
+    const res = await client.query(`
+    SELECT COUNT(*)::int AS unread_count
+    FROM chat_messages msg
+    JOIN chat_thread_members member
+      ON member.thread_id = msg.thread_id
+     AND member.user_id = $2
+    WHERE msg.thread_id = $1
+      AND msg.sender_id <> $2
+      AND (member.last_read_at IS NULL OR msg.created_at > member.last_read_at)
+    `, [threadId, userId]);
+    return toInt(res.rows[0]?.unread_count);
+}
+async function loadLiveDraftText(client, threadId, userId) {
+    const res = await client.query(`
+    SELECT state.draft_text
+    FROM chat_typing_states state
+    WHERE state.thread_id = $1
+      AND state.user_id <> $2
+      AND state.is_typing = TRUE
+      AND state.updated_at >= NOW() - interval '15 seconds'
+    ORDER BY state.updated_at DESC
+    LIMIT 1
+    `, [threadId, userId]);
+    return String(res.rows[0]?.draft_text ?? '').trim();
+}
+async function loadDirectCounterpart(client, threadId, userId) {
+    const res = await client.query(`
+    SELECT
+      u.id,
+      u.public_id,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
+      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      u.last_seen_at,
+      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
+    FROM chat_thread_members member
+    JOIN users u ON u.id = member.user_id
+    WHERE member.thread_id = $1
+      AND member.user_id <> $2
+    ORDER BY member.joined_at ASC
+    LIMIT 1
+    `, [threadId, userId]);
+    return res.rows[0] ? serializeUserSummary(res.rows[0]) : null;
+}
+async function listThreadMessages(client, threadId, options = {}) {
+    const params = [threadId];
+    let sql = `
+    SELECT
+      msg.id,
+      msg.body,
+      msg.sender_id,
+      msg.created_at,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name
+    FROM chat_messages msg
+    JOIN users u ON u.id = msg.sender_id
+    WHERE msg.thread_id = $1
+  `;
+    if (options.since) {
+        params.push(options.since);
+        sql += `
+      AND msg.created_at > $2::timestamptz
+      ORDER BY msg.created_at ASC
+    `;
+    }
+    else {
+        params.push(Math.min(Math.max(Number(options.limit ?? 80), 1), 200));
+        sql += `
       ORDER BY msg.created_at DESC
-      LIMIT 1
-    ) lm ON TRUE
+      LIMIT $2
+    `;
+    }
+    const res = await client.query(sql, params);
+    const rows = options.since ? res.rows : [...res.rows].reverse();
+    return rows.map(serializeMessage);
+}
+async function listActiveTypingStates(client, threadId, userId) {
+    const res = await client.query(`
+    SELECT
+      state.user_id,
+      state.draft_text,
+      state.updated_at,
+      u.public_id,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name
+    FROM chat_typing_states state
+    JOIN users u ON u.id = state.user_id
+    WHERE state.thread_id = $1
+      AND state.user_id <> $2
+      AND state.is_typing = TRUE
+      AND state.updated_at >= NOW() - interval '15 seconds'
+    ORDER BY state.updated_at DESC
+    `, [threadId, userId]);
+    return res.rows.map(serializeTypingState);
+}
+async function markThreadRead(client, threadId, userId) {
+    await client.query(`
+    UPDATE chat_thread_members
+    SET last_read_at = NOW()
+    WHERE thread_id = $1
+      AND user_id = $2
+    `, [threadId, userId]);
+}
+async function loadGroupMembership(client, groupId, userId) {
+    const res = await client.query(`
+    SELECT
+      membership.*,
+      g.thread_id,
+      g.name
+    FROM chat_group_memberships membership
+    JOIN chat_groups g ON g.id = membership.group_id
+    WHERE membership.group_id = $1
+      AND membership.user_id = $2
+    LIMIT 1
+    `, [groupId, userId]);
+    return res.rows[0] ?? null;
+}
+async function loadGroupById(client, groupId) {
+    const res = await client.query(`
+    SELECT *
+    FROM chat_groups
+    WHERE id = $1
+    LIMIT 1
+    `, [groupId]);
+    return res.rows[0] ?? null;
+}
+async function loadGroupByThreadId(client, threadId) {
+    const res = await client.query(`
+    SELECT *
+    FROM chat_groups
+    WHERE thread_id = $1
+    LIMIT 1
+    `, [threadId]);
+    return res.rows[0] ?? null;
+}
+async function loadGroupDealByThreadId(client, threadId) {
+    const res = await client.query(`
+    SELECT
+      deal.*,
+      g.name AS group_name
+    FROM chat_group_deal_threads deal
+    JOIN chat_groups g ON g.id = deal.group_id
+    WHERE deal.thread_id = $1
+    LIMIT 1
+    `, [threadId]);
+    return res.rows[0] ?? null;
+}
+async function listGroupMemberViewerRows(client, groupId) {
+    const res = await client.query(`
+    SELECT
+      membership.user_id,
+      membership.role AS membership_role,
+      membership.joined_at,
+      u.public_id,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
+      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      u.last_seen_at,
+      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
+      COALESCE(view_stats.views_24h, 0)::int AS viewers_24h
+    FROM chat_group_memberships membership
+    JOIN users u ON u.id = membership.user_id
     LEFT JOIN LATERAL (
-      SELECT COUNT(*)::int AS unread_count
-      FROM chat_messages msg
-      WHERE msg.thread_id = t.id
-        AND msg.sender_id <> self.user_id
-        AND (self.last_read_at IS NULL OR msg.created_at > self.last_read_at)
-    ) unread ON TRUE
-    LEFT JOIN LATERAL (
-      SELECT state.draft_text
-      FROM chat_typing_states state
-      WHERE state.thread_id = t.id
-        AND state.user_id <> self.user_id
-        AND state.is_typing = TRUE
-        AND state.updated_at >= NOW() - interval '15 seconds'
-      ORDER BY state.updated_at DESC
-      LIMIT 1
-    ) typing ON TRUE
-    WHERE self.user_id = $1
-      ${threadFilterSql}
-    ORDER BY COALESCE(t.last_message_at, t.created_at) DESC, t.created_at DESC
-    `, params);
-    return res.rows.map(serializeThreadSummary);
+      SELECT COALESCE(SUM(COALESCE(p.observed_views, 0)), 0)::int AS views_24h
+      FROM proofs p
+      JOIN verification_sessions s ON s.id = p.session_id
+      WHERE p.user_id = membership.user_id
+        AND p.status = 'VERIFIED'
+        AND p.decision = 'VERIFIED'
+        AND p.created_at >= NOW() - interval '24 hours'
+        AND s.platform = 'WHATSAPP_STATUS'
+    ) view_stats ON TRUE
+    WHERE membership.group_id = $1
+      AND membership.status = 'ACTIVE'
+    ORDER BY
+      CASE WHEN membership.role = 'ADMIN' THEN 0 ELSE 1 END,
+      membership.joined_at ASC
+    `, [groupId]);
+    return res.rows;
+}
+async function loadGroupPriceOverride(client, groupId, advertiserId) {
+    const normalizedAdvertiserId = String(advertiserId ?? '').trim();
+    if (!normalizedAdvertiserId) {
+        return null;
+    }
+    const res = await client.query(`
+    SELECT override_price_ugx
+    FROM chat_group_price_overrides
+    WHERE group_id = $1
+      AND advertiser_id = $2
+    LIMIT 1
+    `, [groupId, normalizedAdvertiserId]);
+    return res.rows[0] ? toInt(res.rows[0].override_price_ugx) : null;
+}
+async function buildGroupSnapshot(client, groupId, options = {}) {
+    const res = await client.query(`
+    SELECT
+      g.id,
+      g.thread_id,
+      g.name,
+      g.description,
+      g.logo_url,
+      g.public_price_ugx,
+      g.created_at,
+      g.updated_at,
+      creator.id AS creator_id,
+      creator.public_id AS creator_public_id,
+      COALESCE(NULLIF(creator.full_name, ''), NULLIF(creator.email, ''), NULLIF(creator.phone, ''), 'Participant') AS creator_display_name,
+      COALESCE(NULLIF(creator.role, ''), 'DISTRIBUTOR') AS creator_role,
+      COALESCE(NULLIF(creator.active_role, ''), COALESCE(NULLIF(creator.role, ''), 'DISTRIBUTOR')) AS creator_active_role,
+      creator.last_seen_at AS creator_last_seen_at,
+      (creator.last_seen_at >= NOW() - interval '2 minutes') AS creator_is_online,
+      membership.role AS current_membership_role,
+      membership.status AS current_membership_status
+    FROM chat_groups g
+    LEFT JOIN users creator ON creator.id = g.created_by
+    LEFT JOIN chat_group_memberships membership
+      ON membership.group_id = g.id
+     AND membership.user_id = $2
+    WHERE g.id = $1
+    LIMIT 1
+    `, [groupId, options.currentUserId ?? null]);
+    const groupRow = res.rows[0];
+    if (!groupRow)
+        return null;
+    const memberRows = await listGroupMemberViewerRows(client, groupId);
+    const capacity24h = memberRows.reduce((sum, row) => sum + toInt(row.viewers_24h), 0);
+    const memberCount = memberRows.length;
+    const effectivePriceOverride = await loadGroupPriceOverride(client, groupId, options.pricingAdvertiserId);
+    const members = memberRows.map((row) => {
+        const viewers24h = toInt(row.viewers_24h);
+        return {
+            ...serializeUserSummary({
+                id: row.user_id,
+                public_id: row.public_id,
+                display_name: row.display_name,
+                role: row.role,
+                active_role: row.active_role,
+                last_seen_at: row.last_seen_at,
+                is_online: row.is_online,
+            }),
+            group_role: String(row.membership_role ?? 'MEMBER'),
+            viewers_24h: viewers24h,
+            share_percent: capacity24h <= 0 ? 0 : roundPercent((viewers24h / capacity24h) * 100),
+            joined_at: timestampText(row.joined_at),
+        };
+    });
+    return {
+        id: String(groupRow.id),
+        thread_id: String(groupRow.thread_id ?? ''),
+        name: String(groupRow.name ?? 'Group Pool').trim(),
+        description: String(groupRow.description ?? '').trim(),
+        logo_url: String(groupRow.logo_url ?? '').trim(),
+        public_price_ugx: toInt(groupRow.public_price_ugx),
+        effective_price_ugx: effectivePriceOverride == null
+            ? toInt(groupRow.public_price_ugx)
+            : effectivePriceOverride,
+        override_applied: effectivePriceOverride != null,
+        capacity_24h: capacity24h,
+        member_count: memberCount,
+        created_at: timestampText(groupRow.created_at),
+        updated_at: timestampText(groupRow.updated_at),
+        membership_role: groupRow.current_membership_role == null
+            ? null
+            : String(groupRow.current_membership_role),
+        membership_status: groupRow.current_membership_status == null
+            ? null
+            : String(groupRow.current_membership_status),
+        is_admin: String(groupRow.current_membership_role ?? '') === 'ADMIN' &&
+            String(groupRow.current_membership_status ?? '') === 'ACTIVE',
+        creator: groupRow.creator_id == null
+            ? null
+            : serializeUserSummary({
+                id: groupRow.creator_id,
+                public_id: groupRow.creator_public_id,
+                display_name: groupRow.creator_display_name,
+                role: groupRow.creator_role,
+                active_role: groupRow.creator_active_role,
+                last_seen_at: groupRow.creator_last_seen_at,
+                is_online: groupRow.creator_is_online,
+            }),
+        members: options.includeMembers ? members : [],
+    };
 }
 async function listChatContacts(client, userId) {
     const res = await client.query(`
@@ -260,102 +538,245 @@ async function listChatContacts(client, userId) {
       AND counterparts.counterpart_id <> $1
     ORDER BY is_online DESC, display_name ASC
     `, [userId]);
-    return res.rows.map((row) => ({
-        id: String(row.id ?? ''),
-        public_id: String(row.public_id ?? ''),
-        display_name: String(row.display_name ?? ''),
-        role: String(row.role ?? 'DISTRIBUTOR'),
-        active_role: String(row.active_role ?? row.role ?? 'DISTRIBUTOR'),
-        is_online: row.is_online === true,
-        last_seen_at: timestampText(row.last_seen_at),
-    }));
+    return res.rows.map(serializeUserSummary);
 }
-async function assertThreadMember(client, threadId, userId) {
+async function listMyGroups(client, userId) {
     const res = await client.query(`
-    SELECT t.*
-    FROM chat_threads t
-    JOIN chat_thread_members member ON member.thread_id = t.id
-    WHERE t.id = $1
-      AND member.user_id = $2
-    LIMIT 1
-    `, [threadId, userId]);
-    return res.rows[0] ?? null;
-}
-async function listThreadMessages(client, threadId, options = {}) {
-    const params = [threadId];
-    let sinceSql = '';
-    if (options.since) {
-        params.push(options.since);
-        sinceSql = `AND msg.created_at > $2::timestamptz`;
+    SELECT group_id
+    FROM chat_group_memberships
+    WHERE user_id = $1
+      AND status = 'ACTIVE'
+    ORDER BY updated_at DESC, created_at DESC
+    `, [userId]);
+    const groups = [];
+    for (const row of res.rows) {
+        const group = await buildGroupSnapshot(client, String(row.group_id), {
+            currentUserId: userId,
+        });
+        if (group)
+            groups.push(group);
     }
-    else {
-        params.push(Math.min(Math.max(Number(options.limit ?? 80), 1), 200));
-        sinceSql = `ORDER BY msg.created_at DESC LIMIT $2`;
-    }
-    const res = await client.query(options.since
-        ? `
-          SELECT
-            msg.id,
-            msg.body,
-            msg.sender_id,
-            msg.created_at,
-            COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS sender_name
-          FROM chat_messages msg
-          JOIN users u ON u.id = msg.sender_id
-          WHERE msg.thread_id = $1
-            ${sinceSql}
-          ORDER BY msg.created_at ASC
-        `
-        : `
-          SELECT *
-          FROM (
-            SELECT
-              msg.id,
-              msg.body,
-              msg.sender_id,
-              msg.created_at,
-              COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS sender_name
-            FROM chat_messages msg
-            JOIN users u ON u.id = msg.sender_id
-            WHERE msg.thread_id = $1
-            ${sinceSql}
-          ) recent_messages
-          ORDER BY recent_messages.created_at ASC
-        `, params);
-    return res.rows.map(serializeMessage);
+    return groups;
 }
-async function listActiveTypingStates(client, threadId, userId) {
+async function listGroupInvites(client, userId) {
     const res = await client.query(`
     SELECT
-      state.user_id,
-      state.draft_text,
-      state.updated_at,
-      u.public_id,
-      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name
-    FROM chat_typing_states state
-    JOIN users u ON u.id = state.user_id
-    WHERE state.thread_id = $1
-      AND state.user_id <> $2
-      AND state.is_typing = TRUE
-      AND state.updated_at >= NOW() - interval '15 seconds'
-    ORDER BY state.updated_at DESC
-    `, [threadId, userId]);
-    return res.rows.map(serializeTypingState);
+      membership.group_id,
+      membership.created_at,
+      membership.updated_at,
+      inviter.id AS inviter_id,
+      inviter.public_id AS inviter_public_id,
+      COALESCE(NULLIF(inviter.full_name, ''), NULLIF(inviter.email, ''), NULLIF(inviter.phone, ''), 'Participant') AS inviter_display_name,
+      COALESCE(NULLIF(inviter.role, ''), 'DISTRIBUTOR') AS inviter_role,
+      COALESCE(NULLIF(inviter.active_role, ''), COALESCE(NULLIF(inviter.role, ''), 'DISTRIBUTOR')) AS inviter_active_role,
+      inviter.last_seen_at AS inviter_last_seen_at,
+      (inviter.last_seen_at >= NOW() - interval '2 minutes') AS inviter_is_online
+    FROM chat_group_memberships membership
+    LEFT JOIN users inviter ON inviter.id = membership.invited_by
+    WHERE membership.user_id = $1
+      AND membership.status = 'INVITED'
+    ORDER BY membership.updated_at DESC, membership.created_at DESC
+    `, [userId]);
+    const invites = [];
+    for (const row of res.rows) {
+        const group = await buildGroupSnapshot(client, String(row.group_id), {
+            currentUserId: userId,
+        });
+        if (!group)
+            continue;
+        invites.push({
+            group,
+            invited_at: timestampText(row.updated_at ?? row.created_at),
+            invited_by: row.inviter_id == null
+                ? null
+                : serializeUserSummary({
+                    id: row.inviter_id,
+                    public_id: row.inviter_public_id,
+                    display_name: row.inviter_display_name,
+                    role: row.inviter_role,
+                    active_role: row.inviter_active_role,
+                    last_seen_at: row.inviter_last_seen_at,
+                    is_online: row.inviter_is_online,
+                }),
+        });
+    }
+    return invites;
 }
-async function markThreadRead(client, threadId, userId) {
-    await client.query(`
-    UPDATE chat_thread_members
-    SET last_read_at = NOW()
-    WHERE thread_id = $1
-      AND user_id = $2
-    `, [threadId, userId]);
+async function listDiscoverableGroups(client, userId, searchText) {
+    const search = String(searchText ?? '').trim();
+    const searchPattern = search ? `%${search}%` : '';
+    const params = [];
+    let whereSearch = '';
+    if (search) {
+        params.push(searchPattern);
+        whereSearch = `
+      AND (
+        g.name ILIKE $1
+        OR g.description ILIKE $1
+      )
+    `;
+    }
+    const res = await client.query(`
+    SELECT g.id
+    FROM chat_groups g
+    WHERE EXISTS (
+      SELECT 1
+      FROM chat_group_memberships membership
+      WHERE membership.group_id = g.id
+        AND membership.status = 'ACTIVE'
+    )
+    ${whereSearch}
+    ORDER BY g.updated_at DESC, g.created_at DESC
+    LIMIT 20
+    `, params);
+    const groups = [];
+    for (const row of res.rows) {
+        const group = await buildGroupSnapshot(client, String(row.id), {
+            currentUserId: userId,
+            pricingAdvertiserId: userId,
+        });
+        if (group)
+            groups.push(group);
+    }
+    return groups;
+}
+async function listGroupCandidates(client, userId, options = {}) {
+    const params = [userId];
+    let sql = `
+    SELECT
+      u.id,
+      u.public_id,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
+      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      u.last_seen_at,
+      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
+    FROM users u
+    WHERE u.id <> $1
+      AND COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') IN ('DISTRIBUTOR', 'DUAL_USER')
+  `;
+    const search = String(options.search ?? '').trim();
+    if (search) {
+        params.push(`%${search}%`);
+        sql += `
+      AND (
+        COALESCE(NULLIF(u.full_name, ''), '') ILIKE $${params.length}
+        OR COALESCE(NULLIF(u.email, ''), '') ILIKE $${params.length}
+        OR COALESCE(NULLIF(u.phone, ''), '') ILIKE $${params.length}
+      )
+    `;
+    }
+    if (options.groupId) {
+        params.push(options.groupId);
+        sql += `
+      AND NOT EXISTS (
+        SELECT 1
+        FROM chat_group_memberships membership
+        WHERE membership.group_id = $${params.length}
+          AND membership.user_id = u.id
+          AND membership.status IN ('INVITED', 'ACTIVE')
+      )
+    `;
+    }
+    sql += `
+    ORDER BY is_online DESC, display_name ASC
+    LIMIT 20
+  `;
+    const res = await client.query(sql, params);
+    return res.rows.map(serializeUserSummary);
+}
+async function buildThreadSummary(client, threadId, userId) {
+    const threadRes = await client.query(`
+    SELECT *
+    FROM chat_threads
+    WHERE id = $1
+    LIMIT 1
+    `, [threadId]);
+    const thread = threadRes.rows[0];
+    if (!thread)
+        return null;
+    const lastMessage = await loadLastMessage(client, threadId);
+    const unreadCount = await loadUnreadCount(client, threadId, userId);
+    const liveDraftText = await loadLiveDraftText(client, threadId, userId);
+    let counterpart = null;
+    let group = null;
+    let title = String(thread.title ?? '').trim();
+    if (thread.kind === CHAT_THREAD_KIND_DIRECT) {
+        counterpart = await loadDirectCounterpart(client, threadId, userId);
+        title = counterpart?.display_name ?? title;
+        if (!title) {
+            title = 'Participant';
+        }
+    }
+    else if (thread.kind === CHAT_THREAD_KIND_GROUP_ROOM) {
+        const groupRow = await loadGroupByThreadId(client, threadId);
+        if (groupRow) {
+            group = await buildGroupSnapshot(client, String(groupRow.id), {
+                currentUserId: userId,
+                includeMembers: false,
+            });
+            title = String(group?.name ?? title ?? 'Group Pool').trim();
+        }
+    }
+    else if (thread.kind === CHAT_THREAD_KIND_GROUP_DEAL) {
+        const deal = await loadGroupDealByThreadId(client, threadId);
+        if (deal) {
+            group = await buildGroupSnapshot(client, String(deal.group_id), {
+                currentUserId: userId,
+                pricingAdvertiserId: String(deal.advertiser_id),
+                includeMembers: false,
+            });
+            if (String(deal.advertiser_id) !== userId) {
+                counterpart = await loadUserSummary(client, String(deal.advertiser_id));
+            }
+            title =
+                String(deal.advertiser_id) === userId
+                    ? String(group?.name ?? title ?? 'Group Pool').trim()
+                    : `${String(group?.name ?? 'Group Pool').trim()} · ${counterpart?.display_name ?? 'Advertiser'}`;
+        }
+    }
+    return {
+        id: String(thread.id),
+        kind: String(thread.kind ?? CHAT_THREAD_KIND_DIRECT),
+        title,
+        created_at: timestampText(thread.created_at),
+        last_activity_at: timestampText(thread.last_message_at ?? thread.created_at),
+        unread_count: unreadCount,
+        live_draft_text: liveDraftText,
+        counterpart,
+        group,
+        last_message: lastMessage ? serializeMessage(lastMessage) : null,
+    };
+}
+async function listThreadSummaries(client, userId, options = {}) {
+    const params = [userId];
+    let filterSql = '';
+    if (options.threadId) {
+        params.push(options.threadId);
+        filterSql = `AND t.id = $2`;
+    }
+    const res = await client.query(`
+    SELECT t.id
+    FROM chat_thread_members member
+    JOIN chat_threads t ON t.id = member.thread_id
+    WHERE member.user_id = $1
+      ${filterSql}
+    ORDER BY COALESCE(t.last_message_at, t.created_at) DESC, t.created_at DESC
+    `, params);
+    const summaries = [];
+    for (const row of res.rows) {
+        const summary = await buildThreadSummary(client, String(row.id), userId);
+        if (summary)
+            summaries.push(summary);
+    }
+    return summaries;
 }
 async function buildThreadDetail(client, threadId, userId) {
     const thread = await assertThreadMember(client, threadId, userId);
     if (!thread)
         return null;
     await markThreadRead(client, threadId, userId);
-    const summary = (await listThreadSummaries(client, userId, { threadId }))[0] ?? null;
+    const summary = await buildThreadSummary(client, threadId, userId);
     const messages = await listThreadMessages(client, threadId, { limit: 80 });
     const typingStates = await listActiveTypingStates(client, threadId, userId);
     const cursor = maxCursor([
@@ -369,6 +790,82 @@ async function buildThreadDetail(client, threadId, userId) {
         typing_states: typingStates,
         cursor,
     };
+}
+async function ensureGroupDealThread(client, groupId, advertiserId, createdBy) {
+    const group = await loadGroupById(client, groupId);
+    if (!group)
+        return null;
+    const existingRes = await client.query(`
+    SELECT thread_id
+    FROM chat_group_deal_threads
+    WHERE group_id = $1
+      AND advertiser_id = $2
+    LIMIT 1
+    `, [groupId, advertiserId]);
+    let threadId = String(existingRes.rows[0]?.thread_id ?? '').trim();
+    let created = false;
+    if (!threadId) {
+        const threadRes = await client.query(`
+      INSERT INTO chat_threads (kind, title, created_by)
+      VALUES ($1, $2, $3)
+      RETURNING id
+      `, [CHAT_THREAD_KIND_GROUP_DEAL, String(group.name ?? 'Group Pool').trim(), createdBy]);
+        threadId = String(threadRes.rows[0]?.id ?? '').trim();
+        const dealInsertRes = await client.query(`
+      INSERT INTO chat_group_deal_threads (
+        group_id,
+        advertiser_id,
+        thread_id,
+        created_by,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (group_id, advertiser_id) DO UPDATE
+        SET updated_at = NOW()
+      RETURNING thread_id
+      `, [groupId, advertiserId, threadId, createdBy]);
+        threadId = String(dealInsertRes.rows[0]?.thread_id ?? threadId).trim();
+        created = true;
+    }
+    const memberRes = await client.query(`
+    SELECT user_id
+    FROM chat_group_memberships
+    WHERE group_id = $1
+      AND status = 'ACTIVE'
+    `, [groupId]);
+    const participantIds = Array.from(new Set([
+        advertiserId,
+        ...memberRes.rows.map((row) => String(row.user_id)),
+    ]));
+    if (participantIds.length > 0) {
+        await client.query(`
+      INSERT INTO chat_thread_members (thread_id, user_id)
+      SELECT $1, member_id
+      FROM UNNEST($2::uuid[]) AS member_id
+      ON CONFLICT DO NOTHING
+      `, [threadId, participantIds]);
+    }
+    await client.query(`
+    UPDATE chat_threads
+    SET title = $2
+    WHERE id = $1
+    `, [threadId, String(group.name ?? 'Group Pool').trim()]);
+    return { threadId, created, group };
+}
+async function ensureDistributorCandidates(client, userIds) {
+    const normalizedIds = Array.from(new Set(userIds.map((value) => String(value ?? '').trim()).filter(Boolean)));
+    if (normalizedIds.length === 0) {
+        return { validUsers: [], missingIds: [] };
+    }
+    const res = await client.query(`
+    SELECT id, role
+    FROM users
+    WHERE id = ANY($1::uuid[])
+    `, [normalizedIds]);
+    const validUsers = res.rows.filter((row) => canAccessDistributorFeatures(row.role));
+    const foundIds = new Set(res.rows.map((row) => String(row.id)));
+    const missingIds = normalizedIds.filter((id) => !foundIds.has(id));
+    return { validUsers, missingIds };
 }
 export async function chatRoutes(app) {
     app.addHook('onReady', async () => {
@@ -399,6 +896,52 @@ export async function chatRoutes(app) {
             return listThreadSummaries(client, userId);
         });
         return { threads };
+    });
+    app.get('/chat/groups', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const query = (request.query ?? {});
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const scope = String(query.scope ?? 'mine').trim().toLowerCase();
+        const search = String(query.search ?? '').trim();
+        if (scope === 'directory' && !canAccessAdvertiserFeatures(authAccountRole(request))) {
+            reply.code(403);
+            return { error: 'advertiser_role_required' };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            if (scope === 'invites') {
+                return { invites: await listGroupInvites(client, userId) };
+            }
+            if (scope === 'directory') {
+                return { groups: await listDiscoverableGroups(client, userId, search) };
+            }
+            return { groups: await listMyGroups(client, userId) };
+        });
+        return result;
+    });
+    app.get('/chat/group-candidates', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const query = (request.query ?? {});
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (authActiveRole(request) !== ACCOUNT_ROLE_DISTRIBUTOR ||
+            !canAccessDistributorFeatures(authAccountRole(request))) {
+            reply.code(403);
+            return { error: 'distributor_group_only' };
+        }
+        const candidates = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            return listGroupCandidates(client, userId, {
+                search: query.search,
+                groupId: query.group_id,
+            });
+        });
+        return { candidates };
     });
     app.post('/chat/direct', { preHandler: [app.authenticate] }, async (request, reply) => {
         const userId = authUserId(request);
@@ -443,6 +986,529 @@ export async function chatRoutes(app) {
         }
         return result;
     });
+    app.post('/chat/groups', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (authActiveRole(request) !== ACCOUNT_ROLE_DISTRIBUTOR ||
+            !canAccessDistributorFeatures(authAccountRole(request))) {
+            reply.code(403);
+            return { error: 'distributor_group_only' };
+        }
+        const parsed = createGroupSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const inviteeIds = Array.from(new Set(parsed.data.invitee_ids
+            .map((value) => String(value ?? '').trim())
+            .filter((value) => value && value !== userId)));
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const { validUsers, missingIds } = await ensureDistributorCandidates(client, inviteeIds);
+            if (missingIds.length > 0) {
+                return { error: 'group_candidate_not_found' };
+            }
+            if (validUsers.length !== inviteeIds.length) {
+                return { error: 'group_candidate_invalid_role' };
+            }
+            const threadRes = await client.query(`
+        INSERT INTO chat_threads (kind, title, created_by)
+        VALUES ($1, $2, $3)
+        RETURNING *
+        `, [CHAT_THREAD_KIND_GROUP_ROOM, parsed.data.name, userId]);
+            const thread = threadRes.rows[0];
+            const groupRes = await client.query(`
+        INSERT INTO chat_groups (
+          thread_id,
+          name,
+          description,
+          logo_url,
+          public_price_ugx,
+          created_by,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        RETURNING *
+        `, [
+                thread.id,
+                parsed.data.name,
+                parsed.data.description,
+                parsed.data.logo_url,
+                parsed.data.public_price_ugx,
+                userId,
+            ]);
+            const group = groupRes.rows[0];
+            await client.query(`
+        INSERT INTO chat_group_memberships (
+          group_id,
+          user_id,
+          role,
+          status,
+          invited_by,
+          joined_at,
+          responded_at,
+          updated_at
+        )
+        VALUES ($1, $2, 'ADMIN', 'ACTIVE', $2, NOW(), NOW(), NOW())
+        ON CONFLICT (group_id, user_id) DO UPDATE
+          SET role = 'ADMIN',
+              status = 'ACTIVE',
+              joined_at = COALESCE(chat_group_memberships.joined_at, NOW()),
+              responded_at = NOW(),
+              updated_at = NOW()
+        `, [group.id, userId]);
+            await client.query(`
+        INSERT INTO chat_thread_members (thread_id, user_id)
+        VALUES ($1, $2)
+        ON CONFLICT DO NOTHING
+        `, [thread.id, userId]);
+            for (const invitee of validUsers) {
+                await client.query(`
+          INSERT INTO chat_group_memberships (
+            group_id,
+            user_id,
+            role,
+            status,
+            invited_by,
+            updated_at
+          )
+          VALUES ($1, $2, 'MEMBER', 'INVITED', $3, NOW())
+          ON CONFLICT (group_id, user_id) DO UPDATE
+            SET role = CASE
+                  WHEN chat_group_memberships.status = 'ACTIVE'
+                    THEN chat_group_memberships.role
+                  ELSE 'MEMBER'
+                END,
+                status = CASE
+                  WHEN chat_group_memberships.status = 'ACTIVE'
+                    THEN 'ACTIVE'
+                  ELSE 'INVITED'
+                END,
+                invited_by = CASE
+                  WHEN chat_group_memberships.status = 'ACTIVE'
+                    THEN chat_group_memberships.invited_by
+                  ELSE EXCLUDED.invited_by
+                END,
+                responded_at = CASE
+                  WHEN chat_group_memberships.status = 'ACTIVE'
+                    THEN chat_group_memberships.responded_at
+                  ELSE NULL
+                END,
+                updated_at = NOW()
+          `, [group.id, invitee.id, userId]);
+            }
+            const inviteTargetIds = validUsers.map((row) => String(row.id));
+            await createUserNotifications(client, inviteTargetIds, {
+                category: 'BARGAIN_TABLE',
+                title: 'New Bargain Table pool invite',
+                body: `You have been invited to join ${String(group.name ?? 'a group pool')}.`,
+                actorId: userId,
+                targetType: 'CHAT_GROUP',
+                targetId: String(group.id),
+            });
+            return {
+                group: await buildGroupSnapshot(client, String(group.id), {
+                    currentUserId: userId,
+                    includeMembers: true,
+                }),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'group_candidate_not_found' ? 404 : 400);
+            return result;
+        }
+        return result;
+    });
+    app.patch('/chat/groups/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = updateGroupSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const membership = await loadGroupMembership(client, params.id, userId);
+            if (!membership || String(membership.status) !== 'ACTIVE') {
+                return { error: 'group_member_required' };
+            }
+            if (String(membership.role) !== 'ADMIN') {
+                return { error: 'group_admin_required' };
+            }
+            const updates = [];
+            const values = [params.id];
+            let valueIndex = values.length + 1;
+            if (typeof parsed.data.name === 'string') {
+                updates.push(`name = $${valueIndex++}`);
+                values.push(parsed.data.name);
+            }
+            if (typeof parsed.data.description === 'string') {
+                updates.push(`description = $${valueIndex++}`);
+                values.push(parsed.data.description);
+            }
+            if (typeof parsed.data.logo_url === 'string') {
+                updates.push(`logo_url = $${valueIndex++}`);
+                values.push(parsed.data.logo_url);
+            }
+            if (typeof parsed.data.public_price_ugx === 'number') {
+                updates.push(`public_price_ugx = $${valueIndex++}`);
+                values.push(parsed.data.public_price_ugx);
+            }
+            updates.push('updated_at = NOW()');
+            const updateRes = await client.query(`
+        UPDATE chat_groups
+        SET ${updates.join(', ')}
+        WHERE id = $1
+        RETURNING *
+        `, values);
+            const group = updateRes.rows[0];
+            if (!group) {
+                return { error: 'group_not_found' };
+            }
+            await client.query(`
+        UPDATE chat_threads
+        SET title = $2
+        WHERE id = $1
+        `, [group.thread_id, String(group.name ?? '').trim()]);
+            await client.query(`
+        UPDATE chat_threads thread
+        SET title = $2
+        FROM chat_group_deal_threads deal
+        WHERE deal.group_id = $1
+          AND deal.thread_id = thread.id
+        `, [params.id, String(group.name ?? '').trim()]);
+            return {
+                group: await buildGroupSnapshot(client, params.id, {
+                    currentUserId: userId,
+                    includeMembers: true,
+                }),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'group_not_found'
+                ? 404
+                : result.error === 'group_admin_required'
+                    ? 403
+                    : 400);
+            return result;
+        }
+        return result;
+    });
+    app.post('/chat/groups/:id/invites', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = inviteMembersSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const membership = await loadGroupMembership(client, params.id, userId);
+            if (!membership || String(membership.status) !== 'ACTIVE') {
+                return { error: 'group_member_required' };
+            }
+            if (String(membership.role) !== 'ADMIN') {
+                return { error: 'group_admin_required' };
+            }
+            const targetIds = Array.from(new Set(parsed.data.member_ids
+                .map((value) => String(value ?? '').trim())
+                .filter((value) => value && value !== userId)));
+            const { validUsers, missingIds } = await ensureDistributorCandidates(client, targetIds);
+            if (missingIds.length > 0) {
+                return { error: 'group_candidate_not_found' };
+            }
+            if (validUsers.length !== targetIds.length) {
+                return { error: 'group_candidate_invalid_role' };
+            }
+            const invitedIds = [];
+            for (const target of validUsers) {
+                const existing = await loadGroupMembership(client, params.id, String(target.id));
+                if (existing && ['ACTIVE', 'INVITED'].includes(String(existing.status))) {
+                    continue;
+                }
+                await client.query(`
+          INSERT INTO chat_group_memberships (
+            group_id,
+            user_id,
+            role,
+            status,
+            invited_by,
+            responded_at,
+            updated_at
+          )
+          VALUES ($1, $2, 'MEMBER', 'INVITED', $3, NULL, NOW())
+          ON CONFLICT (group_id, user_id) DO UPDATE
+            SET role = 'MEMBER',
+                status = 'INVITED',
+                invited_by = EXCLUDED.invited_by,
+                responded_at = NULL,
+                updated_at = NOW()
+          `, [params.id, target.id, userId]);
+                invitedIds.push(String(target.id));
+            }
+            if (invitedIds.length > 0) {
+                const group = await loadGroupById(client, params.id);
+                await createUserNotifications(client, invitedIds, {
+                    category: 'BARGAIN_TABLE',
+                    title: 'New Bargain Table pool invite',
+                    body: `You have been invited to join ${String(group?.name ?? 'a group pool')}.`,
+                    actorId: userId,
+                    targetType: 'CHAT_GROUP',
+                    targetId: params.id,
+                });
+            }
+            return {
+                invited_ids: invitedIds,
+                group: await buildGroupSnapshot(client, params.id, {
+                    currentUserId: userId,
+                    includeMembers: true,
+                }),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'group_candidate_not_found'
+                ? 404
+                : result.error === 'group_admin_required'
+                    ? 403
+                    : 400);
+            return result;
+        }
+        return result;
+    });
+    app.post('/chat/groups/:id/respond', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = respondInviteSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const membership = await loadGroupMembership(client, params.id, userId);
+            if (!membership || String(membership.status) !== 'INVITED') {
+                return { error: 'group_invite_not_found' };
+            }
+            if (parsed.data.action === 'DECLINE') {
+                await client.query(`
+          UPDATE chat_group_memberships
+          SET status = 'DECLINED',
+              responded_at = NOW(),
+              updated_at = NOW()
+          WHERE group_id = $1
+            AND user_id = $2
+          `, [params.id, userId]);
+                return {
+                    ok: true,
+                    status: 'DECLINED',
+                    group: await buildGroupSnapshot(client, params.id, {
+                        currentUserId: userId,
+                    }),
+                };
+            }
+            await client.query(`
+        UPDATE chat_group_memberships
+        SET status = 'ACTIVE',
+            joined_at = COALESCE(joined_at, NOW()),
+            responded_at = NOW(),
+            updated_at = NOW()
+        WHERE group_id = $1
+          AND user_id = $2
+        `, [params.id, userId]);
+            await client.query(`
+        INSERT INTO chat_thread_members (thread_id, user_id)
+        VALUES ($1, $2)
+        ON CONFLICT DO NOTHING
+        `, [membership.thread_id, userId]);
+            await client.query(`
+        INSERT INTO chat_thread_members (thread_id, user_id)
+        SELECT deal.thread_id, $2
+        FROM chat_group_deal_threads deal
+        WHERE deal.group_id = $1
+        ON CONFLICT DO NOTHING
+        `, [params.id, userId]);
+            const adminRes = await client.query(`
+        SELECT user_id
+        FROM chat_group_memberships
+        WHERE group_id = $1
+          AND status = 'ACTIVE'
+          AND role = 'ADMIN'
+          AND user_id <> $2
+        `, [params.id, userId]);
+            await createUserNotifications(client, adminRes.rows.map((row) => row.user_id), {
+                category: 'BARGAIN_TABLE',
+                title: 'Pool invite accepted',
+                body: 'A promoter accepted your Bargain Table group invite.',
+                actorId: userId,
+                targetType: 'CHAT_GROUP',
+                targetId: params.id,
+            });
+            return {
+                ok: true,
+                status: 'ACTIVE',
+                group: await buildGroupSnapshot(client, params.id, {
+                    currentUserId: userId,
+                    includeMembers: true,
+                }),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'group_invite_not_found' ? 404 : 400);
+            return result;
+        }
+        return result;
+    });
+    app.post('/chat/groups/:id/deal', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (authActiveRole(request) !== ACCOUNT_ROLE_ADVERTISER ||
+            !canAccessAdvertiserFeatures(authAccountRole(request))) {
+            reply.code(403);
+            return { error: 'advertiser_role_required' };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const deal = await ensureGroupDealThread(client, params.id, userId, userId);
+            if (!deal) {
+                return { error: 'group_not_found' };
+            }
+            if (deal.created) {
+                const activeMemberIdsRes = await client.query(`
+          SELECT user_id
+          FROM chat_group_memberships
+          WHERE group_id = $1
+            AND status = 'ACTIVE'
+          `, [params.id]);
+                await createUserNotifications(client, activeMemberIdsRes.rows.map((row) => row.user_id), {
+                    category: 'BARGAIN_TABLE',
+                    title: 'New advertiser deal room',
+                    body: `An advertiser opened a Bargain Table room with ${String(deal.group?.name ?? 'your pool')}.`,
+                    actorId: userId,
+                    targetType: 'CHAT_THREAD',
+                    targetId: deal.threadId,
+                });
+            }
+            return buildThreadDetail(client, deal.threadId, userId);
+        });
+        if (result?.error) {
+            reply.code(result.error === 'group_not_found' ? 404 : 400);
+            return result;
+        }
+        return result;
+    });
+    app.post('/chat/groups/:id/pricing', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = setGroupPriceSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const membership = await loadGroupMembership(client, params.id, userId);
+            if (!membership || String(membership.status) !== 'ACTIVE') {
+                return { error: 'group_member_required' };
+            }
+            if (String(membership.role) !== 'ADMIN') {
+                return { error: 'group_admin_required' };
+            }
+            const advertiserRes = await client.query(`
+        SELECT id, role
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+        `, [parsed.data.advertiser_id]);
+            const advertiser = advertiserRes.rows[0];
+            if (!advertiser) {
+                return { error: 'participant_not_found' };
+            }
+            if (!canAccessAdvertiserFeatures(advertiser.role)) {
+                return { error: 'invalid_group_pricing_target' };
+            }
+            if (parsed.data.override_price_ugx <= 0) {
+                await client.query(`
+          DELETE FROM chat_group_price_overrides
+          WHERE group_id = $1
+            AND advertiser_id = $2
+          `, [params.id, parsed.data.advertiser_id]);
+            }
+            else {
+                await client.query(`
+          INSERT INTO chat_group_price_overrides (
+            group_id,
+            advertiser_id,
+            override_price_ugx,
+            set_by,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, NOW())
+          ON CONFLICT (group_id, advertiser_id) DO UPDATE
+            SET override_price_ugx = EXCLUDED.override_price_ugx,
+                set_by = EXCLUDED.set_by,
+                updated_at = EXCLUDED.updated_at
+          `, [
+                    params.id,
+                    parsed.data.advertiser_id,
+                    parsed.data.override_price_ugx,
+                    userId,
+                ]);
+            }
+            await createUserNotifications(client, [parsed.data.advertiser_id], {
+                category: 'BARGAIN_TABLE',
+                title: 'Your group deal price changed',
+                body: parsed.data.override_price_ugx <= 0
+                    ? 'A group removed your private Bargain Table price override.'
+                    : `A group set your private Bargain Table price to UGX ${parsed.data.override_price_ugx}.`,
+                actorId: userId,
+                targetType: 'CHAT_GROUP',
+                targetId: params.id,
+            });
+            return {
+                advertiser_id: parsed.data.advertiser_id,
+                override_price_ugx: parsed.data.override_price_ugx,
+                group: await buildGroupSnapshot(client, params.id, {
+                    currentUserId: userId,
+                    pricingAdvertiserId: parsed.data.advertiser_id,
+                    includeMembers: true,
+                }),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'participant_not_found'
+                ? 404
+                : result.error === 'group_admin_required'
+                    ? 403
+                    : 400);
+            return result;
+        }
+        return result;
+    });
     app.get('/chat/threads/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const userId = authUserId(request);
         const params = request.params;
@@ -478,7 +1544,7 @@ export async function chatRoutes(app) {
             const messages = await listThreadMessages(client, params.id, {
                 since: cursor,
             });
-            if (messages.isNotEmpty) {
+            if (messages.length > 0) {
                 await markThreadRead(client, params.id, userId);
             }
             const latestRowRes = await client.query(`
@@ -495,9 +1561,9 @@ export async function chatRoutes(app) {
                 ...typingStates.map((state) => state.updated_at),
             ]);
             const hasChanges = cursor == null ||
-                messages.isNotEmpty ||
-                typingStates.isNotEmpty ||
-                latestCursor != (cursor ?? new Date(0).toISOString());
+                messages.length > 0 ||
+                typingStates.length > 0 ||
+                latestCursor !== (cursor ?? new Date(0).toISOString());
             return {
                 has_changes: hasChanges,
                 cursor: latestCursor,
@@ -547,19 +1613,11 @@ export async function chatRoutes(app) {
               updated_at = EXCLUDED.updated_at
         `, [params.id, userId]);
             await markThreadRead(client, params.id, userId);
-            const senderNameRes = await client.query(`
-        SELECT COALESCE(NULLIF(full_name, ''), NULLIF(email, ''), NULLIF(phone, ''), 'Participant') AS sender_name
-        FROM users
-        WHERE id = $1
-        LIMIT 1
-        `, [userId]);
-            const senderName = String(senderNameRes.rows[0]?.sender_name ?? 'New message').trim();
-            const threadSummary = (await listThreadSummaries(client, userId, {
-                threadId: params.id,
-            }))[0];
+            const sender = await loadUserSummary(client, userId);
+            const threadSummary = await buildThreadSummary(client, params.id, userId);
             const message = serializeMessage({
                 ...insertRes.rows[0],
-                sender_name: senderName,
+                display_name: sender?.display_name ?? 'Participant',
             });
             const memberIdsRes = await client.query(`
         SELECT user_id
@@ -570,7 +1628,7 @@ export async function chatRoutes(app) {
             await createUserNotifications(client, memberIdsRes.rows.map((row) => row.user_id), {
                 category: 'BARGAIN_TABLE',
                 title: 'New Bargain Table message',
-                body: `${senderName}: ${parsed.data.body}`,
+                body: `${sender?.display_name ?? 'Participant'}: ${parsed.data.body}`,
                 actorId: userId,
                 targetType: 'CHAT_THREAD',
                 targetId: params.id,
@@ -612,12 +1670,7 @@ export async function chatRoutes(app) {
           SET draft_text = EXCLUDED.draft_text,
               is_typing = EXCLUDED.is_typing,
               updated_at = EXCLUDED.updated_at
-        `, [
-                params.id,
-                userId,
-                isTyping ? draftText : '',
-                isTyping,
-            ]);
+        `, [params.id, userId, isTyping ? draftText : '', isTyping]);
             return {
                 ok: true,
                 typing_state: {
