@@ -45,6 +45,7 @@ type CampaignStatusSummary = {
   my_contract_status: string | null;
   proof_status: string;
   settlement_status: string;
+  funding_confirmed: boolean;
   is_available: boolean;
 };
 
@@ -232,6 +233,78 @@ function getEscrowCampaignId(campaign: any) {
       campaign?.id ??
       ''
   ).trim();
+}
+
+const confirmedEscrowFundingStatuses = [
+  'FUNDED',
+  'PARTIALLY_DISBURSED',
+  'COMPLETED',
+] as const;
+
+function isConfirmedEscrowFundingStatus(value: unknown) {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  return confirmedEscrowFundingStatuses.includes(
+    normalized as (typeof confirmedEscrowFundingStatuses)[number]
+  );
+}
+
+function buildConfirmedEscrowEvidenceSql(
+  campaignAlias: string,
+  escrowAlias: string
+) {
+  return `
+    ${escrowAlias}.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+    AND (
+      EXISTS (
+        SELECT 1
+        FROM pesapal_transactions pt
+        WHERE pt.id = ${escrowAlias}.pesapal_txn_id
+          AND pt.type = 'FUNDING'
+          AND pt.status = 'COMPLETED'
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM wallet_txns wt
+        WHERE wt.direction = 'DEBIT'
+          AND (
+            wt.reference =
+              'ESCROW_FUND:' ||
+              COALESCE(
+                ${campaignAlias}.bundle_root_campaign_id,
+                ${campaignAlias}.parent_campaign_id,
+                ${campaignAlias}.id
+              )::text
+            OR (
+              ${campaignAlias}.campaign_bundle_id IS NOT NULL
+              AND wt.reference =
+                'ESCROW_FUND:BUNDLE:' ||
+                ${campaignAlias}.campaign_bundle_id::text
+            )
+          )
+      )
+    )
+  `;
+}
+
+async function hasConfirmedEscrowFunding(client: any, campaignId: string) {
+  const fundingRes = await client.query(
+    `
+    SELECT EXISTS (
+      SELECT 1
+      FROM campaigns c
+      LEFT JOIN escrow_ledger e
+        ON e.campaign_id = COALESCE(
+          c.bundle_root_campaign_id,
+          c.parent_campaign_id,
+          c.id
+        )
+      WHERE c.id = $1
+        AND ${buildConfirmedEscrowEvidenceSql('c', 'e')}
+    ) AS funding_confirmed
+    `,
+    [campaignId]
+  );
+  return fundingRes.rows[0]?.funding_confirmed === true;
 }
 
 function normalizePlatformList(values: unknown[]) {
@@ -958,6 +1031,7 @@ async function buildCampaignStatusSummary(client: any, campaignId: string, userI
       my_contract_status: null,
       proof_status: 'NOT_SUBMITTED',
       settlement_status: 'AWAITING_FUNDING',
+      funding_confirmed: false,
       is_available: false,
     }
   );
@@ -979,6 +1053,7 @@ export async function buildCampaignStatusSummaries(
       SELECT
         c.id AS campaign_id,
         COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id,
+        c.campaign_bundle_id,
         c.status AS campaign_status,
         (c.parent_campaign_id IS NULL) AS is_root
       FROM campaigns c
@@ -1000,6 +1075,7 @@ export async function buildCampaignStatusSummaries(
       s.campaign_status,
       s.campaign_id,
       COALESCE(e.status, 'PENDING') AS escrow_status,
+      COALESCE(fc.funding_confirmed, FALSE) AS funding_confirmed,
       lc.status AS latest_contract_status,
       mc.status AS my_contract_status,
       lp.status AS latest_proof_status,
@@ -1037,6 +1113,10 @@ export async function buildCampaignStatusSummaries(
       ORDER BY p.created_at DESC
       LIMIT 1
     ) lp ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT TRUE AS funding_confirmed
+      WHERE ${buildConfirmedEscrowEvidenceSql('s', 'e')}
+    ) fc ON TRUE
     `,
     [campaignIds, userId ?? null]
   );
@@ -1045,6 +1125,7 @@ export async function buildCampaignStatusSummaries(
   for (const row of statusRes.rows) {
     const campaignStatus = String(row.campaign_status ?? 'ACTIVE');
     const escrowStatus = String(row.escrow_status ?? 'PENDING');
+    const fundingConfirmed = row.funding_confirmed === true;
     const latestContractStatus = String(row.latest_contract_status ?? 'UNCLAIMED');
     const myContractStatus =
       row.my_contract_status == null ? null : String(row.my_contract_status);
@@ -1068,9 +1149,11 @@ export async function buildCampaignStatusSummaries(
         my_contract_status: myContractStatus,
         proof_status: proofStatus,
         settlement_status: settlementStatus,
+        funding_confirmed: fundingConfirmed,
         is_available:
           campaignStatus === 'ACTIVE' &&
-          escrowStatus !== 'PENDING' &&
+          fundingConfirmed &&
+          isConfirmedEscrowFundingStatus(escrowStatus) &&
           latestContractStatus === 'UNCLAIMED',
       } satisfies CampaignStatusSummary
     );
@@ -1112,7 +1195,11 @@ async function getContractCompletionReadiness(
     [contract.escrow_campaign_id]
   );
   const escrow = escrowRes.rows[0];
-  if (!escrow || !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(String(escrow.status))) {
+  if (
+    !escrow ||
+    !isConfirmedEscrowFundingStatus(escrow.status) ||
+    !(await hasConfirmedEscrowFunding(client, contract.campaign_id))
+  ) {
     return { error: 'campaign_not_funded' } as const;
   }
 
@@ -1363,7 +1450,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           FROM campaigns c2
           LEFT JOIN escrow_ledger e
             ON e.campaign_id = COALESCE(c2.bundle_root_campaign_id, c2.parent_campaign_id, c2.id)
-          WHERE e.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+          WHERE (${buildConfirmedEscrowEvidenceSql('c2', 'e')})
              OR c2.advertiser_id = $${idx}
         )
         ${where ? `AND ${where.replace(/^WHERE /, '')}` : ''}
@@ -1386,6 +1473,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           my_contract_status: null,
           proof_status: 'NOT_SUBMITTED',
           settlement_status: 'AWAITING_FUNDING',
+          funding_confirmed: false,
           is_available: false,
         },
       }));
@@ -3049,13 +3137,11 @@ export async function campaignRoutes(app: FastifyInstance) {
         return { error: 'forbidden' } as any;
       }
 
-      const escrowOwnerId = getEscrowCampaignId(campaign);
-      const escrowRes = await client.query(
-        'SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1',
-        [escrowOwnerId]
+      const fundingConfirmed = await hasConfirmedEscrowFunding(
+        client,
+        body.campaign_id
       );
-      const escrow = escrowRes.rows[0];
-      if (!escrow || (escrow.status !== 'FUNDED' && escrow.status !== 'PARTIALLY_DISBURSED')) {
+      if (!fundingConfirmed) {
         return { error: 'campaign_not_funded' } as any;
       }
 
@@ -3277,9 +3363,11 @@ export async function campaignRoutes(app: FastifyInstance) {
                   const escrow = escrowRes.rows[0];
                   if (
                     !escrow ||
-                    !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(
-                      String(escrow.status)
-                    )
+                    !isConfirmedEscrowFundingStatus(escrow.status) ||
+                    !(await hasConfirmedEscrowFunding(
+                      client,
+                      accessContract.campaign_id
+                    ))
                   ) {
                     return { error: 'campaign_not_funded' } as const;
                   }
