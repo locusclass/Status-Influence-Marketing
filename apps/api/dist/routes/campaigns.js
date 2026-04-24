@@ -724,7 +724,10 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
     WITH
     scope AS (
       SELECT
+        c.id,
         c.id AS campaign_id,
+        c.parent_campaign_id,
+        c.bundle_root_campaign_id,
         COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id,
         c.campaign_bundle_id,
         c.status AS campaign_status,
