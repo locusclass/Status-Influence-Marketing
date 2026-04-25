@@ -39,22 +39,13 @@ function readString(value) {
     return normalized.length > 0 ? normalized : null;
 }
 export function normalizeCampaignPlatform(value) {
-    const platform = String(value ?? '').trim().toUpperCase();
-    if (platform === 'TIKTOK' || platform === 'X') {
-        return platform;
-    }
     return 'WHATSAPP_STATUS';
 }
 export function isCreatorPlatform(value) {
-    return normalizeCampaignPlatform(value) !== 'WHATSAPP_STATUS';
+    return false;
 }
 export function resolveDeliveryModel(platform, requested) {
-    if (normalizeCampaignPlatform(platform) === 'TIKTOK') {
-        return 'PROBABILISTIC';
-    }
-    return String(requested ?? '').trim().toUpperCase() === 'PROBABILISTIC'
-        ? 'PROBABILISTIC'
-        : 'DETERMINISTIC';
+    return 'DETERMINISTIC';
 }
 export function getPublicContractUnitRate(mediaType) {
     const normalized = String(mediaType ?? '').trim().toUpperCase();
@@ -118,12 +109,6 @@ export function getRequiredLiveHours(campaign) {
     return Math.max(1, Math.round(readNumber(campaign?.terms_keep_hours) ?? 12));
 }
 export function getPrimaryMetricTarget(campaign) {
-    const platform = normalizeCampaignPlatform(campaign?.platform);
-    if (platform === 'X') {
-        return Math.max(0, Math.round(readNumber(campaign?.impression_target) ??
-            readNumber(campaign?.terms_min_views) ??
-            0));
-    }
     return Math.max(0, Math.round(readNumber(campaign?.terms_min_views) ??
         readNumber(campaign?.impression_target) ??
         0));
@@ -155,14 +140,8 @@ export function deriveEngagementRate(snapshot) {
     return Number(((((likes + comments + shares) / denominator) * 100) || 0).toFixed(4));
 }
 export function getSubmissionPrimaryMetric(campaign, meta, fallbackMetric) {
-    const platform = normalizeCampaignPlatform(campaign?.platform);
     const metrics = extractMetricsSnapshot(meta);
     const fallback = Math.max(0, Math.round(readNumber(fallbackMetric) ?? 0));
-    if (platform === 'X') {
-        return Math.max(0, Math.round(readNumber(metrics.impressions) ??
-            readNumber(metrics.views) ??
-            fallback));
-    }
     return Math.max(0, Math.round(readNumber(metrics.views) ?? readNumber(metrics.impressions) ?? fallback));
 }
 export function getSubmissionPostId(meta) {

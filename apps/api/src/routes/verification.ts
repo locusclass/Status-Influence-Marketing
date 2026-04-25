@@ -32,24 +32,6 @@ const platformInstructionPool: Record<string, string[]> = {
     'Switch to another status briefly and return.',
     'Long-press the media preview for 2 seconds.',
   ],
-  TIKTOK: [
-    'Open the public video post and keep the creator profile visible.',
-    'Open the metrics area and hold steady for 3 seconds.',
-    'Refresh the page once, then return to the metrics view.',
-    'Open the comments sheet briefly, then close it.',
-    'Show the share sheet for 2 seconds and dismiss it.',
-    'Scroll the caption area down and back up once.',
-    'Keep the post URL and post ID visible before returning to the video.',
-  ],
-  X: [
-    'Open the live post and keep the full tweet in frame.',
-    'Open the analytics or metrics row and hold steady for 3 seconds.',
-    'Refresh the post once, then return to the metrics view.',
-    'Open the repost or quote detail briefly, then close it.',
-    'Scroll through the thread or replies down and back up once.',
-    'Hold the timestamp and account handle visible for 2 seconds.',
-    'Return to the main post and keep impressions visible before the next step.',
-  ],
 };
 
 function shuffle<T>(items: T[]): T[] {

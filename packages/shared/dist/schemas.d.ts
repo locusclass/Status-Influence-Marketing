@@ -1,19 +1,19 @@
 import { z } from 'zod';
-export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
+export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS"]>;
 export declare const MediaTypeSchema: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
 export declare const DeliveryModelSchema: z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>;
 export declare const CreateVerificationSessionSchema: z.ZodObject<{
     user_id: z.ZodString;
     campaign_id: z.ZodString;
-    platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
+    platform: z.ZodEnum<["WHATSAPP_STATUS"]>;
 }, "strip", z.ZodTypeAny, {
     user_id: string;
     campaign_id: string;
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    platform: "WHATSAPP_STATUS";
 }, {
     user_id: string;
     campaign_id: string;
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    platform: "WHATSAPP_STATUS";
 }>;
 export declare const SubmitProofSchema: z.ZodObject<{
     session_id: z.ZodString;
@@ -33,7 +33,7 @@ export declare const SubmitProofSchema: z.ZodObject<{
 }>;
 export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     title: z.ZodOptional<z.ZodString>;
-    platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
+    platform: z.ZodEnum<["WHATSAPP_STATUS"]>;
     delivery_model: z.ZodOptional<z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>>;
     payout_amount: z.ZodNumber;
     budget_total: z.ZodNumber;
@@ -54,7 +54,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
     terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
 }, "strip", z.ZodTypeAny, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    platform: "WHATSAPP_STATUS";
     payout_amount: number;
     budget_total: number;
     start_date: string;
@@ -76,7 +76,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    platform: "WHATSAPP_STATUS";
     payout_amount: number;
     budget_total: number;
     start_date: string;
@@ -98,7 +98,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }>, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    platform: "WHATSAPP_STATUS";
     payout_amount: number;
     budget_total: number;
     start_date: string;
@@ -120,7 +120,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
 }, {
-    platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+    platform: "WHATSAPP_STATUS";
     payout_amount: number;
     budget_total: number;
     start_date: string;
@@ -144,11 +144,11 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
 }>;
 export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title: z.ZodOptional<z.ZodString>;
-    platform: z.ZodOptional<z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>>;
-    platforms: z.ZodOptional<z.ZodArray<z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>, "many">>;
+    platform: z.ZodOptional<z.ZodEnum<["WHATSAPP_STATUS"]>>;
+    platforms: z.ZodOptional<z.ZodArray<z.ZodEnum<["WHATSAPP_STATUS"]>, "many">>;
     bundle_items: z.ZodOptional<z.ZodArray<z.ZodEffects<z.ZodObject<{
         title: z.ZodOptional<z.ZodString>;
-        platform: z.ZodEnum<["WHATSAPP_STATUS", "TIKTOK", "X"]>;
+        platform: z.ZodEnum<["WHATSAPP_STATUS"]>;
         delivery_model: z.ZodOptional<z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>>;
         payout_amount: z.ZodNumber;
         budget_total: z.ZodNumber;
@@ -169,7 +169,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
         terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
     }, "strip", z.ZodTypeAny, {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -191,7 +191,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
     }, {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -213,7 +213,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
     }>, {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -235,7 +235,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
     }, {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -278,7 +278,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
 }, "strip", z.ZodTypeAny, {
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
-    platform?: "WHATSAPP_STATUS" | "TIKTOK" | "X" | undefined;
+    platform?: "WHATSAPP_STATUS" | undefined;
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
@@ -298,9 +298,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
-    platforms?: ("WHATSAPP_STATUS" | "TIKTOK" | "X")[] | undefined;
+    platforms?: "WHATSAPP_STATUS"[] | undefined;
     bundle_items?: {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -324,7 +324,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
 }, {
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
-    platform?: "WHATSAPP_STATUS" | "TIKTOK" | "X" | undefined;
+    platform?: "WHATSAPP_STATUS" | undefined;
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
@@ -344,9 +344,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
-    platforms?: ("WHATSAPP_STATUS" | "TIKTOK" | "X")[] | undefined;
+    platforms?: "WHATSAPP_STATUS"[] | undefined;
     bundle_items?: {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -370,7 +370,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
 }>, {
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
-    platform?: "WHATSAPP_STATUS" | "TIKTOK" | "X" | undefined;
+    platform?: "WHATSAPP_STATUS" | undefined;
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
@@ -390,9 +390,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
-    platforms?: ("WHATSAPP_STATUS" | "TIKTOK" | "X")[] | undefined;
+    platforms?: "WHATSAPP_STATUS"[] | undefined;
     bundle_items?: {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;
@@ -416,7 +416,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
 }, {
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
-    platform?: "WHATSAPP_STATUS" | "TIKTOK" | "X" | undefined;
+    platform?: "WHATSAPP_STATUS" | undefined;
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
@@ -436,9 +436,9 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
-    platforms?: ("WHATSAPP_STATUS" | "TIKTOK" | "X")[] | undefined;
+    platforms?: "WHATSAPP_STATUS"[] | undefined;
     bundle_items?: {
-        platform: "WHATSAPP_STATUS" | "TIKTOK" | "X";
+        platform: "WHATSAPP_STATUS";
         payout_amount: number;
         budget_total: number;
         start_date: string;

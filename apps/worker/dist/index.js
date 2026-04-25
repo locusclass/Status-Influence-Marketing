@@ -7,7 +7,7 @@ import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-import { generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getMinEngagementRate, getPrimaryMetricTarget, getPublicContractUnitRate, getRequiredLiveHours, getSubmissionActionType, getSubmissionLiveHours, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, isSubmissionPublic, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
+import { generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
@@ -819,11 +819,11 @@ function buildPlatformValidationSummary(campaign, proof, result) {
     const primaryMetric = getSubmissionPrimaryMetric(campaign, proof?.meta, result?.observed_views);
     const primaryMetricTarget = Math.max(0, getPrimaryMetricTarget(campaign));
     const engagementRate = deriveEngagementRate(metricsSnapshot);
-    const engagementThreshold = platform === 'TIKTOK' ? Math.max(0, getMinEngagementRate(campaign)) : 0;
-    const liveHours = platform === 'X' ? getSubmissionLiveHours(proof?.meta) : 0;
-    const liveHoursTarget = platform === 'X' ? getRequiredLiveHours(campaign) : 0;
+    const engagementThreshold = 0;
+    const liveHours = 0;
+    const liveHoursTarget = 0;
     const postExists = doesSubmissionExist(proof?.meta);
-    const postPublic = platform === 'WHATSAPP_STATUS' ? true : isSubmissionPublic(proof?.meta);
+    const postPublic = true;
     const primaryMetricRatio = primaryMetricTarget > 0 ? primaryMetric / primaryMetricTarget : 1;
     const engagementRatio = engagementThreshold > 0 ? engagementRate / engagementThreshold : 1;
     const liveRatio = liveHoursTarget > 0 ? liveHours / liveHoursTarget : 1;
@@ -847,10 +847,7 @@ function buildPlatformValidationSummary(campaign, proof, result) {
         post_id: getSubmissionPostId(proof?.meta),
         post_url: getSubmissionPostUrl(proof?.meta),
         video_url: getSubmissionVideoUrl(proof?.meta),
-        action_type: getSubmissionActionType(proof?.meta) ??
-            (typeof campaign?.execution_meta?.x_action_type === 'string'
-                ? campaign.execution_meta.x_action_type
-                : null),
+        action_type: getSubmissionActionType(proof?.meta),
         metrics_snapshot: metricsSnapshot,
         passed,
         should_retry_allocation: isCreatorPlatform(platform) &&
@@ -864,14 +861,10 @@ function buildPlatformReviewReasons(campaign, validation) {
     if (!validation.post_exists) {
         reasons.push({
             code: 'CONTENT_NOT_FOUND',
-            message: validation.platform === 'TIKTOK'
-                ? 'Submitted video is no longer available.'
-                : validation.platform === 'X'
-                    ? 'Submitted post is no longer available.'
-                    : 'Submitted content is no longer available.',
+            message: 'Submitted content is no longer available.',
         });
     }
-    if (validation.platform !== 'WHATSAPP_STATUS' && !validation.post_public) {
+    if (!validation.post_public) {
         reasons.push({
             code: 'CONTENT_NOT_PUBLIC',
             message: 'Submitted content must remain public for escrow release.',
@@ -881,33 +874,7 @@ function buildPlatformReviewReasons(campaign, validation) {
         validation.primary_metric < validation.primary_metric_target) {
         reasons.push({
             code: 'PRIMARY_METRIC_BELOW_TARGET',
-            message: validation.platform === 'X'
-                ? `Post impressions are below target (${validation.primary_metric}/${validation.primary_metric_target}).`
-                : `Content views are below target (${validation.primary_metric}/${validation.primary_metric_target}).`,
-        });
-    }
-    if (validation.platform === 'TIKTOK' &&
-        validation.engagement_threshold > 0 &&
-        validation.engagement_rate < validation.engagement_threshold) {
-        reasons.push({
-            code: 'ENGAGEMENT_BELOW_THRESHOLD',
-            message: `Engagement rate is below threshold (${validation.engagement_rate.toFixed(2)}%/${validation.engagement_threshold.toFixed(2)}%).`,
-        });
-    }
-    if (validation.platform === 'X' &&
-        validation.live_hours_target > 0 &&
-        validation.live_hours < validation.live_hours_target) {
-        reasons.push({
-            code: 'LIVE_DURATION_BELOW_TARGET',
-            message: `Post live duration is below target (${validation.live_hours}/${validation.live_hours_target} hours).`,
-        });
-    }
-    if (validation.platform === 'X' &&
-        getCampaignBurstMode(campaign) &&
-        !validation.action_type) {
-        reasons.push({
-            code: 'X_ACTION_TYPE_MISSING',
-            message: 'X burst campaigns require an execution action type on the proof submission.',
+            message: `Content views are below target (${validation.primary_metric}/${validation.primary_metric_target}).`,
         });
     }
     return reasons;
@@ -1188,11 +1155,9 @@ async function updateCreatorPerformance(client, campaign, proof, finalDecision, 
     const reliabilityScore = finalDecision === 'VERIFIED'
         ? 100
         : Math.max(10, Math.round(validation.partial_payout_ratio * 100));
-    const engagementBaseline = validation.platform === 'TIKTOK' && validation.engagement_threshold > 0
-        ? clampUnitInterval(validation.engagement_rate / validation.engagement_threshold) * 100
-        : validation.engagement_rate > 0
-            ? Math.min(100, validation.engagement_rate)
-            : 50;
+    const engagementBaseline = validation.engagement_rate > 0
+        ? Math.min(100, validation.engagement_rate)
+        : 50;
     const nextCreatorScore = Math.round((performanceScore * 0.45) +
         (reliabilityScore * 0.35) +
         (engagementBaseline * 0.20));

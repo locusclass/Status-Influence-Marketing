@@ -1,5 +1,5 @@
 import { z } from 'zod';
-export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS', 'TIKTOK', 'X']);
+export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS']);
 export const MediaTypeSchema = z.enum(['IMAGE', 'VIDEO', 'TEXT']);
 export const DeliveryModelSchema = z.enum(['DETERMINISTIC', 'PROBABILISTIC']);
 export const CreateVerificationSessionSchema = z.object({
