@@ -39,14 +39,59 @@ function resolveUploadDir() {
   return './uploads';
 }
 
-const flutterwaveConfig = {
-  baseUrl: stripWrappingQuotes(process.env.FLUTTERWAVE_BASE_URL ?? ''),
-  secretKey: stripWrappingQuotes(process.env.FLUTTERWAVE_SECRET_KEY ?? ''),
-  clientId: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_ID ?? ''),
-  clientSecret: stripWrappingQuotes(process.env.FLUTTERWAVE_CLIENT_SECRET ?? ''),
-  encryptionKey: stripWrappingQuotes(process.env.FLUTTERWAVE_ENCRYPTION_KEY ?? ''),
-  publicKey: stripWrappingQuotes(process.env.FLUTTERWAVE_PUBLIC_KEY ?? ''),
-  webhookSecretHash: stripWrappingQuotes(process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ?? ''),
+function normalizeYoTaskUrl(configuredValue: string, fallback: string) {
+  const configured = configuredValue.trim().replace(/\/+$/, '');
+  if (!configured) {
+    return fallback;
+  }
+  if (/task\.php$/i.test(configured)) {
+    return configured;
+  }
+  if (/\/ybs$/i.test(configured)) {
+    return `${configured}/task.php`;
+  }
+  return `${configured}/ybs/task.php`;
+}
+
+const yoConfig = {
+  baseUrl: stripWrappingQuotes(
+    process.env.YO_API_URL ??
+      process.env.YO_BASE_URL ??
+      process.env.FLUTTERWAVE_BASE_URL ??
+      'https://paymentsapi1.yo.co.ug/ybs/task.php'
+  ),
+  fallbackBaseUrl: stripWrappingQuotes(
+    process.env.YO_API_URL_FALLBACK ??
+      process.env.YO_FALLBACK_BASE_URL ??
+      'https://paymentsapi2.yo.co.ug/ybs/task.php'
+  ),
+  apiUsername: stripWrappingQuotes(
+    process.env.YO_API_USERNAME ??
+      process.env.YO_USERNAME ??
+      process.env.FLUTTERWAVE_CLIENT_ID ??
+      ''
+  ),
+  apiPassword: stripWrappingQuotes(
+    process.env.YO_API_PASSWORD ??
+      process.env.YO_PASSWORD ??
+      process.env.FLUTTERWAVE_CLIENT_SECRET ??
+      ''
+  ),
+  webhookSecretHash: stripWrappingQuotes(
+    process.env.YO_WEBHOOK_SECRET_HASH ??
+      process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ??
+      ''
+  ),
+};
+
+const legacyFlutterwaveConfig = {
+  baseUrl: yoConfig.baseUrl,
+  secretKey: '',
+  clientId: yoConfig.apiUsername,
+  clientSecret: yoConfig.apiPassword,
+  encryptionKey: '',
+  publicKey: '',
+  webhookSecretHash: yoConfig.webhookSecretHash,
 };
 
 export const config = {
@@ -58,20 +103,27 @@ export const config = {
   uploadDir: resolveUploadDir(),
   uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
   fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
-  flutterwave: flutterwaveConfig,
-  pesapal: flutterwaveConfig,
+  yo: yoConfig,
+  flutterwave: legacyFlutterwaveConfig,
+  pesapal: yoConfig,
   adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? '',
   whatsappVerification: {
-    mode: process.env.WHATSAPP_VERIFICATION_MODE ?? (process.env.NODE_ENV === 'test' ? 'mock' : 'baileys'),
-    baileysAuthDir: process.env.WHATSAPP_BAILEYS_AUTH_DIR ?? '.baileys_auth_state',
-    mockAllowedPrefixes: process.env.WHATSAPP_MOCK_ALLOWED_PREFIXES ?? '+',
+    mode:
+      process.env.WHATSAPP_VERIFICATION_MODE ??
+      (process.env.NODE_ENV === 'test' ? 'mock' : 'baileys'),
+    baileysAuthDir:
+      process.env.WHATSAPP_BAILEYS_AUTH_DIR ?? '.baileys_auth_state',
+    mockAllowedPrefixes:
+      process.env.WHATSAPP_MOCK_ALLOWED_PREFIXES ?? '+',
   },
   firebase: {
     projectId: process.env.FIREBASE_PROJECT_ID ?? '',
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL ?? '',
-    privateKey: stripWrappingQuotes(process.env.FIREBASE_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),
+    privateKey: stripWrappingQuotes(
+      process.env.FIREBASE_PRIVATE_KEY ?? ''
+    ).replace(/\\n/g, '\n'),
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET ?? '',
-  }
+  },
 };
 
 export function getStartupConfigIssues() {
@@ -89,20 +141,11 @@ export function getStartupConfigIssues() {
     issues.push('JWT_SECRET is missing or using the development default');
   }
 
-  if (config.flutterwave.secretKey && !config.flutterwave.secretKey.trim()) {
-    issues.push('FLUTTERWAVE_SECRET_KEY is empty');
+  if (!config.yo.apiUsername.trim()) {
+    issues.push('YO_API_USERNAME is missing');
   }
-  if (config.flutterwave.clientId && !config.flutterwave.clientId.trim()) {
-    issues.push('FLUTTERWAVE_CLIENT_ID is empty');
-  }
-  if (config.flutterwave.clientSecret && !config.flutterwave.clientSecret.trim()) {
-    issues.push('FLUTTERWAVE_CLIENT_SECRET is empty');
-  }
-  if (
-    hasFlutterwaveClientCredentials() &&
-    !hasFlutterwaveEncryptionKey()
-  ) {
-    issues.push('FLUTTERWAVE_ENCRYPTION_KEY is missing; card payments are disabled');
+  if (!config.yo.apiPassword.trim()) {
+    issues.push('YO_API_PASSWORD is missing');
   }
 
   if (
@@ -140,57 +183,40 @@ export function isFatalStartupIssue(issue: string) {
   );
 }
 
-export function hasValidFlutterwaveKeys() {
-  return hasFlutterwaveSecretKey() || hasFlutterwaveClientCredentials();
-}
-
-export function hasFlutterwaveSecretKey() {
-  return config.flutterwave.secretKey.trim().length > 0;
-}
-
-export function hasFlutterwaveClientCredentials() {
+export function hasYoCredentials() {
   return (
-    config.flutterwave.clientId.trim().length > 0 &&
-    config.flutterwave.clientSecret.trim().length > 0
+    config.yo.apiUsername.trim().length > 0 &&
+    config.yo.apiPassword.trim().length > 0
   );
 }
 
+export function hasValidYoKeys() {
+  return hasYoCredentials();
+}
+
+export function resolveYoBaseUrl() {
+  return normalizeYoTaskUrl(
+    config.yo.baseUrl,
+    'https://paymentsapi1.yo.co.ug/ybs/task.php'
+  );
+}
+
+export function resolveYoFallbackBaseUrl() {
+  return normalizeYoTaskUrl(
+    config.yo.fallbackBaseUrl,
+    'https://paymentsapi2.yo.co.ug/ybs/task.php'
+  );
+}
+
+export const hasValidFlutterwaveKeys = hasValidYoKeys;
+export const hasFlutterwaveClientCredentials = hasYoCredentials;
+
+export function hasFlutterwaveSecretKey() {
+  return false;
+}
+
 export function hasFlutterwaveEncryptionKey() {
-  return config.flutterwave.encryptionKey.trim().length > 0;
+  return false;
 }
 
-export function resolveFlutterwaveBaseUrl() {
-  const configured = config.flutterwave.baseUrl.trim().replace(/\/+$/, '');
-  const hasSecret = hasFlutterwaveSecretKey();
-  const hasClientCreds = hasFlutterwaveClientCredentials();
-
-  if (configured) {
-    if (hasSecret) {
-      if (/developersandbox-api\.flutterwave\.com/i.test(configured)) {
-        return 'https://ravesandboxapi.flutterwave.com/v3';
-      }
-      if (/^https:\/\/ravesandboxapi\.flutterwave\.com$/i.test(configured)) {
-        return 'https://ravesandboxapi.flutterwave.com/v3';
-      }
-      if (/^https:\/\/api\.flutterwave\.com$/i.test(configured)) {
-        return 'https://api.flutterwave.com/v3';
-      }
-    }
-
-    if (hasClientCreds) {
-      if (/ravesandboxapi\.flutterwave\.com/i.test(configured)) {
-        return 'https://developersandbox-api.flutterwave.com';
-      }
-      if (/api\.flutterwave\.com\/v3$/i.test(configured)) {
-        return 'https://f4bexperience.flutterwave.com';
-      }
-    }
-
-    return configured;
-  }
-
-  return hasClientCreds
-    ? 'https://developersandbox-api.flutterwave.com'
-    : 'https://api.flutterwave.com/v3';
-}
-
+export const resolveFlutterwaveBaseUrl = resolveYoBaseUrl;

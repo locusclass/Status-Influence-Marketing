@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { verifyWebhookSignature } from '../src/services/flutterwave.js';
 import { resolveFlutterwaveCheckoutProfile } from '../src/services/flutterwaveCheckoutProfile.js';
 
-describe('Flutterwave payment configuration', () => {
+describe('YO Uganda payment configuration', () => {
   it('validates signature', () => {
     const body = JSON.stringify({ hello: 'world' });
     const secret = 'test-secret';
@@ -12,47 +12,32 @@ describe('Flutterwave payment configuration', () => {
     expect(verifyWebhookSignature(body, signature, secret)).toBe(true);
   });
 
-  it('maps Uganda checkout to UGX with Airtel and MTN mobile money', () => {
+  it('maps Uganda checkout to UGX mobile money only', () => {
     expect(resolveFlutterwaveCheckoutProfile('UG')).toEqual({
       country: 'UG',
       currency: 'UGX',
       phoneCountryCode: '256',
-      paymentOptions: 'card,mobilemoneyuganda',
-      paymentOptionsList: ['card', 'mobilemoneyuganda'],
-      supportedPaymentMethods: ['CARD', 'MOBILE_MONEY'],
+      paymentOptions: 'mobilemoneyuganda',
+      paymentOptionsList: ['mobilemoneyuganda'],
+      supportedPaymentMethods: ['MOBILE_MONEY'],
       mobileMoneyNetworks: ['MTN', 'AIRTEL'],
       availabilityNotes: [
-        'Flutterwave v4 in Uganda supports cards and mobile money.',
+        'YO Uganda supports MTN and Airtel mobile money collections in UGX.',
       ],
     });
   });
 
-  it('maps Kenya checkout to KES with M-Pesa mobile money', () => {
+  it('defaults every other country to the Uganda mobile money profile', () => {
     expect(resolveFlutterwaveCheckoutProfile('KE')).toEqual({
-      country: 'KE',
-      currency: 'KES',
-      phoneCountryCode: '254',
-      paymentOptions: 'card,mpesa',
-      paymentOptionsList: ['card', 'mpesa'],
-      supportedPaymentMethods: ['CARD', 'MOBILE_MONEY'],
-      mobileMoneyNetworks: ['M-PESA'],
+      country: 'UG',
+      currency: 'UGX',
+      phoneCountryCode: '256',
+      paymentOptions: 'mobilemoneyuganda',
+      paymentOptionsList: ['mobilemoneyuganda'],
+      supportedPaymentMethods: ['MOBILE_MONEY'],
+      mobileMoneyNetworks: ['MTN', 'AIRTEL'],
       availabilityNotes: [
-        'Flutterwave v4 in Kenya supports cards and M-Pesa.',
-      ],
-    });
-  });
-
-  it('maps every other country to USD card only', () => {
-    expect(resolveFlutterwaveCheckoutProfile('NG')).toEqual({
-      country: 'NG',
-      currency: 'USD',
-      phoneCountryCode: null,
-      paymentOptions: 'card',
-      paymentOptionsList: ['card'],
-      supportedPaymentMethods: ['CARD'],
-      mobileMoneyNetworks: [],
-      availabilityNotes: [
-        'Flutterwave v4 bank transfer is documented for NGN and GHS virtual accounts only, so USD checkout currently supports cards only.',
+        'YO Uganda currently routes collections through Uganda mobile money in UGX. Use an MTN or Airtel Uganda number to complete payment.',
       ],
     });
   });

@@ -13,7 +13,13 @@ const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
 const CREATOR_DEFAULT_TARGET_METRIC = 100;
 const ACTIVE_CAMPAIGN_PLATFORM = 'WHATSAPP_STATUS';
-const TEMPORARY_PLATFORM_INCORPORATION_DETAIL = 'TikTok and X campaigns are being incorporated. WhatsApp Status is currently the only supported campaign platform.';
+const PUBLIC_CONTRACT_ACTIVE_DISTRIBUTOR_THRESHOLD = 5000;
+const PUBLIC_CONTRACT_ELIGIBLE_ROLES = [
+    'ADMIN',
+    'DISTRIBUTOR',
+    'DUAL_USER',
+];
+const TEMPORARY_PLATFORM_INCORPORATION_DETAIL = 'Support for TikTok and X campaigns is coming soon. WhatsApp Status is the only supported campaign platform right now.';
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
     .map((platform) => `'${platform}'`)
     .join(', ')}))`;
@@ -199,6 +205,27 @@ function normalizePlatformList(values) {
 }
 function hasOnlyActiveCampaignPlatforms(platforms) {
     return platforms.every((platform) => platform === ACTIVE_CAMPAIGN_PLATFORM);
+}
+function buildPublicContractEligibilityDetail(activeDistributorCount) {
+    if (activeDistributorCount >= PUBLIC_CONTRACT_ACTIVE_DISTRIBUTOR_THRESHOLD) {
+        return `Backend confirmed ${activeDistributorCount} active distributors. Public contracts are available.`;
+    }
+    return `Public contracts unlock once the backend confirms at least ${PUBLIC_CONTRACT_ACTIVE_DISTRIBUTOR_THRESHOLD} active distributors. Current confirmed active distributors: ${activeDistributorCount}.`;
+}
+async function getPublicContractEligibility(client) {
+    const distributorCountRes = await client.query(`
+    SELECT COUNT(*)::int AS count
+    FROM users
+    WHERE status = 'ACTIVE'
+      AND role = ANY($1::text[])
+    `, [PUBLIC_CONTRACT_ELIGIBLE_ROLES]);
+    const activeDistributorCount = Math.max(0, Number(distributorCountRes.rows[0]?.count ?? 0));
+    return {
+        eligible: activeDistributorCount >= PUBLIC_CONTRACT_ACTIVE_DISTRIBUTOR_THRESHOLD,
+        active_distributors: activeDistributorCount,
+        required_active_distributors: PUBLIC_CONTRACT_ACTIVE_DISTRIBUTOR_THRESHOLD,
+        detail: buildPublicContractEligibilityDetail(activeDistributorCount),
+    };
 }
 function resolveRequestedPlatforms(body) {
     const bundleItemPlatforms = Array.isArray(body?.bundle_items)
@@ -972,6 +999,22 @@ export async function campaignRoutes(app) {
         }
         return { distributor };
     });
+    app.get('/campaigns/public-contract-eligibility', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access'
+            ? '00000000-0000-0000-0000-000000000000'
+            : authSub;
+        const role = request.user?.role;
+        if (!authUser) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (!canAccessAdvertiserFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        return withTransaction(async (client) => getPublicContractEligibility(client));
+    });
     app.get('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
         const authSub = request.user?.sub;
         const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
@@ -1396,10 +1439,21 @@ export async function campaignRoutes(app) {
             reply.code(403);
             return restriction;
         }
+        const bundleItems = buildBundleItems(body);
+        const requiresPublicContractEligibility = bundleItems.some((item) => resolveExecutionMode(String(item.platform), item.execution_mode) === 'OPEN_BUDGET');
+        if (requiresPublicContractEligibility) {
+            const eligibility = await withTransaction(async (client) => getPublicContractEligibility(client));
+            if (!eligibility.eligible) {
+                reply.code(409);
+                return {
+                    error: 'public_contract_distributor_threshold_unmet',
+                    ...eligibility,
+                };
+            }
+        }
         let campaign;
         try {
             campaign = await withTransaction(async (client) => {
-                const bundleItems = buildBundleItems(body);
                 const bundlePlatforms = normalizePlatformList(bundleItems.map((item) => item.platform));
                 if (bundlePlatforms.length !== bundleItems.length) {
                     throw new Error('duplicate_bundle_platform');
@@ -1641,6 +1695,17 @@ export async function campaignRoutes(app) {
             reply.code(403);
             return { error: 'forbidden' };
         }
+        const requestedExecutionMode = resolveExecutionMode(platformKey, body.execution_mode);
+        if (requestedExecutionMode === 'OPEN_BUDGET') {
+            const eligibility = await withTransaction(async (client) => getPublicContractEligibility(client));
+            if (!eligibility.eligible) {
+                reply.code(409);
+                return {
+                    error: 'public_contract_distributor_threshold_unmet',
+                    ...eligibility,
+                };
+            }
+        }
         try {
             const campaign = await withTransaction(async (client) => {
                 const editable = await loadEditableCampaign(client, params.id, authUser);
@@ -1662,7 +1727,7 @@ export async function campaignRoutes(app) {
                         throw new Error('duplicate_bundle_platform');
                     }
                 }
-                const executionMode = resolveExecutionMode(platformKey, body.execution_mode);
+                const executionMode = requestedExecutionMode;
                 const beneficiaryContacts = normalizeBeneficiaryContacts(body);
                 const deliveryModel = resolveDeliveryModel(platformKey, body.delivery_model);
                 const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
@@ -2129,7 +2194,7 @@ export async function campaignRoutes(app) {
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_V4',
+                provider: 'YO_UGANDA',
                 mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
                 amount: body.amount,
@@ -2312,7 +2377,7 @@ export async function campaignRoutes(app) {
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_V4',
+                provider: 'YO_UGANDA',
                 mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
                 amount: body.amount,

@@ -1400,7 +1400,7 @@ export async function accountRoutes(app: FastifyInstance) {
                 wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
                 wallet_notice:
                   activeRole === ACCOUNT_ROLE_ADVERTISER
-                    ? 'Use wallet balance for Flutterwave deposits, campaign funding, and withdrawals.'
+                    ? 'Use wallet balance for YO Uganda deposits, campaign funding, and withdrawals.'
                     : 'Withdraw from UGX 10,000.',
               }
             : wallet,
@@ -1514,7 +1514,7 @@ export async function accountRoutes(app: FastifyInstance) {
       );
 
       const checkoutPayload = {
-        provider: 'FLUTTERWAVE_V4',
+        provider: 'YO_UGANDA',
         mode: 'DIRECT_CHARGE',
         tx_ref: reference,
         amount: parsed.data.amount,
@@ -1677,7 +1677,7 @@ export async function accountRoutes(app: FastifyInstance) {
     const payout = payoutPayload as WalletPayoutPayload;
 
     try {
-      await requestPayout({
+      const payoutResponse = await requestPayout({
         amount: payout.amount,
         currency: payout.currency,
         narration: `Wallet withdrawal ${payout.reference}`,
@@ -1686,6 +1686,70 @@ export async function accountRoutes(app: FastifyInstance) {
         receiverPhone: payout.receiverPhone,
         receiverNetwork: payout.receiverNetwork,
       });
+
+      const payoutStatus = String(
+        (payoutResponse as any).transactionStatus ??
+          (payoutResponse as any).status ??
+          ''
+      )
+        .trim()
+        .toUpperCase();
+
+      if (
+        payoutStatus === 'SUCCEEDED' ||
+        payoutStatus === 'SUCCESSFUL' ||
+        payoutStatus === 'COMPLETED' ||
+        payoutStatus === 'OK'
+      ) {
+        await withTransaction(async (client) => {
+          await ensureWalletTables(client);
+          await client.query(
+            `
+            UPDATE wallet_withdrawals
+            SET status='PAID',
+                paid_at=NOW(),
+                failure_reason=NULL
+            WHERE pesapal_reference=$1
+            `,
+            [payout.reference]
+          );
+        });
+      } else if (
+        payoutStatus === 'FAILED' ||
+        payoutStatus === 'FAILURE' ||
+        payoutStatus === 'ERROR' ||
+        payoutStatus === 'CANCELLED' ||
+        payoutStatus === 'CANCELED' ||
+        payoutStatus === 'REJECTED'
+      ) {
+        await withTransaction(async (client) => {
+          await ensureWalletTables(client);
+          const withdrawalRes = await client.query(
+            `SELECT * FROM wallet_withdrawals WHERE pesapal_reference=$1 LIMIT 1`,
+            [payout.reference]
+          );
+          const withdrawal = withdrawalRes.rows[0];
+          if (!withdrawal) return;
+          await refundWalletWithdrawal(
+            client,
+            withdrawal,
+            (payoutResponse as any).errorMessage ?? 'withdrawal_request_failed'
+          );
+        });
+        reply.code(502);
+        return {
+          error: 'withdrawal_request_failed',
+          detail:
+            (payoutResponse as any).errorMessage ??
+            (payoutResponse as any).statusMessage ??
+            'Withdrawal provider rejected the request.',
+        };
+      }
+
+      return {
+        ...(result as any),
+        provider_status: payoutStatus || 'PROCESSING',
+      };
     } catch (error: any) {
       await withTransaction(async (client) => {
         await ensureWalletTables(client);
@@ -1707,8 +1771,6 @@ export async function accountRoutes(app: FastifyInstance) {
         detail: error?.message ?? 'Withdrawal provider rejected the request.',
       };
     }
-
-    return result;
   });
 
   app.get('/proofs', { preHandler: [app.authenticate] }, async (request) => {

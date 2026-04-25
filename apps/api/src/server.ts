@@ -266,21 +266,21 @@ export function buildServer() {
 
     app.log.info(
       {
-        provider: 'FLUTTERWAVE',
+        provider: 'YO_UGANDA',
         base_url: resolveFlutterwaveBaseUrl(),
-        auth_mode: hasSecret ? 'secret_key' : hasClientCreds ? 'client_credentials' : 'none',
+        auth_mode: hasClientCreds ? 'api_credentials' : 'none',
         has_secret: hasSecret,
         has_client_creds: hasClientCreds,
       },
-      'flutterwave_config'
+      'yo_uganda_config'
     );
 
     if (!hasValidFlutterwaveKeys()) {
-      app.log.warn('Flutterwave credentials are incomplete. Payments will fail.');
+      app.log.warn('YO Uganda credentials are incomplete. Payments will fail.');
     }
 
     if (!config.flutterwave.webhookSecretHash) {
-      app.log.warn('FLUTTERWAVE_WEBHOOK_SECRET_HASH is not set. Webhook verification is disabled.');
+      app.log.info('YO Uganda collection uses status polling. Webhook verification is not active.');
     }
   });
 

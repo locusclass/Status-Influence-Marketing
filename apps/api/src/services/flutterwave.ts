@@ -2,693 +2,223 @@ import { fetch } from 'undici';
 import crypto from 'crypto';
 import {
   config,
-  hasFlutterwaveSecretKey,
-  hasFlutterwaveClientCredentials,
-  resolveFlutterwaveBaseUrl,
+  hasYoCredentials,
+  resolveYoBaseUrl,
+  resolveYoFallbackBaseUrl,
 } from '../config.js';
 
-let cachedAccessToken: { token: string; expiresAt: number } | null = null;
+export type YoPaymentResponse = {
+  status: string;
+  statusCode: number | null;
+  statusMessage: string | null;
+  errorMessage: string | null;
+  transactionStatus: string | null;
+  transactionReference: string | null;
+  raw: Record<string, string>;
+};
 
-export class FlutterwaveRequestError extends Error {
-  status: number;
-  payload: unknown;
-  responseText: string;
-  path: string;
-
-  constructor(input: {
-    status: number;
-    payload: unknown;
-    responseText: string;
-    path: string;
-  }) {
-    super(
-      `Flutterwave request failed: ${input.status} ${input.responseText}`.trim()
-    );
-    this.name = 'FlutterwaveRequestError';
-    this.status = input.status;
-    this.payload = input.payload;
-    this.responseText = input.responseText;
-    this.path = input.path;
-  }
+function xmlEscape(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
-function randomId() {
+function xmlUnescape(value: string) {
+  return value
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+}
+
+function uniqueEndpoints() {
+  return Array.from(
+    new Set([resolveYoBaseUrl(), resolveYoFallbackBaseUrl()].filter(Boolean))
+  );
+}
+
+function normalizePhoneNumber(phoneNumber: string) {
+  const digits = phoneNumber.replace(/[^\d]/g, '');
+  if (!digits) {
+    return '';
+  }
+  if (digits.startsWith('256')) {
+    return digits;
+  }
+  if (digits.startsWith('0')) {
+    return `256${digits.slice(1)}`;
+  }
+  return digits;
+}
+
+function resolveAccountProviderCode(network?: string) {
+  const normalized = String(network ?? '').trim().toUpperCase();
+  if (normalized === 'MTN') {
+    return 'MTN_UGANDA';
+  }
+  if (normalized === 'AIRTEL') {
+    return 'AIRTEL_UGANDA';
+  }
+  return undefined;
+}
+
+function buildTraceId() {
   return crypto.randomUUID();
 }
 
-function normalizeNamePart(value: string | undefined, fallback: string) {
-  const cleaned = (value ?? '')
-    .replace(/[^A-Za-z ,.'-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (cleaned.length >= 2 && cleaned.length <= 50) {
-    return cleaned;
-  }
-
-  return fallback;
-}
-
-function buildBaseUrl() {
-  return resolveFlutterwaveBaseUrl();
-}
-
-function randomNonce(length = 12) {
-  const alphabet =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const bytes = crypto.randomBytes(length);
-  let nonce = '';
-  for (let index = 0; index < length; index += 1) {
-    nonce += alphabet[(bytes[index] ?? 0) % alphabet.length];
-  }
-  return nonce;
-}
-
-async function encryptFlutterwaveValue(value: string, nonce: string) {
-  const encryptionKey = config.flutterwave.encryptionKey.trim();
-  if (!encryptionKey) {
-    throw new Error(
-      'Flutterwave card payments require FLUTTERWAVE_ENCRYPTION_KEY.'
-    );
-  }
-  if (nonce.length !== 12) {
-    throw new Error('Flutterwave encryption nonce must be exactly 12 characters.');
-  }
-
-  const keyBytes = Buffer.from(encryptionKey, 'base64');
-  if (keyBytes.length === 0) {
-    throw new Error('FLUTTERWAVE_ENCRYPTION_KEY must be base64 encoded.');
-  }
-
-  const cryptoSubtle =
-    globalThis.crypto?.subtle ?? crypto.webcrypto?.subtle;
-  if (!cryptoSubtle) {
-    throw new Error('Crypto API is not available in this environment.');
-  }
-
-  const key = await cryptoSubtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'AES-GCM' },
-    false,
-    ['encrypt']
-  );
-  const encrypted = await cryptoSubtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: Buffer.from(nonce),
-    },
-    key,
-    Buffer.from(value)
-  );
-  return Buffer.from(encrypted).toString('base64');
-}
-
-async function encryptFlutterwaveFields(
-  fields: Record<string, string>,
-  nonce = randomNonce()
+export function buildYoRequestXml(
+  request: Record<string, string | number | boolean | null | undefined>
 ) {
-  const encryptedEntries = await Promise.all(
-    Object.entries(fields).map(async ([key, value]) => {
-      return [key, await encryptFlutterwaveValue(value, nonce)] as const;
+  const body = Object.entries(request)
+    .filter(([, value]) => {
+      if (value == null) {
+        return false;
+      }
+      const text = String(value).trim();
+      return text.length > 0;
     })
-  );
+    .map(([key, value]) => {
+      return `<${key}>${xmlEscape(String(value))}</${key}>`;
+    })
+    .join('');
 
-  return {
-    nonce,
-    ...Object.fromEntries(encryptedEntries),
-  };
+  return `<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Request>${body}</Request></AutoCreate>`;
 }
 
-function resolvePhonePayload(
-  phoneNumber: string | undefined,
-  phoneCountryCode: string | undefined
-) {
-  const normalizedPhone = (phoneNumber ?? '').replace(/[^\d]/g, '');
-  const normalizedCountryCode = (phoneCountryCode ?? '').replace(/[^\d]/g, '');
-  if (!normalizedPhone || !normalizedCountryCode) {
-    return null;
-  }
+export function parseYoResponseXml(xml: string): YoPaymentResponse {
+  const responseMatch =
+    xml.match(/<Response>([\s\S]*?)<\/Response>/i) ??
+    xml.match(/<AutoCreate>([\s\S]*?)<\/AutoCreate>/i);
+  const source = responseMatch?.[1] ?? xml;
+  const raw: Record<string, string> = {};
+  const pattern = /<([A-Za-z0-9_]+)>([\s\S]*?)<\/\1>/g;
+  let match: RegExpExecArray | null;
 
-  return {
-    country_code: normalizedCountryCode,
-    number: normalizedPhone.startsWith(normalizedCountryCode)
-      ? normalizedPhone.slice(normalizedCountryCode.length)
-      : normalizedPhone.replace(/^0+/, ''),
-  };
-}
-
-function readCheckoutUrl(payload: Record<string, any>) {
-  const candidates = [
-    payload?.data?.link,
-    payload?.data?.checkout_url,
-    payload?.data?.checkoutLink,
-    payload?.link,
-    payload?.checkout_url,
-    payload?.checkoutLink,
-  ];
-
-  for (const candidate of candidates) {
-    const value = String(candidate ?? '').trim();
-    if (value) {
-      return value;
+  while ((match = pattern.exec(source))) {
+    const key = match[1];
+    const rawValue = match[2];
+    if (!key || rawValue == null) {
+      continue;
     }
+    const value = rawValue.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+    if (/<[A-Za-z]/.test(value)) {
+      continue;
+    }
+    raw[key] = xmlUnescape(value);
   }
 
-  return null;
+  const parseStatusCode = (value: string | undefined) => {
+    if (!value) {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  return {
+    status: raw.Status ?? '',
+    statusCode: parseStatusCode(raw.StatusCode),
+    statusMessage: raw.StatusMessage ?? null,
+    errorMessage: raw.ErrorMessage ?? null,
+    transactionStatus: raw.TransactionStatus ?? null,
+    transactionReference: raw.TransactionReference ?? null,
+    raw,
+  };
 }
 
-export function isHostedCheckoutCompatibilityError(detail: string) {
-  return detail.includes(
-    'Flutterwave hosted checkout is using the v3 /payments API'
-  );
-}
-
-async function getAccessToken() {
-  if (!hasFlutterwaveClientCredentials()) {
-    throw new Error('Flutterwave client credentials are not configured');
-  }
-
-  const now = Date.now();
-  if (cachedAccessToken && cachedAccessToken.expiresAt > now + 30_000) {
-    return cachedAccessToken.token;
-  }
-
-  const tokenEndpoint =
-    'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token';
-  const tokenRequestBody = new URLSearchParams({
-    client_id: config.flutterwave.clientId,
-    client_secret: config.flutterwave.clientSecret,
-    grant_type: 'client_credentials',
-  });
-
-  const res = await fetch(tokenEndpoint, {
+async function postXml(endpoint: string, body: string) {
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Accept: 'application/json',
-      'X-Trace-Id': randomId(),
+      Accept: 'application/xml, text/xml, */*',
+      'Content-Type': 'text/xml',
+      'Content-transfer-encoding': 'text',
+      'X-Trace-Id': buildTraceId(),
     },
-    body: tokenRequestBody.toString(),
+    body,
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Flutterwave auth failed: ${res.status} ${text}`);
+  const text = await res.text();
+  if (!res.ok && !/<(?:AutoCreate|Response)>/i.test(text)) {
+    throw new Error(`YO Uganda request failed: ${res.status} ${text}`.trim());
   }
 
-  const body = (await res.json()) as Record<string, any>;
-  const tokenPayload = (body.data ?? body) as Record<string, any>;
-  const token = String(tokenPayload.access_token ?? tokenPayload.token ?? '').trim();
-  if (!token) {
-    throw new Error('Flutterwave auth did not return an access token');
+  if (!text.trim()) {
+    throw new Error(`YO Uganda request failed: ${res.status} empty response`);
   }
 
-  const expiresIn = Number(tokenPayload.expires_in ?? 3600);
-  cachedAccessToken = {
-    token,
-    expiresAt: now + Math.max(60, expiresIn) * 1000,
-  };
-  return token;
+  return text;
 }
 
-async function getRequestToken() {
-  const secretKey = config.flutterwave.secretKey.trim();
-  if (secretKey) {
-    return secretKey;
-  }
-
-  if (hasFlutterwaveClientCredentials()) {
-    return getAccessToken();
-  }
-
-  throw new Error('Flutterwave credentials are not configured');
-}
-
-async function flutterwaveRequest<T>(
-  path: string,
-  init: {
-    method?: 'GET' | 'POST' | 'PUT';
-    body?: Record<string, any>;
-    idempotencyKey?: string;
-  } = {}
+async function yoRequest(
+  request: Record<string, string | number | boolean | null | undefined>
 ) {
-  const token = await getRequestToken();
-  const res = await fetch(`${buildBaseUrl()}${path}`, {
-    method: init.method ?? 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'X-Trace-Id': randomId(),
-      ...(init.idempotencyKey ? { 'X-Idempotency-Key': init.idempotencyKey } : {}),
-    },
-    ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+  if (!hasYoCredentials()) {
+    throw new Error('YO Uganda API credentials are not configured');
+  }
+
+  const body = buildYoRequestXml({
+    APIUsername: config.yo.apiUsername,
+    APIPassword: config.yo.apiPassword,
+    ...request,
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: unknown = null;
+  const endpoints = uniqueEndpoints();
+  let lastError: unknown = null;
+
+  for (const endpoint of endpoints) {
     try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = null;
-    }
-    throw new FlutterwaveRequestError({
-      status: res.status,
-      payload,
-      responseText: text,
-      path,
-    });
-  }
-
-  return (await res.json()) as T;
-}
-
-function extractCollectionItems(payload: Record<string, any>) {
-  const candidates = [
-    payload?.data,
-    payload?.data?.data,
-    payload?.data?.records,
-    payload?.records,
-    payload?.items,
-    payload?.results,
-    payload,
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      return candidate;
-    }
-    if (candidate && typeof candidate === 'object') {
-      return [candidate];
-    }
-  }
-
-  return [];
-}
-
-function readPayloadErrorText(payload: unknown) {
-  if (!payload || typeof payload !== 'object') {
-    return '';
-  }
-
-  const value = payload as Record<string, any>;
-  const candidates = [
-    value?.message,
-    value?.error,
-    value?.error?.message,
-    value?.error?.type,
-    value?.error?.code,
-    value?.detail,
-  ];
-
-  return candidates
-    .map((candidate) => {
-      if (typeof candidate === 'string') {
-        return candidate.trim();
-      }
-      if (candidate && typeof candidate === 'object') {
-        return JSON.stringify(candidate);
-      }
-      return '';
-    })
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-}
-
-function isExistingCustomerConflict(error: unknown) {
-  if (!(error instanceof FlutterwaveRequestError)) {
-    return false;
-  }
-
-  if (error.status !== 409) {
-    return false;
-  }
-
-  const detail = `${error.responseText} ${readPayloadErrorText(error.payload)}`.toLowerCase();
-  return (
-    detail.includes('customer already exists') ||
-    (detail.includes('resource_conflict') && detail.includes('customer'))
-  );
-}
-
-function readCustomerEmail(customer: Record<string, any>) {
-  const value = customer?.email ?? customer?.customer?.email;
-  return String(value ?? '').trim().toLowerCase();
-}
-
-function readCustomerId(customer: Record<string, any>) {
-  const candidates = [
-    customer?.id,
-    customer?.data?.id,
-    customer?.customer_id,
-    customer?.customer?.id,
-  ];
-
-  for (const candidate of candidates) {
-    const value = String(candidate ?? '').trim();
-    if (value) {
-      return value;
-    }
-  }
-
-  return '';
-}
-
-async function findCustomerByEmail(email: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  if (!normalizedEmail) {
-    return null;
-  }
-
-  const queryVariants = [
-    `/customers?email=${encodeURIComponent(normalizedEmail)}`,
-    `/customers?search=${encodeURIComponent(normalizedEmail)}`,
-    `/customers`,
-  ];
-
-  for (const [index, path] of queryVariants.entries()) {
-    try {
-      const response = await flutterwaveRequest<Record<string, any>>(path);
-      const customers = extractCollectionItems(response);
-      const match = customers.find((entry) => {
-        if (!entry || typeof entry !== 'object') {
-          return false;
-        }
-        return readCustomerEmail(entry as Record<string, any>) === normalizedEmail;
-      });
-      if (match && typeof match === 'object') {
-        return match as Record<string, any>;
-      }
+      const responseText = await postXml(endpoint, body);
+      return parseYoResponseXml(responseText);
     } catch (error) {
-      if (
-        index < queryVariants.length - 1 &&
-        error instanceof FlutterwaveRequestError &&
-        (error.status === 400 || error.status === 404)
-      ) {
-        continue;
-      }
-      throw error;
+      lastError = error;
     }
   }
 
-  return null;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('YO Uganda request failed');
 }
 
-export async function registerIpnUrl(): Promise<any> {
-  return {
-    ok: true,
-    provider: 'FLUTTERWAVE_V4',
-    note: 'Flutterwave webhooks are configured from the dashboard.',
-  };
-}
-
-export async function getIpnList(): Promise<any> {
-  return {
-    ok: true,
-    provider: 'FLUTTERWAVE_V4',
-    note: 'Flutterwave webhook endpoints are managed from the dashboard.',
-  };
-}
-
-export async function createHostedPayment(input: {
-  txRef: string;
+export async function initiateMobileMoneyCollection(input: {
   amount: number;
-  currency: string;
-  redirectUrl: string;
-  paymentOptions?: string;
-  customer: {
-    email: string;
-    name: string;
-    phoneNumber?: string;
-  };
-  customizations?: {
-    title?: string;
-    description?: string;
-    logo?: string;
-  };
-  meta?: Record<string, any>;
-}) {
-  if (!hasFlutterwaveSecretKey() && hasFlutterwaveClientCredentials()) {
-    throw new Error(
-      'Flutterwave hosted checkout is using the v3 /payments API, but this server is configured for v4 client-credential flow. Switch to a v3 secret key for hosted checkout or replace this path with a true v4 payment-method/charge flow.'
-    );
-  }
-
-  const response = await flutterwaveRequest<Record<string, any>>('/payments', {
-    method: 'POST',
-    body: {
-      tx_ref: input.txRef,
-      amount: input.amount,
-      currency: input.currency,
-      redirect_url: input.redirectUrl,
-      payment_options: input.paymentOptions ?? 'card,mobilemoneyuganda',
-      customer: {
-        email: input.customer.email,
-        name: input.customer.name,
-        ...(input.customer.phoneNumber
-          ? { phone_number: input.customer.phoneNumber }
-          : {}),
-      },
-      ...(input.customizations ? { customizations: input.customizations } : {}),
-      ...(input.meta ? { meta: input.meta } : {}),
-    },
-    idempotencyKey: `hosted_payment:${input.txRef}`,
-  });
-
-  return {
-    checkoutUrl: readCheckoutUrl(response),
-    response,
-  };
-}
-
-export async function createCustomer(input: {
-  email: string;
-  name: string;
-  phoneNumber?: string;
-  phoneCountryCode?: string;
-  address?: {
-    city?: string;
-    country?: string;
-    line1?: string;
-    line2?: string;
-    postalCode?: string;
-    state?: string;
-  };
-}) {
-  const parts = input.name.trim().split(/\s+/).filter(Boolean);
-  const first = normalizeNamePart(parts[0], 'Customer');
-  const last = normalizeNamePart(parts.slice(1).join(' '), 'User');
-  const phone = resolvePhonePayload(input.phoneNumber, input.phoneCountryCode);
-  const address = input.address
-    ? {
-        city: input.address.city?.trim() || undefined,
-        country: input.address.country?.trim() || undefined,
-        line1: input.address.line1?.trim() || undefined,
-        line2: input.address.line2?.trim() || undefined,
-        postal_code: input.address.postalCode?.trim() || undefined,
-        state: input.address.state?.trim() || undefined,
-      }
-    : null;
-
-  return flutterwaveRequest<Record<string, any>>('/customers', {
-    method: 'POST',
-    body: {
-      email: input.email,
-      name: {
-        first,
-        last,
-      },
-      ...(phone ? { phone } : {}),
-      ...(address ? { address } : {}),
-    },
-    idempotencyKey: `customer:${input.email.toLowerCase()}`,
-  });
-}
-
-export async function ensureCustomer(input: {
-  email: string;
-  name: string;
-  phoneNumber?: string;
-  phoneCountryCode?: string;
-  address?: {
-    city?: string;
-    country?: string;
-    line1?: string;
-    line2?: string;
-    postalCode?: string;
-    state?: string;
-  };
-}) {
-  try {
-    return await createCustomer(input);
-  } catch (error) {
-    if (!isExistingCustomerConflict(error)) {
-      throw error;
-    }
-
-    const existingCustomer = await findCustomerByEmail(input.email);
-    const customerId = existingCustomer ? readCustomerId(existingCustomer) : '';
-    if (!customerId) {
-      throw new Error(
-        `Flutterwave customer already exists for ${input.email}, but no customer id could be resolved.`
-      );
-    }
-
-    return existingCustomer;
-  }
-}
-
-export async function createMobileMoneyPaymentMethod(input: {
   phoneNumber: string;
-  network: 'MTN' | 'AIRTEL' | 'M-PESA';
-  countryCode: string;
+  narrative: string;
+  internalReference?: string;
+  externalReference?: string;
+  providerReferenceText?: string;
+  network?: 'MTN' | 'AIRTEL' | 'M-PESA';
+  nonBlocking?: boolean;
 }) {
-  const normalizedPhone = input.phoneNumber.replace(/[^\d]/g, '');
-  return flutterwaveRequest<Record<string, any>>('/payment-methods', {
-    method: 'POST',
-    body: {
-      type: 'mobile_money',
-      mobile_money: {
-        phone_number: normalizedPhone.startsWith(input.countryCode)
-          ? normalizedPhone.slice(input.countryCode.length)
-          : normalizedPhone.replace(/^0+/, ''),
-        network: input.network,
-        country_code: input.countryCode,
-      },
-    },
-    idempotencyKey: `pm:${normalizedPhone}:${input.network}:${input.countryCode}`,
+  return yoRequest({
+    Method: 'acdepositfunds',
+    NonBlocking: input.nonBlocking === false ? 'FALSE' : 'TRUE',
+    Amount: input.amount,
+    Account: normalizePhoneNumber(input.phoneNumber),
+    AccountProviderCode: resolveAccountProviderCode(input.network),
+    Narrative: input.narrative,
+    InternalReference: input.internalReference,
+    ExternalReference: input.externalReference,
+    ProviderReferenceText: input.providerReferenceText,
   });
 }
 
-export async function createCharge(input: {
-  amount: number;
-  currency: string;
-  customerId: string;
-  paymentMethodId: string;
-  txRef: string;
-  redirectUrl?: string | null;
-  meta?: Record<string, any>;
-}) {
-  return flutterwaveRequest<Record<string, any>>('/charges', {
-    method: 'POST',
-    body: {
-      amount: input.amount,
-      currency: input.currency,
-      customer_id: input.customerId,
-      payment_method_id: input.paymentMethodId,
-      reference: input.txRef,
-      ...(input.redirectUrl ? { redirect_url: input.redirectUrl } : {}),
-      ...(input.meta ? { meta: input.meta } : {}),
-    },
-    idempotencyKey: `charge:${input.txRef}`,
+export async function getTransactionStatus(
+  transactionId: string,
+  _merchantReference?: string
+) {
+  return yoRequest({
+    Method: 'actransactioncheckstatus',
+    TransactionReference: transactionId,
   });
-}
-
-export async function createCardPaymentMethod(input: {
-  cardNumber: string;
-  expiryMonth: string;
-  expiryYear: string;
-  cvv: string;
-}) {
-  const encryptedCard = await encryptFlutterwaveFields({
-    encrypted_card_number: input.cardNumber.replace(/\s+/g, ''),
-    encrypted_expiry_month: input.expiryMonth.trim(),
-    encrypted_expiry_year: input.expiryYear.trim(),
-    encrypted_cvv: input.cvv.trim(),
-  });
-
-  return flutterwaveRequest<Record<string, any>>('/payment-methods', {
-    method: 'POST',
-    body: {
-      type: 'card',
-      card: encryptedCard,
-    },
-    idempotencyKey: `card_method:${encryptedCard.nonce}:${input.cardNumber.slice(-4)}`,
-  });
-}
-
-export async function updateChargeAuthorization(input: {
-  chargeId: string;
-  authorization:
-    | {
-        type: 'pin';
-        pin: string;
-      }
-    | {
-        type: 'otp';
-        otp: string;
-      }
-    | {
-        type: 'avs';
-        avs: {
-          city: string;
-          country: string;
-          line1: string;
-          line2?: string;
-          postalCode: string;
-          state: string;
-        };
-      };
-}) {
-  let authorization: Record<string, any>;
-
-  if (input.authorization.type === 'pin') {
-    authorization = {
-      type: 'pin',
-      pin: await encryptFlutterwaveFields({
-        encrypted_pin: input.authorization.pin.trim(),
-      }),
-    };
-  } else if (input.authorization.type === 'otp') {
-    authorization = {
-      type: 'otp',
-      otp: {
-        code: input.authorization.otp.trim(),
-      },
-    };
-  } else {
-    authorization = {
-      type: 'avs',
-      avs: {
-        address: {
-          city: input.authorization.avs.city.trim(),
-          country: input.authorization.avs.country.trim().toUpperCase(),
-          line1: input.authorization.avs.line1.trim(),
-          ...(input.authorization.avs.line2?.trim()
-            ? { line2: input.authorization.avs.line2.trim() }
-            : {}),
-          postal_code: input.authorization.avs.postalCode.trim(),
-          state: input.authorization.avs.state.trim(),
-        },
-      },
-    };
-  }
-
-  return flutterwaveRequest<Record<string, any>>(
-    `/charges/${encodeURIComponent(input.chargeId)}`,
-    {
-      method: 'PUT',
-      body: {
-        authorization,
-      },
-      idempotencyKey: `charge_auth:${input.chargeId}:${input.authorization.type}`,
-    }
-  );
-}
-
-export async function getTransactionStatus(transactionId: string, _merchantReference?: string) {
-  return flutterwaveRequest<Record<string, any>>(
-    `/charges/${encodeURIComponent(transactionId)}`
-  );
 }
 
 export async function verifyTransaction(transactionId: string | number) {
-  return flutterwaveRequest<Record<string, any>>(
-    `/transactions/${encodeURIComponent(String(transactionId))}/verify`
-  );
+  return getTransactionStatus(String(transactionId));
 }
 
 export async function requestPayout(input: {
@@ -699,46 +229,26 @@ export async function requestPayout(input: {
   receiverName: string;
   receiverPhone: string;
   receiverNetwork?: string;
+  nonBlocking?: boolean;
 }) {
-  const secretKey = config.flutterwave.secretKey.trim();
-  if (!secretKey) {
-    throw new Error('Flutterwave transfer secret key is not configured');
-  }
-
-  const normalizedPhone = input.receiverPhone.replace(/[^\d]/g, '');
-  const normalizedNetwork = (input.receiverNetwork ?? 'MTN').trim().toUpperCase();
-  const transferBaseUrl = buildBaseUrl().replace(/\/v\d+$/i, '');
-  const res = await fetch(`${transferBaseUrl}/v3/transfers`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${secretKey}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'X-Trace-Id': randomId(),
-    },
-    body: JSON.stringify({
-      account_bank: normalizedNetwork,
-      account_number: normalizedPhone.startsWith('256')
-        ? normalizedPhone
-        : `256${normalizedPhone.replace(/^0+/, '')}`,
-      amount: input.amount,
-      narration: input.narration,
-      currency: input.currency,
-      reference: input.reference,
-      debit_currency: input.currency,
-      beneficiary_name: input.receiverName,
-    }),
+  return yoRequest({
+    Method: 'acwithdrawfunds',
+    NonBlocking: input.nonBlocking === true ? 'TRUE' : 'FALSE',
+    Amount: input.amount,
+    Account: normalizePhoneNumber(input.receiverPhone),
+    AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
+    Narrative: input.narration,
+    InternalReference: input.reference,
+    ExternalReference: input.reference,
+    ProviderReferenceText: input.reference,
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Flutterwave transfer failed: ${res.status} ${text}`);
-  }
-
-  return (await res.json()) as Record<string, any>;
 }
 
-export function verifyWebhookSignature(rawBody: string, signature: string, secret: string): boolean {
+export function verifyWebhookSignature(
+  rawBody: string,
+  signature: string,
+  secret: string
+): boolean {
   if (!signature || !secret) {
     return false;
   }
@@ -746,11 +256,17 @@ export function verifyWebhookSignature(rawBody: string, signature: string, secre
     return true;
   }
 
-  const hmac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  const hmac = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)
+    .digest('base64');
   if (signature === hmac) {
     return true;
   }
 
-  const hex = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  const hex = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)
+    .digest('hex');
   return signature === hex;
 }
