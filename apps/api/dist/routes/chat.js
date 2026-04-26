@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import { getPublicContractUnitRate, MediaTypeSchema } from '@prime/shared';
+import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
-import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_GROUP_ROOM, ensureChatSchema, } from '../services/chat.js';
+import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_GROUP_ROOM, CHAT_OFFER_RESPONSE_ACCEPT, CHAT_OFFER_RESPONSE_COUNTER, CHAT_OFFER_RESPONSE_REJECT, CHAT_OFFER_STATUS_ACCEPTED, CHAT_OFFER_STATUS_COUNTERED, CHAT_OFFER_STATUS_PENDING, CHAT_OFFER_STATUS_REJECTED, ensureChatSchema, } from '../services/chat.js';
 import { createUserNotifications } from '../services/userSignals.js';
 const directThreadSchema = z.object({
     participant_id: z.string().uuid(),
@@ -43,6 +45,69 @@ const respondInviteSchema = z.object({
 const setGroupPriceSchema = z.object({
     advertiser_id: z.string().uuid(),
     override_price_ugx: z.number().int().min(0),
+});
+const offerContextSchema = z.object({
+    media_type: MediaTypeSchema.default('IMAGE'),
+});
+const createOfferSchema = z
+    .object({
+    media_type: MediaTypeSchema,
+    media_url: z.string().url().optional(),
+    media_text: z.string().trim().min(3).max(4000).optional(),
+    proposed_price_ugx: z.number().int().positive(),
+    note: z.string().trim().max(500).optional(),
+})
+    .superRefine((value, ctx) => {
+    const hasMediaUrl = typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+    const hasMediaText = typeof value.media_text === 'string' &&
+        value.media_text.trim().length > 0;
+    if (!hasMediaUrl && !hasMediaText) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['media_url'],
+            message: 'Either media_url or media_text is required.',
+        });
+    }
+});
+const respondOfferSchema = z
+    .object({
+    action: z.enum([
+        CHAT_OFFER_RESPONSE_ACCEPT,
+        CHAT_OFFER_RESPONSE_COUNTER,
+        CHAT_OFFER_RESPONSE_REJECT,
+    ]),
+    counter_price_ugx: z.number().int().positive().optional(),
+    note: z.string().trim().max(500).optional(),
+})
+    .superRefine((value, ctx) => {
+    if (value.action === CHAT_OFFER_RESPONSE_COUNTER &&
+        typeof value.counter_price_ugx !== 'number') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['counter_price_ugx'],
+            message: 'counter_price_ugx is required when countering.',
+        });
+    }
+});
+const voteGroupOfferSchema = z
+    .object({
+    action: z.enum([
+        CHAT_OFFER_RESPONSE_ACCEPT,
+        CHAT_OFFER_RESPONSE_COUNTER,
+        CHAT_OFFER_RESPONSE_REJECT,
+    ]),
+    counter_price_ugx: z.number().int().positive().optional(),
+    note: z.string().trim().max(500).optional(),
+})
+    .superRefine((value, ctx) => {
+    if (value.action === CHAT_OFFER_RESPONSE_COUNTER &&
+        typeof value.counter_price_ugx !== 'number') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['counter_price_ugx'],
+            message: 'counter_price_ugx is required when countering.',
+        });
+    }
 });
 function isPromoterChatBizRole(role) {
     const normalizedRole = normalizeAccountRole(role);
@@ -104,6 +169,42 @@ function toInt(value) {
         return 0;
     return Math.max(0, Math.trunc(numberValue));
 }
+function normalizePricePrivacyMode(value) {
+    return String(value ?? 'NEGOTIABLE').trim().toUpperCase() === 'FIXED'
+        ? 'FIXED'
+        : 'NEGOTIABLE';
+}
+function resolveDeterministicEngagements24h(provenEngagements24h, maxStatusViewers12h) {
+    if (provenEngagements24h > 0) {
+        return provenEngagements24h;
+    }
+    const capacity24h = Math.max(0, maxStatusViewers12h) * 2;
+    return Math.max(1, capacity24h);
+}
+function resolveOfficialPriceUgx(row, mediaType = 'IMAGE') {
+    const privateRateUgx = toInt(row?.private_contract_rate_ugx);
+    if (privateRateUgx > 0) {
+        return privateRateUgx;
+    }
+    const pricingReference = resolveDeterministicEngagements24h(toInt(row?.verified_views_24h), toInt(row?.max_status_viewers_12h));
+    return pricingReference * getPublicContractUnitRate(mediaType);
+}
+function resolveGroupPricePrivacyMode(values) {
+    let negotiableCount = 0;
+    let fixedCount = 0;
+    for (const value of values) {
+        if (normalizePricePrivacyMode(value) === 'FIXED') {
+            fixedCount += 1;
+        }
+        else {
+            negotiableCount += 1;
+        }
+    }
+    return negotiableCount > fixedCount ? 'NEGOTIABLE' : 'FIXED';
+}
+function quorumThreshold(memberCount) {
+    return Math.max(1, Math.ceil(Math.max(0, memberCount) * 0.51));
+}
 function displayNameFromRow(row) {
     return String(row?.display_name ??
         row?.full_name ??
@@ -112,6 +213,10 @@ function displayNameFromRow(row) {
         'Participant').trim();
 }
 function serializeUserSummary(row) {
+    const pricePrivacyMode = normalizePricePrivacyMode(row?.price_privacy_mode);
+    const officialPriceUgx = toInt(row?.official_price_ugx) > 0
+        ? toInt(row?.official_price_ugx)
+        : resolveOfficialPriceUgx(row);
     return {
         id: String(row?.id ?? ''),
         public_id: String(row?.public_id ?? ''),
@@ -125,6 +230,9 @@ function serializeUserSummary(row) {
         max_status_viewers_12h: toInt(row?.max_status_viewers_12h),
         current_advertiser_viewers: toInt(row?.current_advertiser_viewers),
         private_contract_rate_ugx: toInt(row?.private_contract_rate_ugx),
+        official_price_ugx: officialPriceUgx,
+        price_privacy_mode: pricePrivacyMode,
+        negotiation_allowed: pricePrivacyMode === 'NEGOTIABLE',
         has_existing_thread: row?.has_existing_thread === true,
         direct_thread_id: row?.direct_thread_id == null ? null : String(row.direct_thread_id),
     };
@@ -159,8 +267,23 @@ async function loadUserSummary(client, userId) {
       COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
       COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
       u.last_seen_at,
-      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
+      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
     FROM users u
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(COALESCE(p.observed_views, 0)), 0)::int AS views_24h
+      FROM proofs p
+      JOIN verification_sessions s ON s.id = p.session_id
+      WHERE p.user_id = u.id
+        AND p.status = 'VERIFIED'
+        AND p.decision = 'VERIFIED'
+        AND p.created_at >= NOW() - interval '24 hours'
+        AND s.platform = 'WHATSAPP_STATUS'
+    ) view_stats ON TRUE
     WHERE u.id = $1
     LIMIT 1
     `, [userId]);
@@ -223,14 +346,28 @@ async function loadLastMessage(client, threadId) {
 }
 async function loadUnreadCount(client, threadId, userId) {
     const res = await client.query(`
-    SELECT COUNT(*)::int AS unread_count
-    FROM chat_messages msg
-    JOIN chat_thread_members member
-      ON member.thread_id = msg.thread_id
-     AND member.user_id = $2
-    WHERE msg.thread_id = $1
-      AND msg.sender_id <> $2
-      AND (member.last_read_at IS NULL OR msg.created_at > member.last_read_at)
+    SELECT (
+      SELECT COUNT(*)::int
+      FROM chat_messages msg
+      JOIN chat_thread_members member
+        ON member.thread_id = msg.thread_id
+       AND member.user_id = $2
+      WHERE msg.thread_id = $1
+        AND msg.sender_id <> $2
+        AND (member.last_read_at IS NULL OR msg.created_at > member.last_read_at)
+    ) + (
+      SELECT COUNT(*)::int
+      FROM chat_offer_events offer
+      JOIN chat_thread_members member
+        ON member.thread_id = offer.thread_id
+       AND member.user_id = $2
+      WHERE offer.thread_id = $1
+        AND offer.offeror_id <> $2
+        AND (
+          member.last_read_at IS NULL OR
+          COALESCE(offer.updated_at, offer.created_at) > member.last_read_at
+        )
+    ) AS unread_count
     `, [threadId, userId]);
     return toInt(res.rows[0]?.unread_count);
 }
@@ -256,9 +393,24 @@ async function loadDirectCounterpart(client, threadId, userId) {
       COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
       COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
       u.last_seen_at,
-      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
+      (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
     FROM chat_thread_members member
     JOIN users u ON u.id = member.user_id
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(COALESCE(p.observed_views, 0)), 0)::int AS views_24h
+      FROM proofs p
+      JOIN verification_sessions s ON s.id = p.session_id
+      WHERE p.user_id = u.id
+        AND p.status = 'VERIFIED'
+        AND p.decision = 'VERIFIED'
+        AND p.created_at >= NOW() - interval '24 hours'
+        AND s.platform = 'WHATSAPP_STATUS'
+    ) view_stats ON TRUE
     WHERE member.thread_id = $1
       AND member.user_id <> $2
     ORDER BY member.joined_at ASC
@@ -379,6 +531,9 @@ async function listGroupMemberViewerRows(client, groupId) {
       COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(view_stats.views_24h, 0)::int AS viewers_24h
     FROM chat_group_memberships membership
     JOIN users u ON u.id = membership.user_id
@@ -418,6 +573,7 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
     const res = await client.query(`
     SELECT
       g.id,
+      g.public_id,
       g.thread_id,
       g.name,
       g.description,
@@ -448,9 +604,14 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
     const memberRows = await listGroupMemberViewerRows(client, groupId);
     const capacity24h = memberRows.reduce((sum, row) => sum + toInt(row.viewers_24h), 0);
     const memberCount = memberRows.length;
+    const aggregatedOfficialPrice = memberRows.reduce((sum, row) => sum + resolveOfficialPriceUgx(row), 0);
     const effectivePriceOverride = await loadGroupPriceOverride(client, groupId, options.pricingAdvertiserId);
+    const publicPriceUgx = toInt(groupRow.public_price_ugx);
+    const officialPriceUgx = publicPriceUgx > 0 ? publicPriceUgx : aggregatedOfficialPrice;
+    const groupPricePrivacyMode = resolveGroupPricePrivacyMode(memberRows.map((row) => row.price_privacy_mode));
     const members = memberRows.map((row) => {
         const viewers24h = toInt(row.viewers_24h);
+        const officialPriceUgx = resolveOfficialPriceUgx(row);
         return {
             ...serializeUserSummary({
                 id: row.user_id,
@@ -460,6 +621,11 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
                 active_role: row.active_role,
                 last_seen_at: row.last_seen_at,
                 is_online: row.is_online,
+                max_status_viewers_12h: row.max_status_viewers_12h,
+                private_contract_rate_ugx: row.private_contract_rate_ugx,
+                price_privacy_mode: row.price_privacy_mode,
+                verified_views_24h: viewers24h,
+                official_price_ugx: officialPriceUgx,
             }),
             group_role: String(row.membership_role ?? 'MEMBER'),
             viewers_24h: viewers24h,
@@ -470,15 +636,19 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
     return {
         profile_type: 'GROUP',
         id: String(groupRow.id),
+        public_id: String(groupRow.public_id ?? ''),
         thread_id: String(groupRow.thread_id ?? ''),
         name: String(groupRow.name ?? 'Group Pool').trim(),
         description: String(groupRow.description ?? '').trim(),
         logo_url: String(groupRow.logo_url ?? '').trim(),
         public_price_ugx: toInt(groupRow.public_price_ugx),
         effective_price_ugx: effectivePriceOverride == null
-            ? toInt(groupRow.public_price_ugx)
+            ? officialPriceUgx
             : effectivePriceOverride,
+        official_price_ugx: officialPriceUgx,
         override_applied: effectivePriceOverride != null,
+        price_privacy_mode: groupPricePrivacyMode,
+        negotiation_allowed: groupPricePrivacyMode === 'NEGOTIABLE',
         capacity_24h: capacity24h,
         total_verified_views_24h: capacity24h,
         member_count: memberCount,
@@ -583,6 +753,7 @@ async function listDiscoverableChatContacts(client, userId, activeRole, searchTe
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h,
       direct_thread.thread_id AS direct_thread_id,
       (direct_thread.thread_id IS NOT NULL) AS has_existing_thread
@@ -695,6 +866,7 @@ async function listDiscoverableGroups(client, userId, searchText) {
       AND (
         g.name ILIKE $1
         OR g.description ILIKE $1
+        OR COALESCE(NULLIF(g.public_id, ''), '') ILIKE $1
       )
     `;
     }
@@ -863,6 +1035,7 @@ async function buildThreadDetail(client, threadId, userId) {
     let summary = await buildThreadSummary(client, threadId, userId);
     const messages = await listThreadMessages(client, threadId, { limit: 80 });
     const typingStates = await listActiveTypingStates(client, threadId, userId);
+    const offers = await listThreadOffers(client, threadId);
     if (summary?.group?.id &&
         (summary.kind === CHAT_THREAD_KIND_GROUP_ROOM ||
             summary.kind === CHAT_THREAD_KIND_GROUP_DEAL)) {
@@ -886,6 +1059,7 @@ async function buildThreadDetail(client, threadId, userId) {
     return {
         thread: summary,
         messages,
+        offers,
         typing_states: typingStates,
         cursor,
     };
@@ -965,6 +1139,364 @@ async function ensureDistributorCandidates(client, userIds) {
     const foundIds = new Set(res.rows.map((row) => String(row.id)));
     const missingIds = normalizedIds.filter((id) => !foundIds.has(id));
     return { validUsers, missingIds };
+}
+async function buildThreadOfferContext(client, threadId, userId, mediaType) {
+    const thread = await assertThreadMember(client, threadId, userId);
+    if (!thread) {
+        return { error: 'thread_not_found' };
+    }
+    if (thread.kind === CHAT_THREAD_KIND_DIRECT) {
+        const counterpart = await loadDirectCounterpart(client, threadId, userId);
+        if (!counterpart) {
+            return { error: 'participant_not_found' };
+        }
+        const officialPriceUgx = resolveOfficialPriceUgx(counterpart, mediaType);
+        return {
+            thread,
+            target_kind: 'USER',
+            target_user_id: counterpart.id,
+            target_group_id: null,
+            counterpart,
+            group: null,
+            official_price_ugx: officialPriceUgx,
+            price_privacy_mode: counterpart.price_privacy_mode,
+            negotiation_allowed: counterpart.negotiation_allowed,
+        };
+    }
+    if (thread.kind === CHAT_THREAD_KIND_GROUP_DEAL) {
+        const deal = await loadGroupDealByThreadId(client, threadId);
+        if (!deal) {
+            return { error: 'group_not_found' };
+        }
+        const group = await buildGroupSnapshot(client, String(deal.group_id), {
+            currentUserId: userId,
+            pricingAdvertiserId: String(deal.advertiser_id),
+            includeMembers: true,
+        });
+        if (!group) {
+            return { error: 'group_not_found' };
+        }
+        return {
+            thread,
+            target_kind: 'GROUP',
+            target_user_id: null,
+            target_group_id: String(deal.group_id),
+            counterpart: null,
+            group,
+            official_price_ugx: toInt(group.effective_price_ugx ?? group.official_price_ugx),
+            price_privacy_mode: normalizePricePrivacyMode(group.price_privacy_mode),
+            negotiation_allowed: group.negotiation_allowed === true,
+        };
+    }
+    return { error: 'offer_not_supported' };
+}
+async function loadLatestThreadOffer(client, threadId) {
+    const res = await client.query(`
+    SELECT *
+    FROM chat_offer_events
+    WHERE thread_id = $1
+    ORDER BY created_at DESC
+    LIMIT 1
+    `, [threadId]);
+    return res.rows[0] ?? null;
+}
+async function loadOfferById(client, offerId) {
+    const res = await client.query(`
+    SELECT
+      offer.*,
+      thread.kind AS thread_kind
+    FROM chat_offer_events offer
+    JOIN chat_threads thread ON thread.id = offer.thread_id
+    WHERE offer.id = $1
+    LIMIT 1
+    `, [offerId]);
+    return res.rows[0] ?? null;
+}
+async function listOfferVotes(client, offerId) {
+    const res = await client.query(`
+    SELECT
+      vote.offer_id,
+      vote.voter_id,
+      vote.vote_action,
+      vote.counter_price_ugx,
+      vote.created_at,
+      vote.updated_at,
+      voter.public_id,
+      COALESCE(NULLIF(voter.full_name, ''), NULLIF(voter.email, ''), NULLIF(voter.phone, ''), 'Participant') AS voter_display_name
+    FROM chat_offer_group_votes vote
+    JOIN users voter ON voter.id = vote.voter_id
+    WHERE vote.offer_id = $1
+    ORDER BY vote.updated_at ASC, vote.created_at ASC
+    `, [offerId]);
+    return res.rows.map((row) => ({
+        voter_id: String(row.voter_id),
+        voter_name: String(row.voter_display_name ?? 'Participant'),
+        voter_public_id: String(row.public_id ?? ''),
+        action: String(row.vote_action ?? CHAT_OFFER_RESPONSE_ACCEPT),
+        counter_price_ugx: row.counter_price_ugx == null ? null : toInt(row.counter_price_ugx),
+        created_at: timestampText(row.created_at),
+        updated_at: timestampText(row.updated_at),
+    }));
+}
+function medianCounterPrice(values) {
+    if (values.length === 0) {
+        return null;
+    }
+    const sorted = [...values].sort((left, right) => left - right);
+    const middle = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) {
+        return sorted[middle] ?? null;
+    }
+    const left = sorted[middle - 1] ?? 0;
+    const right = sorted[middle] ?? 0;
+    return Math.round((left + right) / 2);
+}
+function buildGroupPollSummary(memberCount, votes) {
+    const requiredVotes = quorumThreshold(memberCount);
+    const acceptCount = votes.filter((vote) => vote.action === CHAT_OFFER_RESPONSE_ACCEPT).length;
+    const counterVotes = votes.filter((vote) => vote.action === CHAT_OFFER_RESPONSE_COUNTER);
+    const counterCount = counterVotes.length;
+    const rejectCount = votes.filter((vote) => vote.action === CHAT_OFFER_RESPONSE_REJECT).length;
+    const participationCount = votes.length;
+    const counts = [
+        { action: CHAT_OFFER_RESPONSE_ACCEPT, count: acceptCount },
+        { action: CHAT_OFFER_RESPONSE_COUNTER, count: counterCount },
+        { action: CHAT_OFFER_RESPONSE_REJECT, count: rejectCount },
+    ];
+    const highestCount = Math.max(...counts.map((item) => item.count), 0);
+    const leaders = counts.filter((item) => item.count === highestCount && item.count > 0);
+    let resolvedAction = null;
+    if (participationCount >= requiredVotes && leaders.length === 1) {
+        resolvedAction = leaders[0]?.action ?? null;
+    }
+    else if (participationCount >= memberCount && leaders.length !== 1) {
+        resolvedAction = CHAT_OFFER_RESPONSE_REJECT;
+    }
+    return {
+        member_count: memberCount,
+        required_votes: requiredVotes,
+        participation_count: participationCount,
+        accept_count: acceptCount,
+        counter_count: counterCount,
+        reject_count: rejectCount,
+        resolved_action: resolvedAction,
+        counter_price_ugx: medianCounterPrice(counterVotes
+            .map((vote) => toInt(vote.counter_price_ugx))
+            .filter((value) => value > 0)),
+    };
+}
+async function resolveGroupOfferPoll(client, offerId) {
+    const offer = await loadOfferById(client, offerId);
+    if (!offer) {
+        return null;
+    }
+    if (offer.target_kind !== 'GROUP' ||
+        offer.status !== CHAT_OFFER_STATUS_PENDING ||
+        !offer.target_group_id) {
+        return offer;
+    }
+    const memberCountRes = await client.query(`
+    SELECT COUNT(*)::int AS member_count
+    FROM chat_group_memberships
+    WHERE group_id = $1
+      AND status = 'ACTIVE'
+    `, [offer.target_group_id]);
+    const memberCount = toInt(memberCountRes.rows[0]?.member_count);
+    const votes = await listOfferVotes(client, offerId);
+    const pollSummary = buildGroupPollSummary(memberCount, votes);
+    if (!pollSummary.resolved_action) {
+        return offer;
+    }
+    if (pollSummary.resolved_action === CHAT_OFFER_RESPONSE_ACCEPT) {
+        const updated = await client.query(`
+      UPDATE chat_offer_events
+      SET status = $2,
+          resolved_price_ugx = COALESCE(resolved_price_ugx, proposed_price_ugx),
+          responded_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `, [offerId, CHAT_OFFER_STATUS_ACCEPTED]);
+        await client.query(`
+      UPDATE chat_threads
+      SET last_message_at = NOW()
+      WHERE id = $1
+      `, [offer.thread_id]);
+        return updated.rows[0] ?? offer;
+    }
+    if (pollSummary.resolved_action === CHAT_OFFER_RESPONSE_REJECT) {
+        const updated = await client.query(`
+      UPDATE chat_offer_events
+      SET status = $2,
+          responded_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `, [offerId, CHAT_OFFER_STATUS_REJECTED]);
+        await client.query(`
+      UPDATE chat_threads
+      SET last_message_at = NOW()
+      WHERE id = $1
+      `, [offer.thread_id]);
+        return updated.rows[0] ?? offer;
+    }
+    const counterPriceUgx = toInt(pollSummary.counter_price_ugx);
+    const counterVoterId = votes.find((vote) => vote.action === CHAT_OFFER_RESPONSE_COUNTER)?.voter_id ??
+        String(offer.offeror_id);
+    const currentOfferRes = await client.query(`
+    UPDATE chat_offer_events
+    SET status = $2,
+        responded_by = $3,
+        responded_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $1
+    RETURNING *
+    `, [offerId, CHAT_OFFER_STATUS_COUNTERED, counterVoterId]);
+    const counterOfferRes = await client.query(`
+    INSERT INTO chat_offer_events (
+      thread_id,
+      parent_offer_id,
+      offeror_id,
+      target_kind,
+      target_user_id,
+      target_group_id,
+      official_price_ugx,
+      proposed_price_ugx,
+      media_type,
+      media_url,
+      media_text,
+      note,
+      status,
+      updated_at
+    )
+    VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW()
+    )
+    RETURNING *
+    `, [
+        offer.thread_id,
+        offer.id,
+        counterVoterId,
+        offer.target_kind,
+        offer.target_user_id,
+        offer.target_group_id,
+        offer.official_price_ugx,
+        counterPriceUgx,
+        offer.media_type,
+        offer.media_url,
+        offer.media_text,
+        'Group counter-offer',
+        CHAT_OFFER_STATUS_PENDING,
+    ]);
+    await client.query(`
+    UPDATE chat_threads
+    SET last_message_at = NOW()
+    WHERE id = $1
+    `, [offer.thread_id]);
+    return counterOfferRes.rows[0] ?? currentOfferRes.rows[0] ?? offer;
+}
+async function buildCampaignPrefillFromOffer(client, offer) {
+    if (!offer || offer.status !== CHAT_OFFER_STATUS_ACCEPTED) {
+        return null;
+    }
+    let target = null;
+    if (offer.target_kind === 'USER' && offer.target_user_id) {
+        target = await loadUserSummary(client, String(offer.target_user_id));
+    }
+    else if (offer.target_kind === 'GROUP' && offer.target_group_id) {
+        const deal = await loadGroupDealByThreadId(client, String(offer.thread_id));
+        target = await buildGroupSnapshot(client, String(offer.target_group_id), {
+            pricingAdvertiserId: String(deal?.advertiser_id ?? ''),
+        });
+    }
+    const acceptedPrice = toInt(offer.resolved_price_ugx ?? offer.proposed_price_ugx);
+    return {
+        accepted_offer_id: String(offer.id),
+        execution_mode: 'PRIVATE_CONTRACT',
+        platform: 'WHATSAPP_STATUS',
+        media_type: String(offer.media_type ?? 'IMAGE'),
+        media_url: offer.media_url == null ? null : String(offer.media_url),
+        media_text: offer.media_text == null ? null : String(offer.media_text),
+        payout_amount: acceptedPrice,
+        budget_total: acceptedPrice,
+        negotiated_price_ugx: acceptedPrice,
+        beneficiary_user_ids: offer.target_kind === 'USER' && offer.target_user_id
+            ? [String(offer.target_user_id)]
+            : [],
+        beneficiary_group_id: offer.target_kind === 'GROUP' && offer.target_group_id
+            ? String(offer.target_group_id)
+            : null,
+        target,
+    };
+}
+async function serializeOffer(client, offer) {
+    const offeror = await loadUserSummary(client, String(offer.offeror_id));
+    const responder = offer.responded_by == null
+        ? null
+        : await loadUserSummary(client, String(offer.responded_by));
+    const deal = offer.target_kind === 'GROUP'
+        ? await loadGroupDealByThreadId(client, String(offer.thread_id))
+        : null;
+    const target = offer.target_kind === 'USER' && offer.target_user_id
+        ? await loadUserSummary(client, String(offer.target_user_id))
+        : offer.target_kind === 'GROUP' && offer.target_group_id
+            ? await buildGroupSnapshot(client, String(offer.target_group_id), {
+                pricingAdvertiserId: String(deal?.advertiser_id ?? ''),
+            })
+            : null;
+    const votes = offer.target_kind === 'GROUP' ? await listOfferVotes(client, String(offer.id)) : [];
+    const memberCount = offer.target_kind === 'GROUP' && offer.target_group_id
+        ? toInt((await client.query(`
+          SELECT COUNT(*)::int AS member_count
+          FROM chat_group_memberships
+          WHERE group_id = $1
+            AND status = 'ACTIVE'
+          `, [offer.target_group_id])).rows[0]?.member_count)
+        : 0;
+    const poll = offer.target_kind === 'GROUP'
+        ? {
+            ...buildGroupPollSummary(memberCount, votes),
+            votes,
+        }
+        : null;
+    return {
+        id: String(offer.id),
+        thread_id: String(offer.thread_id),
+        parent_offer_id: offer.parent_offer_id == null ? null : String(offer.parent_offer_id),
+        status: String(offer.status ?? CHAT_OFFER_STATUS_PENDING),
+        target_kind: String(offer.target_kind ?? 'USER'),
+        official_price_ugx: toInt(offer.official_price_ugx),
+        proposed_price_ugx: toInt(offer.proposed_price_ugx),
+        resolved_price_ugx: offer.resolved_price_ugx == null ? null : toInt(offer.resolved_price_ugx),
+        media_type: String(offer.media_type ?? 'IMAGE'),
+        media_url: offer.media_url == null ? null : String(offer.media_url),
+        media_text: offer.media_text == null ? null : String(offer.media_text),
+        note: String(offer.note ?? ''),
+        created_at: timestampText(offer.created_at),
+        updated_at: timestampText(offer.updated_at),
+        responded_at: timestampText(offer.responded_at),
+        offeror,
+        responder,
+        target,
+        poll,
+        campaign_prefill: await buildCampaignPrefillFromOffer(client, offer),
+    };
+}
+async function listThreadOffers(client, threadId) {
+    const res = await client.query(`
+    SELECT *
+    FROM chat_offer_events
+    WHERE thread_id = $1
+    ORDER BY created_at ASC
+    `, [threadId]);
+    const offers = [];
+    for (const row of res.rows) {
+        const resolvedRow = row.target_kind === 'GROUP'
+            ? await resolveGroupOfferPoll(client, String(row.id))
+            : row;
+        offers.push(await serializeOffer(client, resolvedRow ?? row));
+    }
+    return offers;
 }
 export async function chatRoutes(app) {
     app.addHook('onReady', async () => {
@@ -1070,7 +1602,7 @@ export async function chatRoutes(app) {
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
             const participantRes = await client.query(`
-        SELECT id, role
+        SELECT id, role, COALESCE(NULLIF(price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode
         FROM users
         WHERE id = $1
         LIMIT 1
@@ -1082,6 +1614,9 @@ export async function chatRoutes(app) {
             if (!allowed) {
                 return { error: 'chat_not_allowed' };
             }
+            if (normalizePricePrivacyMode(participantRes.rows[0].price_privacy_mode) === 'FIXED') {
+                return { error: 'pricing_fixed' };
+            }
             const thread = await ensureDirectThread(client, userId, parsed.data.participant_id);
             return buildThreadDetail(client, String(thread.id), userId);
         });
@@ -1090,7 +1625,9 @@ export async function chatRoutes(app) {
                 ? 404
                 : result.error === 'chat_not_allowed'
                     ? 403
-                    : 400);
+                    : result.error === 'pricing_fixed'
+                        ? 409
+                        : 400);
             return result;
         }
         return result;
@@ -1129,8 +1666,10 @@ export async function chatRoutes(app) {
         RETURNING *
         `, [CHAT_THREAD_KIND_GROUP_ROOM, parsed.data.name, userId]);
             const thread = threadRes.rows[0];
+            const groupPublicId = `grp-${uuid().replace(/-/g, '').slice(0, 12)}`;
             const groupRes = await client.query(`
         INSERT INTO chat_groups (
+          public_id,
           thread_id,
           name,
           description,
@@ -1139,9 +1678,10 @@ export async function chatRoutes(app) {
           created_by,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
         RETURNING *
         `, [
+                groupPublicId,
                 thread.id,
                 parsed.data.name,
                 parsed.data.description,
@@ -1498,6 +2038,17 @@ export async function chatRoutes(app) {
         }
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
+            const groupSnapshot = await buildGroupSnapshot(client, params.id, {
+                currentUserId: userId,
+                pricingAdvertiserId: userId,
+                includeMembers: true,
+            });
+            if (!groupSnapshot) {
+                return { error: 'group_not_found' };
+            }
+            if (groupSnapshot.negotiation_allowed !== true) {
+                return { error: 'pricing_fixed' };
+            }
             const deal = await ensureGroupDealThread(client, params.id, userId, userId);
             if (!deal) {
                 return { error: 'group_not_found' };
@@ -1521,7 +2072,11 @@ export async function chatRoutes(app) {
             return buildThreadDetail(client, deal.threadId, userId);
         });
         if (result?.error) {
-            reply.code(result.error === 'group_not_found' ? 404 : 400);
+            reply.code(result.error === 'group_not_found'
+                ? 404
+                : result.error === 'pricing_fixed'
+                    ? 409
+                    : 400);
             return result;
         }
         return result;
@@ -1634,6 +2189,378 @@ export async function chatRoutes(app) {
             return { error: 'thread_not_found' };
         }
         return detail;
+    });
+    app.get('/chat/threads/:id/offer-context', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = offerContextSchema.safeParse(request.query);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            return buildThreadOfferContext(client, params.id, userId, parsed.data.media_type);
+        });
+        if (result?.error) {
+            reply.code(result.error === 'thread_not_found'
+                ? 404
+                : result.error === 'participant_not_found' ||
+                    result.error === 'group_not_found'
+                    ? 404
+                    : 400);
+            return result;
+        }
+        return result;
+    });
+    app.get('/chat/threads/:id/offers', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const thread = await assertThreadMember(client, params.id, userId);
+            if (!thread) {
+                return null;
+            }
+            await markThreadRead(client, params.id, userId);
+            return {
+                offers: await listThreadOffers(client, params.id),
+            };
+        });
+        if (!result) {
+            reply.code(404);
+            return { error: 'thread_not_found' };
+        }
+        return result;
+    });
+    app.post('/chat/threads/:id/offers', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (authActiveRole(request) !== ACCOUNT_ROLE_ADVERTISER ||
+            !canAccessAdvertiserFeatures(authAccountRole(request))) {
+            reply.code(403);
+            return { error: 'advertiser_role_required' };
+        }
+        const parsed = createOfferSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const context = await buildThreadOfferContext(client, params.id, userId, parsed.data.media_type);
+            if ('error' in context) {
+                return context;
+            }
+            if (!context.negotiation_allowed) {
+                return { error: 'pricing_fixed' };
+            }
+            const latestOffer = await loadLatestThreadOffer(client, params.id);
+            if (latestOffer &&
+                String(latestOffer.status) === CHAT_OFFER_STATUS_PENDING) {
+                return { error: 'offer_pending' };
+            }
+            const insertRes = await client.query(`
+        INSERT INTO chat_offer_events (
+          thread_id,
+          offeror_id,
+          target_kind,
+          target_user_id,
+          target_group_id,
+          official_price_ugx,
+          proposed_price_ugx,
+          media_type,
+          media_url,
+          media_text,
+          note,
+          status,
+          updated_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
+        )
+        RETURNING *
+        `, [
+                params.id,
+                userId,
+                context.target_kind,
+                context.target_user_id,
+                context.target_group_id,
+                context.official_price_ugx,
+                parsed.data.proposed_price_ugx,
+                parsed.data.media_type,
+                parsed.data.media_url ?? null,
+                parsed.data.media_text ?? null,
+                parsed.data.note ?? '',
+                CHAT_OFFER_STATUS_PENDING,
+            ]);
+            await client.query(`
+        UPDATE chat_threads
+        SET last_message_at = NOW()
+        WHERE id = $1
+        `, [params.id]);
+            if (context.target_kind === 'USER' && context.target_user_id) {
+                await createUserNotifications(client, [context.target_user_id], {
+                    category: 'BARGAIN_TABLE',
+                    title: 'New ChatBiz offer',
+                    body: `A new offer of UGX ${parsed.data.proposed_price_ugx} is waiting for your response.`,
+                    actorId: userId,
+                    targetType: 'CHAT_THREAD',
+                    targetId: params.id,
+                });
+            }
+            else if (context.target_kind === 'GROUP' && context.target_group_id) {
+                const membersRes = await client.query(`
+          SELECT user_id
+          FROM chat_group_memberships
+          WHERE group_id = $1
+            AND status = 'ACTIVE'
+          `, [context.target_group_id]);
+                await createUserNotifications(client, membersRes.rows.map((row) => row.user_id), {
+                    category: 'BARGAIN_TABLE',
+                    title: 'New group offer',
+                    body: `A new offer of UGX ${parsed.data.proposed_price_ugx} is ready for your vote.`,
+                    actorId: userId,
+                    targetType: 'CHAT_THREAD',
+                    targetId: params.id,
+                });
+            }
+            return {
+                offer: await serializeOffer(client, insertRes.rows[0]),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'thread_not_found' ||
+                result.error === 'participant_not_found' ||
+                result.error === 'group_not_found'
+                ? 404
+                : result.error === 'pricing_fixed'
+                    ? 409
+                    : result.error === 'offer_pending'
+                        ? 409
+                        : 400);
+            return result;
+        }
+        return result;
+    });
+    app.post('/chat/offers/:id/respond', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = respondOfferSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            let offer = await loadOfferById(client, params.id);
+            if (!offer) {
+                return { error: 'offer_not_found' };
+            }
+            const thread = await assertThreadMember(client, String(offer.thread_id), userId);
+            if (!thread) {
+                return { error: 'thread_not_found' };
+            }
+            if (String(offer.status) !== CHAT_OFFER_STATUS_PENDING) {
+                return { error: 'offer_not_pending' };
+            }
+            let responseAllowed = false;
+            if (offer.target_kind === 'USER') {
+                responseAllowed = String(offer.offeror_id) !== userId;
+            }
+            else if (offer.target_kind === 'GROUP') {
+                const deal = await loadGroupDealByThreadId(client, String(offer.thread_id));
+                responseAllowed = String(deal?.advertiser_id ?? '') === userId;
+            }
+            if (!responseAllowed) {
+                return { error: 'offer_response_not_allowed' };
+            }
+            if (parsed.data.action === CHAT_OFFER_RESPONSE_ACCEPT) {
+                const updated = await client.query(`
+          UPDATE chat_offer_events
+          SET status = $2,
+              resolved_price_ugx = COALESCE(resolved_price_ugx, proposed_price_ugx),
+              responded_by = $3,
+              responded_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+          `, [params.id, CHAT_OFFER_STATUS_ACCEPTED, userId]);
+                await client.query(`
+          UPDATE chat_threads
+          SET last_message_at = NOW()
+          WHERE id = $1
+          `, [offer.thread_id]);
+                return { offer: await serializeOffer(client, updated.rows[0] ?? offer) };
+            }
+            if (parsed.data.action === CHAT_OFFER_RESPONSE_REJECT) {
+                const updated = await client.query(`
+          UPDATE chat_offer_events
+          SET status = $2,
+              responded_by = $3,
+              responded_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+          `, [params.id, CHAT_OFFER_STATUS_REJECTED, userId]);
+                await client.query(`
+          UPDATE chat_threads
+          SET last_message_at = NOW()
+          WHERE id = $1
+          `, [offer.thread_id]);
+                return { offer: await serializeOffer(client, updated.rows[0] ?? offer) };
+            }
+            await client.query(`
+        UPDATE chat_offer_events
+        SET status = $2,
+            responded_by = $3,
+            responded_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        `, [params.id, CHAT_OFFER_STATUS_COUNTERED, userId]);
+            const counterOfferRes = await client.query(`
+        INSERT INTO chat_offer_events (
+          thread_id,
+          parent_offer_id,
+          offeror_id,
+          target_kind,
+          target_user_id,
+          target_group_id,
+          official_price_ugx,
+          proposed_price_ugx,
+          media_type,
+          media_url,
+          media_text,
+          note,
+          status,
+          updated_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW()
+        )
+        RETURNING *
+        `, [
+                offer.thread_id,
+                offer.id,
+                userId,
+                offer.target_kind,
+                offer.target_user_id,
+                offer.target_group_id,
+                offer.official_price_ugx,
+                parsed.data.counter_price_ugx,
+                offer.media_type,
+                offer.media_url,
+                offer.media_text,
+                parsed.data.note ?? 'Counter-offer',
+                CHAT_OFFER_STATUS_PENDING,
+            ]);
+            await client.query(`
+        UPDATE chat_threads
+        SET last_message_at = NOW()
+        WHERE id = $1
+        `, [offer.thread_id]);
+            return {
+                offer: await serializeOffer(client, counterOfferRes.rows[0] ?? offer),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'offer_not_found'
+                ? 404
+                : result.error === 'thread_not_found'
+                    ? 404
+                    : result.error === 'offer_not_pending'
+                        ? 409
+                        : result.error === 'offer_response_not_allowed'
+                            ? 403
+                            : 400);
+            return result;
+        }
+        return result;
+    });
+    app.post('/chat/offers/:id/votes', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = authUserId(request);
+        const params = request.params;
+        if (!userId) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const parsed = voteGroupOfferSchema.safeParse(request.body);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const result = await withTransaction(async (client) => {
+            await ensureChatSchema(client);
+            const offer = await loadOfferById(client, params.id);
+            if (!offer) {
+                return { error: 'offer_not_found' };
+            }
+            if (offer.target_kind !== 'GROUP' || !offer.target_group_id) {
+                return { error: 'group_vote_not_allowed' };
+            }
+            if (String(offer.status) !== CHAT_OFFER_STATUS_PENDING) {
+                return { error: 'offer_not_pending' };
+            }
+            const membership = await loadGroupMembership(client, String(offer.target_group_id), userId);
+            if (!membership || String(membership.status) !== 'ACTIVE') {
+                return { error: 'group_vote_not_allowed' };
+            }
+            await client.query(`
+        INSERT INTO chat_offer_group_votes (
+          offer_id,
+          voter_id,
+          vote_action,
+          counter_price_ugx,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (offer_id, voter_id) DO UPDATE
+          SET vote_action = EXCLUDED.vote_action,
+              counter_price_ugx = EXCLUDED.counter_price_ugx,
+              updated_at = NOW()
+        `, [
+                params.id,
+                userId,
+                parsed.data.action,
+                parsed.data.counter_price_ugx ?? null,
+            ]);
+            await client.query(`
+        UPDATE chat_threads
+        SET last_message_at = NOW()
+        WHERE id = $1
+        `, [offer.thread_id]);
+            const resolvedOffer = await resolveGroupOfferPoll(client, params.id);
+            return {
+                offer: await serializeOffer(client, resolvedOffer ?? offer),
+            };
+        });
+        if (result?.error) {
+            reply.code(result.error === 'offer_not_found'
+                ? 404
+                : result.error === 'offer_not_pending'
+                    ? 409
+                    : result.error === 'group_vote_not_allowed'
+                        ? 403
+                        : 400);
+            return result;
+        }
+        return result;
     });
     app.get('/chat/threads/:id/live', { preHandler: [app.authenticate] }, async (request, reply) => {
         const userId = authUserId(request);

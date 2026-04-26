@@ -6,6 +6,7 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
 import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { ensureChatSchema } from '../services/chat.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
@@ -25,6 +26,27 @@ const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchem
     .join(', ')}))`;
 function normalizePhone(input) {
     return input.replace(/[^\d+]/g, '').trim();
+}
+function normalizePricePrivacyMode(value) {
+    return String(value ?? 'NEGOTIABLE').trim().toUpperCase() === 'FIXED'
+        ? 'FIXED'
+        : 'NEGOTIABLE';
+}
+function roundPercent(value) {
+    return Math.round(value * 100) / 100;
+}
+function resolveGroupPricePrivacyMode(values) {
+    let negotiableCount = 0;
+    let fixedCount = 0;
+    for (const value of values) {
+        if (normalizePricePrivacyMode(value) === 'FIXED') {
+            fixedCount += 1;
+        }
+        else {
+            negotiableCount += 1;
+        }
+    }
+    return negotiableCount > fixedCount ? 'NEGOTIABLE' : 'FIXED';
 }
 function normalizeUserAccountStatus(value) {
     const status = String(value ?? 'ACTIVE').trim().toUpperCase();
@@ -403,6 +425,10 @@ function normalizeCampaignMutationError(message) {
     if (message.startsWith('beneficiary_capacity_insufficient')) {
         return 'beneficiary_capacity_insufficient';
     }
+    if (message === 'group_not_found')
+        return 'group_not_found';
+    if (message === 'group_beneficiary_empty')
+        return 'group_beneficiary_empty';
     if (message.startsWith('duplicate_bundle_platform')) {
         return 'duplicate_bundle_platform';
     }
@@ -455,6 +481,7 @@ async function buildPrivatePricingQuote(client, distributor, mediaType, platform
     const deterministicRateUgx = pricingReferenceEngagements24h * getPublicContractUnitRate(mediaType);
     const privateContractRateUgx = Math.max(0, Number(distributor.private_contract_rate_ugx ?? 0));
     const selectedRateUgx = privateContractRateUgx > 0 ? privateContractRateUgx : deterministicRateUgx;
+    const pricePrivacyMode = normalizePricePrivacyMode(distributor.price_privacy_mode);
     return {
         pricing_mode: privateContractRateUgx > 0
             ? 'CUSTOM_RATE'
@@ -462,10 +489,37 @@ async function buildPrivatePricingQuote(client, distributor, mediaType, platform
         private_contract_rate_ugx: privateContractRateUgx,
         deterministic_rate_ugx: deterministicRateUgx,
         selected_rate_ugx: selectedRateUgx,
+        official_price_ugx: selectedRateUgx,
         proven_engagements_24h: provenEngagements24h,
         pricing_reference_engagements_24h: pricingReferenceEngagements24h,
         impression_target: Math.max(1, pricingReferenceEngagements24h),
+        price_privacy_mode: pricePrivacyMode,
+        negotiation_allowed: pricePrivacyMode === 'NEGOTIABLE',
     };
+}
+async function findDistributorById(client, distributorId) {
+    const hasFullName = await usersHasColumn(client, 'full_name');
+    const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+    const res = await client.query(`
+    SELECT
+      u.id,
+      u.public_id,
+      u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      ${fullNameSelect} AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email
+    FROM users u
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    WHERE u.id = $1
+      AND u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
+    LIMIT 1
+    `, [distributorId]);
+    return res.rows[0] ?? null;
 }
 async function findDistributorByPhone(client, rawPhone) {
     const phone = normalizePhone(rawPhone);
@@ -480,6 +534,7 @@ async function findDistributorByPhone(client, rawPhone) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
@@ -490,6 +545,124 @@ async function findDistributorByPhone(client, rawPhone) {
     LIMIT 1
     `, [phone]);
     return res.rows[0] ?? null;
+}
+async function listGroupCampaignMembers(client, groupId) {
+    const hasFullName = await usersHasColumn(client, 'full_name');
+    const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+    const res = await client.query(`
+    SELECT
+      membership.user_id,
+      membership.role AS group_role,
+      membership.joined_at,
+      u.id,
+      u.public_id,
+      u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      ${fullNameSelect} AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email,
+      COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
+    FROM chat_group_memberships membership
+    JOIN users u ON u.id = membership.user_id
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS views_24h
+      FROM proofs pr
+      JOIN verification_sessions vs ON vs.id = pr.session_id
+      WHERE pr.user_id = u.id
+        AND pr.status = 'VERIFIED'
+        AND pr.decision = 'VERIFIED'
+        AND pr.created_at >= now() - interval '24 hours'
+        AND vs.platform = 'WHATSAPP_STATUS'
+    ) view_stats ON TRUE
+    WHERE membership.group_id = $1
+      AND membership.status = 'ACTIVE'
+    ORDER BY
+      CASE WHEN membership.role = 'ADMIN' THEN 0 ELSE 1 END,
+      membership.joined_at ASC
+    `, [groupId]);
+    return res.rows;
+}
+async function buildGroupBeneficiaryQuote(client, groupId, mediaType) {
+    const groupRes = await client.query(`
+    SELECT
+      id,
+      public_id,
+      name,
+      description,
+      COALESCE(public_price_ugx, 0)::int AS public_price_ugx
+    FROM chat_groups
+    WHERE id = $1
+    LIMIT 1
+    `, [groupId]);
+    const group = groupRes.rows[0];
+    if (!group) {
+        return null;
+    }
+    const memberRows = await listGroupCampaignMembers(client, groupId);
+    const memberQuotes = [];
+    for (const row of memberRows) {
+        const pricing = await buildPrivatePricingQuote(client, row, mediaType, 'WHATSAPP_STATUS');
+        memberQuotes.push({
+            row,
+            pricing,
+        });
+    }
+    const pricingReferenceTotal = memberQuotes.reduce((sum, entry) => sum + Number(entry.pricing.pricing_reference_engagements_24h ?? 0), 0);
+    const provenTotal = memberQuotes.reduce((sum, entry) => sum + Number(entry.pricing.proven_engagements_24h ?? 0), 0);
+    const derivedOfficialPrice = memberQuotes.reduce((sum, entry) => sum + Number(entry.pricing.selected_rate_ugx ?? 0), 0);
+    const officialPrice = Number(group.public_price_ugx ?? 0) > 0
+        ? Number(group.public_price_ugx ?? 0)
+        : derivedOfficialPrice;
+    const weightValues = memberQuotes.map((entry) => Math.max(1, Number(entry.pricing.pricing_reference_engagements_24h ?? 0)));
+    const budgetShares = distributeIntegerTotal(officialPrice, weightValues);
+    const impressionShares = distributeIntegerTotal(Math.max(pricingReferenceTotal, weightValues.reduce((sum, value) => sum + value, 0)), weightValues);
+    const totalWeight = weightValues.reduce((sum, value) => sum + value, 0);
+    const pricePrivacyMode = resolveGroupPricePrivacyMode(memberQuotes.map((entry) => entry.pricing.price_privacy_mode));
+    const members = memberQuotes.map((entry, index) => {
+        const weight = weightValues[index] ?? 0;
+        const budgetTotal = Math.max(0, Number(budgetShares[index] ?? 0));
+        const impressionTarget = Math.max(1, Number(impressionShares[index] ?? 0));
+        return {
+            distributor: entry.row,
+            impression_target: impressionTarget,
+            payout_amount: budgetTotal,
+            budget_total: budgetTotal,
+            pricing_mode: entry.pricing.pricing_mode,
+            private_contract_rate_ugx: entry.pricing.private_contract_rate_ugx,
+            deterministic_rate_ugx: entry.pricing.deterministic_rate_ugx,
+            proven_engagements_24h: entry.pricing.proven_engagements_24h,
+            pricing_reference_engagements_24h: entry.pricing.pricing_reference_engagements_24h,
+            price_privacy_mode: normalizePricePrivacyMode(entry.pricing.price_privacy_mode),
+            group_role: String(entry.row.group_role ?? 'MEMBER'),
+            share_percent: totalWeight <= 0 ? 0 : roundPercent((weight / totalWeight) * 100),
+        };
+    });
+    return {
+        group: {
+            id: String(group.id ?? ''),
+            public_id: String(group.public_id ?? ''),
+            name: String(group.name ?? 'ChatBiz Group'),
+            description: String(group.description ?? ''),
+            public_price_ugx: Number(group.public_price_ugx ?? 0),
+        },
+        members,
+        member_count: members.length,
+        official_price_ugx: officialPrice,
+        selected_rate_ugx: officialPrice,
+        pricing_mode: Number(group.public_price_ugx ?? 0) > 0
+            ? 'PUBLIC_GROUP_RATE'
+            : 'AGGREGATED_MEMBER_RATE',
+        price_privacy_mode: pricePrivacyMode,
+        negotiation_allowed: pricePrivacyMode === 'NEGOTIABLE',
+        proven_engagements_24h: provenTotal,
+        pricing_reference_engagements_24h: Math.max(pricingReferenceTotal, weightValues.reduce((sum, value) => sum + value, 0)),
+        impression_target: Math.max(1, pricingReferenceTotal || weightValues.reduce((sum, value) => sum + value, 0)),
+    };
 }
 async function loadEditableCampaign(client, campaignId, advertiserId) {
     const root = await new CampaignRepo().getCampaign(client, campaignId);
@@ -583,6 +756,15 @@ function normalizeBeneficiaryContacts(body) {
         .map((value) => normalizePhone(String(value ?? '')))
         .filter(Boolean)));
 }
+function normalizeBeneficiaryUserIds(body) {
+    return Array.from(new Set((body.beneficiary_user_ids ?? [])
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)));
+}
+function normalizeBeneficiaryGroupId(body) {
+    const groupId = String(body.beneficiary_group_id ?? '').trim();
+    return groupId.length > 0 ? groupId : null;
+}
 function distributeIntegerTotal(total, weights) {
     if (weights.length === 0) {
         return [];
@@ -644,6 +826,108 @@ async function resolvePrivateDistributorShares(client, beneficiaryContacts, medi
         });
     }
     return shares;
+}
+async function resolvePrivateDistributorSharesByUserId(client, beneficiaryUserIds, mediaType, platform) {
+    const shares = [];
+    for (const userId of beneficiaryUserIds) {
+        const distributor = await findDistributorById(client, userId);
+        if (!distributor) {
+            throw new Error(`beneficiary_not_found:${userId}`);
+        }
+        const pricing = await buildPrivatePricingQuote(client, distributor, mediaType, platform);
+        shares.push({
+            distributor,
+            impression_target: pricing.impression_target,
+            payout_amount: pricing.selected_rate_ugx,
+            budget_total: pricing.selected_rate_ugx,
+            pricing_mode: pricing.pricing_mode,
+            private_contract_rate_ugx: pricing.private_contract_rate_ugx,
+            deterministic_rate_ugx: pricing.deterministic_rate_ugx,
+            proven_engagements_24h: pricing.proven_engagements_24h,
+            pricing_reference_engagements_24h: pricing.pricing_reference_engagements_24h,
+        });
+    }
+    return shares;
+}
+async function resolvePrivateGroupDistributorShares(client, beneficiaryGroupId, mediaType) {
+    const groupQuote = await buildGroupBeneficiaryQuote(client, beneficiaryGroupId, mediaType);
+    if (!groupQuote) {
+        throw new Error('group_not_found');
+    }
+    if (groupQuote.member_count <= 0 || groupQuote.members.length == 0) {
+        throw new Error('group_beneficiary_empty');
+    }
+    const shares = groupQuote.members.map((member) => ({
+        distributor: member.distributor,
+        impression_target: member.impression_target,
+        payout_amount: member.payout_amount,
+        budget_total: member.budget_total,
+        pricing_mode: member.pricing_mode,
+        private_contract_rate_ugx: member.private_contract_rate_ugx,
+        deterministic_rate_ugx: member.deterministic_rate_ugx,
+        proven_engagements_24h: member.proven_engagements_24h,
+        pricing_reference_engagements_24h: member.pricing_reference_engagements_24h,
+    }));
+    return { groupQuote, shares };
+}
+async function resolvePrivateContractSelection(client, options, mediaType, platform) {
+    if (options.beneficiaryGroupId) {
+        const groupResult = await resolvePrivateGroupDistributorShares(client, options.beneficiaryGroupId, mediaType);
+        return {
+            privateShares: groupResult.shares,
+            privateGroupQuote: groupResult.groupQuote,
+        };
+    }
+    const byUserId = await resolvePrivateDistributorSharesByUserId(client, options.beneficiaryUserIds, mediaType, platform);
+    const byPhone = await resolvePrivateDistributorShares(client, options.beneficiaryContacts, mediaType, platform);
+    const merged = new Map();
+    for (const share of [...byUserId, ...byPhone]) {
+        const distributorId = String(share.distributor.id ?? '').trim();
+        if (!distributorId || merged.has(distributorId)) {
+            continue;
+        }
+        merged.set(distributorId, share);
+    }
+    return {
+        privateShares: Array.from(merged.values()),
+        privateGroupQuote: null,
+    };
+}
+function buildPrivateBeneficiaryMeta(privateShares) {
+    return privateShares.map((share) => ({
+        distributor_id: String(share.distributor.id ?? ''),
+        distributor_public_id: String(share.distributor.public_id ?? ''),
+        full_name: String(share.distributor.full_name ?? share.distributor.phone ?? ''),
+        phone: String(share.distributor.phone ?? ''),
+        pricing_mode: share.pricing_mode,
+        private_contract_rate_ugx: share.private_contract_rate_ugx,
+        deterministic_rate_ugx: share.deterministic_rate_ugx,
+        selected_rate_ugx: share.budget_total,
+        proven_engagements_24h: share.proven_engagements_24h,
+        pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
+        impression_target: share.impression_target,
+    }));
+}
+function buildPrivateGroupMeta(groupQuote) {
+    if (!groupQuote) {
+        return null;
+    }
+    return {
+        id: groupQuote.group.id,
+        public_id: groupQuote.group.public_id,
+        name: groupQuote.group.name,
+        description: groupQuote.group.description,
+        public_price_ugx: groupQuote.group.public_price_ugx,
+        selected_rate_ugx: groupQuote.selected_rate_ugx,
+        official_price_ugx: groupQuote.official_price_ugx,
+        pricing_mode: groupQuote.pricing_mode,
+        price_privacy_mode: groupQuote.price_privacy_mode,
+        negotiation_allowed: groupQuote.negotiation_allowed,
+        proven_engagements_24h: groupQuote.proven_engagements_24h,
+        pricing_reference_engagements_24h: groupQuote.pricing_reference_engagements_24h,
+        impression_target: groupQuote.impression_target,
+        member_count: groupQuote.member_count,
+    };
 }
 async function loadBundleSummary(client, bundleId, userId) {
     const bundleRes = await client.query(`
@@ -924,6 +1208,7 @@ async function getContractForAdvertiserAction(client, contractId, advertiserId, 
 export async function campaignRoutes(app) {
     await withTransaction(async (client) => {
         await ensureCampaignColumns(client);
+        await ensureChatSchema(client);
     });
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();
@@ -941,6 +1226,8 @@ export async function campaignRoutes(app) {
         visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
         counterparty_contact: z.string().trim().min(7).max(20).optional(),
         beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+        beneficiary_user_ids: z.array(z.string().uuid()).optional(),
+        beneficiary_group_id: z.string().uuid().optional(),
         start_date: z.string(),
         end_date: z.string(),
         media_type: MediaTypeSchema,
@@ -967,8 +1254,18 @@ export async function campaignRoutes(app) {
         }
     });
     const FundBundleSchema = FundCampaignSchema.omit({ campaign_id: true });
-    const LookupDistributorSchema = z.object({
-        phone: z.string().trim().min(7).max(20),
+    const LookupDistributorSchema = z
+        .object({
+        phone: z.string().trim().min(7).max(20).optional(),
+        user_id: z.string().uuid().optional(),
+        media_type: MediaTypeSchema.optional(),
+    })
+        .refine((value) => Boolean(value.phone || value.user_id), {
+        message: 'Either phone or user_id is required.',
+        path: ['phone'],
+    });
+    const LookupGroupSchema = z.object({
+        group_id: z.string().uuid(),
         media_type: MediaTypeSchema.optional(),
     });
     app.get('/campaigns/distributor-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -983,7 +1280,9 @@ export async function campaignRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         const distributor = await withTransaction(async (client) => {
-            const found = await findDistributorByPhone(client, String(parsed.data.phone));
+            const found = parsed.data.user_id
+                ? await findDistributorById(client, String(parsed.data.user_id))
+                : await findDistributorByPhone(client, String(parsed.data.phone));
             if (!found) {
                 return null;
             }
@@ -998,6 +1297,30 @@ export async function campaignRoutes(app) {
             return { error: 'distributor_not_found' };
         }
         return { distributor };
+    });
+    app.get('/campaigns/group-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const role = request.user?.role;
+        if (!canAccessAdvertiserFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        const parsed = LookupGroupSchema.safeParse(request.query);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const group = await withTransaction(async (client) => {
+            return buildGroupBeneficiaryQuote(client, parsed.data.group_id, parsed.data.media_type ?? 'IMAGE');
+        });
+        if (!group) {
+            reply.code(404);
+            return { error: 'group_not_found' };
+        }
+        if (group.member_count <= 0) {
+            reply.code(409);
+            return { error: 'group_beneficiary_empty' };
+        }
+        return { group };
     });
     app.get('/campaigns/public-contract-eligibility', { preHandler: [app.authenticate] }, async (request, reply) => {
         const authSub = request.user?.sub;
@@ -1465,11 +1788,16 @@ export async function campaignRoutes(app) {
                 for (const item of bundleItems) {
                     const executionMode = resolveExecutionMode(item.platform, item.execution_mode);
                     const beneficiaryContacts = normalizeBeneficiaryContacts(item);
+                    const beneficiaryUserIds = normalizeBeneficiaryUserIds(item);
+                    const beneficiaryGroupId = normalizeBeneficiaryGroupId(item);
                     const deliveryModel = resolveDeliveryModel(item.platform, item.delivery_model);
                     const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
                         ? Math.max(PRIVATE_CONTRACT_WINDOW_HOURS, Number(item.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS))
                         : Number(item.terms_keep_hours ?? 12);
-                    if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
+                    if (executionMode === 'PRIVATE_CONTRACT' &&
+                        beneficiaryContacts.length === 0 &&
+                        beneficiaryUserIds.length === 0 &&
+                        !beneficiaryGroupId) {
                         throw new Error('private_beneficiary_required');
                     }
                     let platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
@@ -1481,9 +1809,16 @@ export async function campaignRoutes(app) {
                     let estimatedAllocationCount = 1;
                     let perAllocationTarget = resolvedImpressionTarget;
                     let privateShares = [];
+                    let privateGroupQuote = null;
                     let privateBeneficiaryMeta = [];
                     if (executionMode === 'PRIVATE_CONTRACT') {
-                        privateShares = await resolvePrivateDistributorShares(client, beneficiaryContacts, item.media_type, item.platform);
+                        const privateSelection = await resolvePrivateContractSelection(client, {
+                            beneficiaryContacts,
+                            beneficiaryUserIds,
+                            beneficiaryGroupId,
+                        }, item.media_type, item.platform);
+                        privateShares = privateSelection.privateShares;
+                        privateGroupQuote = privateSelection.privateGroupQuote;
                         resolvedBudgetTotal = privateShares.reduce((sum, share) => sum + Number(share.budget_total ?? 0), 0);
                         distributableBudget = resolvedBudgetTotal;
                         resolvedRootPayout = privateShares.reduce((sum, share) => sum + Number(share.payout_amount ?? 0), 0);
@@ -1492,21 +1827,7 @@ export async function campaignRoutes(app) {
                         perAllocationTarget = Math.max(1, Math.ceil(resolvedImpressionTarget / estimatedAllocationCount));
                         visibility = 'PRIVATE';
                         platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
-                        privateBeneficiaryMeta = privateShares.map((share) => ({
-                            distributor_id: String(share.distributor.id ?? ''),
-                            distributor_public_id: String(share.distributor.public_id ?? ''),
-                            full_name: String(share.distributor.full_name ??
-                                share.distributor.phone ??
-                                ''),
-                            phone: String(share.distributor.phone ?? ''),
-                            pricing_mode: share.pricing_mode,
-                            private_contract_rate_ugx: share.private_contract_rate_ugx,
-                            deterministic_rate_ugx: share.deterministic_rate_ugx,
-                            selected_rate_ugx: share.budget_total,
-                            proven_engagements_24h: share.proven_engagements_24h,
-                            pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
-                            impression_target: share.impression_target,
-                        }));
+                        privateBeneficiaryMeta = buildPrivateBeneficiaryMeta(privateShares);
                     }
                     else {
                         const publicBudget = deriveCampaignBudget(item.platform, executionMode, item.budget_total, item.payout_amount, item.impression_target, item.media_type);
@@ -1522,8 +1843,10 @@ export async function campaignRoutes(app) {
                     const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, executionMode === 'PRIVATE_CONTRACT'
                         ? {
                             private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                            private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
                             private_pricing_model: 'PROMOTER_RATE',
                             private_beneficiaries: privateBeneficiaryMeta,
+                            private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
                             private_total_rate_ugx: resolvedBudgetTotal,
                             private_total_proven_engagements_24h: resolvedImpressionTarget,
                         }
@@ -1729,11 +2052,16 @@ export async function campaignRoutes(app) {
                 }
                 const executionMode = requestedExecutionMode;
                 const beneficiaryContacts = normalizeBeneficiaryContacts(body);
+                const beneficiaryUserIds = normalizeBeneficiaryUserIds(body);
+                const beneficiaryGroupId = normalizeBeneficiaryGroupId(body);
                 const deliveryModel = resolveDeliveryModel(platformKey, body.delivery_model);
                 const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
                     ? Math.max(PRIVATE_CONTRACT_WINDOW_HOURS, Number(body.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS))
                     : Number(body.terms_keep_hours ?? editable.root.terms_keep_hours ?? 12);
-                if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
+                if (executionMode === 'PRIVATE_CONTRACT' &&
+                    beneficiaryContacts.length === 0 &&
+                    beneficiaryUserIds.length === 0 &&
+                    !beneficiaryGroupId) {
                     throw new Error('private_beneficiary_required');
                 }
                 let platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
@@ -1745,9 +2073,16 @@ export async function campaignRoutes(app) {
                 let estimatedAllocationCount = 1;
                 let perAllocationTarget = resolvedImpressionTarget;
                 let privateShares = [];
+                let privateGroupQuote = null;
                 let privateBeneficiaryMeta = [];
                 if (executionMode === 'PRIVATE_CONTRACT') {
-                    privateShares = await resolvePrivateDistributorShares(client, beneficiaryContacts, body.media_type, platformKey);
+                    const privateSelection = await resolvePrivateContractSelection(client, {
+                        beneficiaryContacts,
+                        beneficiaryUserIds,
+                        beneficiaryGroupId,
+                    }, body.media_type, platformKey);
+                    privateShares = privateSelection.privateShares;
+                    privateGroupQuote = privateSelection.privateGroupQuote;
                     resolvedBudgetTotal = privateShares.reduce((sum, share) => sum + Number(share.budget_total ?? 0), 0);
                     distributableBudget = resolvedBudgetTotal;
                     resolvedRootPayout = privateShares.reduce((sum, share) => sum + Number(share.payout_amount ?? 0), 0);
@@ -1756,21 +2091,7 @@ export async function campaignRoutes(app) {
                     perAllocationTarget = Math.max(1, Math.ceil(resolvedImpressionTarget / estimatedAllocationCount));
                     visibility = 'PRIVATE';
                     platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
-                    privateBeneficiaryMeta = privateShares.map((share) => ({
-                        distributor_id: String(share.distributor.id ?? ''),
-                        distributor_public_id: String(share.distributor.public_id ?? ''),
-                        full_name: String(share.distributor.full_name ??
-                            share.distributor.phone ??
-                            ''),
-                        phone: String(share.distributor.phone ?? ''),
-                        pricing_mode: share.pricing_mode,
-                        private_contract_rate_ugx: share.private_contract_rate_ugx,
-                        deterministic_rate_ugx: share.deterministic_rate_ugx,
-                        selected_rate_ugx: share.budget_total,
-                        proven_engagements_24h: share.proven_engagements_24h,
-                        pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
-                        impression_target: share.impression_target,
-                    }));
+                    privateBeneficiaryMeta = buildPrivateBeneficiaryMeta(privateShares);
                 }
                 else {
                     const publicBudget = deriveCampaignBudget(platformKey, executionMode, Number(body.budget_total), body.payout_amount == null ? null : Number(body.payout_amount), body.impression_target == null
@@ -1796,8 +2117,10 @@ export async function campaignRoutes(app) {
                 const executionMeta = buildCampaignExecutionMeta(platformKey, body.execution_meta, executionMode === 'PRIVATE_CONTRACT'
                     ? {
                         private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                        private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
                         private_pricing_model: 'PROMOTER_RATE',
                         private_beneficiaries: privateBeneficiaryMeta,
+                        private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
                         private_total_rate_ugx: resolvedBudgetTotal,
                         private_total_proven_engagements_24h: resolvedImpressionTarget,
                     }

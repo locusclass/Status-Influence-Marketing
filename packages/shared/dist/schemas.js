@@ -2,6 +2,7 @@ import { z } from 'zod';
 export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS']);
 export const MediaTypeSchema = z.enum(['IMAGE', 'VIDEO', 'TEXT']);
 export const DeliveryModelSchema = z.enum(['DETERMINISTIC', 'PROBABILISTIC']);
+export const PricePrivacyModeSchema = z.enum(['NEGOTIABLE', 'FIXED']);
 export const CreateVerificationSessionSchema = z.object({
     user_id: z.string().trim().min(3),
     campaign_id: z.string().trim().min(3),
@@ -24,6 +25,8 @@ export const CampaignBundleItemSchema = z
     visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
     counterparty_contact: z.string().trim().min(7).max(20).optional(),
     beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+    beneficiary_user_ids: z.array(z.string().uuid()).optional(),
+    beneficiary_group_id: z.string().uuid().optional(),
     start_date: z.string(),
     end_date: z.string(),
     media_type: MediaTypeSchema,
@@ -62,6 +65,8 @@ export const CreateCampaignSchema = z
     visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
     counterparty_contact: z.string().trim().min(7).max(20).optional(),
     beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+    beneficiary_user_ids: z.array(z.string().uuid()).optional(),
+    beneficiary_group_id: z.string().uuid().optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
     media_type: MediaTypeSchema.optional(),

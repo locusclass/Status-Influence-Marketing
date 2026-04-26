@@ -72,6 +72,9 @@ export function buildUserSession(user) {
     const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
     const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
     const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
+    const pricePrivacyMode = String(user.price_privacy_mode ?? 'NEGOTIABLE')
+        .trim()
+        .toUpperCase();
     const accountStatus = String(user.status ?? 'ACTIVE').trim().toUpperCase();
     return {
         id: String(user.id ?? ''),
@@ -102,6 +105,7 @@ export function buildUserSession(user) {
         private_contract_rate_ugx: Math.max(0, Number.isFinite(privateContractRateUgx)
             ? Math.trunc(privateContractRateUgx)
             : 0),
+        price_privacy_mode: pricePrivacyMode === 'FIXED' ? 'FIXED' : 'NEGOTIABLE',
         last_login_at: user.last_login_at ?? null,
         last_seen_at: user.last_seen_at ?? null,
         is_online: user.is_online === true,

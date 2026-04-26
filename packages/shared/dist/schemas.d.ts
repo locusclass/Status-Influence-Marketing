@@ -2,6 +2,7 @@ import { z } from 'zod';
 export declare const PlatformAdapterSchema: z.ZodEnum<["WHATSAPP_STATUS"]>;
 export declare const MediaTypeSchema: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
 export declare const DeliveryModelSchema: z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>;
+export declare const PricePrivacyModeSchema: z.ZodEnum<["NEGOTIABLE", "FIXED"]>;
 export declare const CreateVerificationSessionSchema: z.ZodObject<{
     user_id: z.ZodString;
     campaign_id: z.ZodString;
@@ -41,6 +42,8 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     visibility: z.ZodOptional<z.ZodEnum<["PUBLIC", "PRIVATE"]>>;
     counterparty_contact: z.ZodOptional<z.ZodString>;
     beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    beneficiary_user_ids: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    beneficiary_group_id: z.ZodOptional<z.ZodString>;
     start_date: z.ZodString;
     end_date: z.ZodString;
     media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
@@ -66,6 +69,8 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -88,6 +93,8 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -110,6 +117,8 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -132,6 +141,8 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
@@ -156,6 +167,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility: z.ZodOptional<z.ZodEnum<["PUBLIC", "PRIVATE"]>>;
         counterparty_contact: z.ZodOptional<z.ZodString>;
         beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+        beneficiary_user_ids: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+        beneficiary_group_id: z.ZodOptional<z.ZodString>;
         start_date: z.ZodString;
         end_date: z.ZodString;
         media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
@@ -181,6 +194,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -203,6 +218,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -225,6 +242,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -247,6 +266,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -264,6 +285,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     visibility: z.ZodOptional<z.ZodEnum<["PUBLIC", "PRIVATE"]>>;
     counterparty_contact: z.ZodOptional<z.ZodString>;
     beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    beneficiary_user_ids: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    beneficiary_group_id: z.ZodOptional<z.ZodString>;
     start_date: z.ZodOptional<z.ZodString>;
     end_date: z.ZodOptional<z.ZodString>;
     media_type: z.ZodOptional<z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>>;
@@ -286,6 +309,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
@@ -312,6 +337,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -332,6 +359,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
@@ -358,6 +387,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -378,6 +409,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
@@ -404,6 +437,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
@@ -424,6 +459,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     visibility?: "PUBLIC" | "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
+    beneficiary_user_ids?: string[] | undefined;
+    beneficiary_group_id?: string | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
@@ -450,6 +487,8 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         visibility?: "PUBLIC" | "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
+        beneficiary_user_ids?: string[] | undefined;
+        beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;

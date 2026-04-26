@@ -15,6 +15,7 @@ const accountProfileSchema = z.object({
     country: z.string().trim().min(2).max(3).optional(),
     current_advertiser_viewers: z.number().int().min(0).optional(),
     private_contract_rate_ugx: z.number().int().min(0).optional(),
+    price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
 });
 const accountPasswordSchema = z.object({
     current_password: z.string().min(8),
@@ -296,6 +297,10 @@ async function ensureAccountSchema(client) {
       ADD COLUMN IF NOT EXISTS current_advertiser_viewers INTEGER NOT NULL DEFAULT 0
   `);
     await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS price_privacy_mode TEXT NOT NULL DEFAULT 'NEGOTIABLE'
+  `);
+    await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check
   `);
     await client.query(`
@@ -308,6 +313,13 @@ async function ensureAccountSchema(client) {
     await client.query(`
     ALTER TABLE users
       ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'))
+  `);
+    await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_price_privacy_mode_check
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_price_privacy_mode_check CHECK (price_privacy_mode IN ('NEGOTIABLE', 'FIXED'))
   `);
     await client.query(`
     UPDATE users
@@ -414,6 +426,7 @@ export async function accountRoutes(app) {
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
           COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           u.last_login_at,
           u.last_seen_at,
           CASE
@@ -512,6 +525,9 @@ export async function accountRoutes(app) {
                     return { error: 'distributor_profile_required' };
                 }
                 await client.query('UPDATE users SET private_contract_rate_ugx=$2 WHERE id=$1', [userId, Math.max(0, body.private_contract_rate_ugx)]);
+            }
+            if (typeof body.price_privacy_mode === 'string') {
+                await client.query('UPDATE users SET price_privacy_mode=$2 WHERE id=$1', [userId, body.price_privacy_mode]);
             }
             return { ok: true };
         });
