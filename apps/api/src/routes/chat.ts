@@ -28,8 +28,15 @@ import {
 } from '../services/chat.js';
 import { createUserNotifications } from '../services/userSignals.js';
 
+const groupDealThreadSchema = z.object({
+  media_url: z.string(),
+  media_type: z.enum(['IMAGE', 'VIDEO', 'TEXT']),
+});
+
 const directThreadSchema = z.object({
   participant_id: z.string().uuid(),
+  media_url: z.string(),
+  media_type: z.enum(['IMAGE', 'VIDEO', 'TEXT']),
 });
 
 const sendMessageSchema = z.object({
@@ -409,18 +416,21 @@ function usersCanChatDirectly(
 async function ensureDirectThread(
   client: any,
   userId: string,
-  participantId: string
+  participantId: string,
+  mediaUrl: string,
+  mediaType: string
 ) {
   const directKey = [userId, participantId].sort().join(':');
   const threadRes = await client.query(
     `
-    INSERT INTO chat_threads (kind, direct_key, created_by)
-    VALUES ($1, $2, $3)
+    INSERT INTO chat_threads (kind, direct_key, created_by, media_url, media_type)
+    VALUES ($1, $2, $3, $4, $5)
     ON CONFLICT (direct_key) DO UPDATE
-      SET direct_key = EXCLUDED.direct_key
+      SET media_url = EXCLUDED.media_url,
+          media_type = EXCLUDED.media_type
     RETURNING *
     `,
-    [CHAT_THREAD_KIND_DIRECT, directKey, userId]
+    [CHAT_THREAD_KIND_DIRECT, directKey, userId, mediaUrl, mediaType]
   );
   const thread = threadRes.rows[0];
   await client.query(
@@ -1349,7 +1359,9 @@ async function ensureGroupDealThread(
   client: any,
   groupId: string,
   advertiserId: string,
-  createdBy: string
+  createdBy: string,
+  mediaUrl: string,
+  mediaType: string
 ) {
   const group = await loadGroupById(client, groupId);
   if (!group) return null;
@@ -1371,8 +1383,8 @@ async function ensureGroupDealThread(
   if (!threadId) {
     const threadRes = await client.query(
       `
-      INSERT INTO chat_threads (kind, title, created_by)
-      VALUES ($1, $2, $3)
+      INSERT INTO chat_threads (kind, title, created_by, media_url, media_type)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING id
       `,
       [CHAT_THREAD_KIND_GROUP_DEAL, String(group.name ?? 'Group Pool').trim(), createdBy]
@@ -2069,7 +2081,9 @@ export async function chatRoutes(app: FastifyInstance) {
       const thread = await ensureDirectThread(
         client,
         userId,
-        parsed.data.participant_id
+        parsed.data.participant_id,
+        parsed.data.media_url,
+        parsed.data.media_type
       );
       return buildThreadDetail(client, String(thread.id), userId);
     });
@@ -2133,8 +2147,8 @@ export async function chatRoutes(app: FastifyInstance) {
 
       const threadRes = await client.query(
         `
-        INSERT INTO chat_threads (kind, title, created_by)
-        VALUES ($1, $2, $3)
+        INSERT INTO chat_threads (kind, title, created_by, media_url, media_type)
+      VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         `,
         [CHAT_THREAD_KIND_GROUP_ROOM, parsed.data.name, userId]
@@ -2591,6 +2605,11 @@ export async function chatRoutes(app: FastifyInstance) {
   });
 
   app.post('/chat/groups/:id/deal', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const parsed = groupDealThreadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
     const userId = authUserId(request);
     const params = request.params as { id: string };
     if (!userId) {
@@ -2618,7 +2637,7 @@ export async function chatRoutes(app: FastifyInstance) {
       if (groupSnapshot.negotiation_allowed !== true) {
         return { error: 'pricing_fixed' } as const;
       }
-      const deal = await ensureGroupDealThread(client, params.id, userId, userId);
+      const deal = await ensureGroupDealThread(client, params.id, userId, userId, parsed.data.media_url, parsed.data.media_type);
       if (!deal) {
         return { error: 'group_not_found' } as const;
       }
@@ -3472,3 +3491,5 @@ export async function chatRoutes(app: FastifyInstance) {
     return result;
   });
 }
+
+

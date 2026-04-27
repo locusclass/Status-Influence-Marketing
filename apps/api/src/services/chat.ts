@@ -15,38 +15,27 @@ export async function ensureChatSchema(client: any) {
       ADD COLUMN IF NOT EXISTS price_privacy_mode TEXT NOT NULL DEFAULT 'NEGOTIABLE'
   `);
   await client.query(`
-    ALTER TABLE users
-      DROP CONSTRAINT IF EXISTS users_price_privacy_mode_check
-  `);
-  await client.query(`
-    ALTER TABLE users
-      ADD CONSTRAINT users_price_privacy_mode_check
-      CHECK (price_privacy_mode IN ('NEGOTIABLE', 'FIXED'))
-  `);
-
-  await client.query(`
     CREATE TABLE IF NOT EXISTS chat_threads (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      kind TEXT NOT NULL DEFAULT '${CHAT_THREAD_KIND_DIRECT}',
+      kind TEXT NOT NULL,
+      title TEXT,
       direct_key TEXT UNIQUE,
-      title TEXT NOT NULL DEFAULT '',
       created_by UUID REFERENCES users(id) ON DELETE SET NULL,
       last_message_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await client.query(`
-    ALTER TABLE chat_threads
-      DROP CONSTRAINT IF EXISTS chat_threads_kind_check
-  `);
-  await client.query(`
-    ALTER TABLE chat_threads
-      ADD CONSTRAINT chat_threads_kind_check
-      CHECK (kind IN (
+      media_url TEXT,
+      media_type TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chat_threads_kind_check CHECK (kind IN (
         '${CHAT_THREAD_KIND_DIRECT}',
         '${CHAT_THREAD_KIND_GROUP_ROOM}',
         '${CHAT_THREAD_KIND_GROUP_DEAL}'
       ))
+    )
+  `);
+
+  await client.query(`
+    ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS media_url TEXT;
+    ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS media_type TEXT;
   `);
 
   await client.query(`
@@ -65,6 +54,8 @@ export async function ensureChatSchema(client: any) {
       thread_id UUID NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
       sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
+      media_url TEXT,
+      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -89,6 +80,8 @@ export async function ensureChatSchema(client: any) {
       logo_url TEXT NOT NULL DEFAULT '',
       public_price_ugx INTEGER NOT NULL DEFAULT 0,
       created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      media_url TEXT,
+      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -128,6 +121,8 @@ export async function ensureChatSchema(client: any) {
       invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
       joined_at TIMESTAMPTZ,
       responded_at TIMESTAMPTZ,
+      media_url TEXT,
+      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (group_id, user_id)
@@ -159,6 +154,8 @@ export async function ensureChatSchema(client: any) {
       advertiser_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       thread_id UUID NOT NULL UNIQUE REFERENCES chat_threads(id) ON DELETE CASCADE,
       created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      media_url TEXT,
+      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (group_id, advertiser_id)
@@ -194,6 +191,8 @@ export async function ensureChatSchema(client: any) {
       status TEXT NOT NULL DEFAULT '${CHAT_OFFER_STATUS_PENDING}',
       responded_by UUID REFERENCES users(id) ON DELETE SET NULL,
       responded_at TIMESTAMPTZ,
+      media_url TEXT,
+      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -236,6 +235,8 @@ export async function ensureChatSchema(client: any) {
       voter_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       vote_action TEXT NOT NULL DEFAULT '${CHAT_OFFER_RESPONSE_ACCEPT}',
       counter_price_ugx INTEGER,
+      media_url TEXT,
+      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (offer_id, voter_id)
@@ -304,3 +305,4 @@ export async function ensureChatSchema(client: any) {
     ON chat_offer_group_votes (offer_id, updated_at DESC)
   `);
 }
+
