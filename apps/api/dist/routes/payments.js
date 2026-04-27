@@ -3,9 +3,84 @@ import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { getTransactionStatus, initiateMobileMoneyCollection, } from '../services/yoUganda.js';
 import { hasYoClientCredentials } from '../config.js';
+const yoProviderReferenceInputKeys = [
+    'transaction_id',
+    'transactionId',
+    'charge_id',
+    'chargeId',
+    'provider_reference',
+    'providerReference',
+    'provider_transaction_reference',
+    'providerTransactionReference',
+    'provider_transaction_id',
+    'providerTransactionId',
+    'yo_reference',
+    'yoReference',
+    'yo_transaction_reference',
+    'yoTransactionReference',
+    'transaction_reference',
+    'transactionReference',
+    'TransactionReference',
+];
+const yoMerchantReferenceInputKeys = [
+    'tx_ref',
+    'txRef',
+    'reference',
+    'merchant_reference',
+    'merchantReference',
+    'internal_reference',
+    'internalReference',
+    'internal_transaction_reference',
+    'internalTransactionReference',
+    'external_reference',
+    'externalReference',
+];
+const yoStoredProviderReferenceKeys = [
+    'transaction_reference',
+    'transactionReference',
+    'yo_transaction_reference',
+    'yoTransactionReference',
+    'yo_reference',
+    'yoReference',
+    'provider_transaction_reference',
+    'providerTransactionReference',
+    'provider_transaction_id',
+    'providerTransactionId',
+    'provider_reference',
+    'providerReference',
+    'charge_id',
+    'chargeId',
+    'transaction_id',
+    'transactionId',
+];
 function readTextValue(value) {
     const text = String(value ?? '').trim();
     return text.length > 0 ? text : null;
+}
+function asRecord(value) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return value;
+    }
+    return {};
+}
+function readInputField(input, keys, nestedKeys = ['reference_data', 'provider', 'meta']) {
+    const source = asRecord(input);
+    const sources = [source];
+    for (const nestedKey of nestedKeys) {
+        const nestedSource = asRecord(source[nestedKey]);
+        if (Object.keys(nestedSource).length > 0) {
+            sources.push(nestedSource);
+        }
+    }
+    for (const candidateSource of sources) {
+        for (const key of keys) {
+            const value = readTextValue(candidateSource[key]);
+            if (value) {
+                return value;
+            }
+        }
+    }
+    return null;
 }
 function readTransactionReference(payload) {
     const source = payload;
@@ -78,15 +153,62 @@ function readStringField(payload, keys) {
     }
     return null;
 }
+function readProviderMerchantReference(payload) {
+    return readStringField(payload, [
+        'InternalReference',
+        'internalReference',
+        'ExternalReference',
+        'externalReference',
+        'MerchantReference',
+        'merchantReference',
+    ]);
+}
+export function readYoProviderTransactionReference(input) {
+    return readInputField(input, yoProviderReferenceInputKeys);
+}
+export function readYoMerchantReference(input) {
+    return readInputField(input, yoMerchantReferenceInputKeys, ['reference_data', 'meta']);
+}
+export function resolveStoredYoTransactionReference(txn) {
+    if (!txn)
+        return null;
+    const rawPayload = asRecord(txn.raw_payload);
+    return (readTextValue(txn.transaction_reference) ??
+        readInputField(rawPayload, yoStoredProviderReferenceKeys, ['reference_data']) ??
+        readInputField(txn, yoStoredProviderReferenceKeys, []));
+}
 export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
     const deepLinkReturn = 'bakule://payment/return';
     const deepLinkCancel = 'bakule://payment/cancel';
     const yoRouteBase = '/payments/yo-uganda';
     const legacyFlutterwaveRouteBase = '/payments/flutterwave';
-    const verifySchema = z.object({
-        transaction_id: z.union([z.string().trim().min(1), z.number().int().positive()]),
-        tx_ref: z.string().trim().min(1),
+    const verifySchema = z
+        .object({
+        transaction_id: z
+            .union([z.string().trim().min(1), z.number().int().positive()])
+            .optional(),
+        charge_id: z.string().trim().min(1).optional(),
+        provider_reference: z.string().trim().min(1).optional(),
+        provider_transaction_reference: z.string().trim().min(1).optional(),
+        provider_transaction_id: z.string().trim().min(1).optional(),
+        yo_reference: z.string().trim().min(1).optional(),
+        yo_transaction_reference: z.string().trim().min(1).optional(),
+        transaction_reference: z.string().trim().min(1).optional(),
+        tx_ref: z.string().trim().min(1).optional(),
+        reference: z.string().trim().min(1).optional(),
+        merchant_reference: z.string().trim().min(1).optional(),
+        internal_transaction_reference: z.string().trim().min(1).optional(),
+        reference_data: z.record(z.string()).optional(),
+    })
+        .superRefine((value, ctx) => {
+        if (!readYoMerchantReference(value)) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['tx_ref'],
+                message: 'Transaction reference is required.',
+            });
+        }
     });
     const initiateSchema = z.object({
         tx_ref: z.string().trim().min(1),
@@ -125,11 +247,30 @@ export async function paymentRoutes(app) {
         }
         const txnPayload = (txn.raw_payload ?? {});
         const statusText = normalizeTransactionStatus(verified);
+        const actualProviderReference = readTransactionReference(verified);
+        const expectedProviderReference = paymentEvent.expectedProviderReference ??
+            resolveStoredYoTransactionReference(txn) ??
+            null;
+        const merchantReferenceFromProvider = readProviderMerchantReference(verified);
         const verifiedAmount = readNumericField(verified, ['Amount', 'amount']);
         const verifiedCurrency = readStringField(verified, ['CurrencyCode', 'Currency', 'currency']);
         const expectedCurrency = String(txnPayload.payment_currency ?? 'UGX')
             .trim()
             .toUpperCase();
+        if (expectedProviderReference &&
+            actualProviderReference &&
+            expectedProviderReference !== actualProviderReference) {
+            return { ok: false, error: 'reference_mismatch' };
+        }
+        if (actualProviderReference &&
+            readTextValue(paymentEvent.transactionId) &&
+            actualProviderReference !== readTextValue(paymentEvent.transactionId)) {
+            return { ok: false, error: 'reference_mismatch' };
+        }
+        if (merchantReferenceFromProvider &&
+            merchantReferenceFromProvider !== paymentEvent.reference) {
+            return { ok: false, error: 'reference_mismatch' };
+        }
         if (verifiedAmount != null &&
             Math.round(verifiedAmount) !== Math.round(Number(txn.amount ?? 0))) {
             return { ok: false, error: 'amount_mismatch' };
@@ -189,12 +330,9 @@ export async function paymentRoutes(app) {
         await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
         return { ok: true, pending: true, type: 'campaign_funding', escrow_id: escrow.id };
     };
-    const settleCharge = async (transactionId, reference) => {
-        const verified = await getTransactionStatus(String(transactionId));
-        const result = await withTransaction(async (client) => applyVerifiedCharge(client, {
-            transactionId,
-            reference,
-        }, verified));
+    const settleCharge = async (paymentEvent) => {
+        const verified = await getTransactionStatus(String(paymentEvent.transactionId), paymentEvent.reference);
+        const result = await withTransaction(async (client) => applyVerifiedCharge(client, paymentEvent, verified));
         return { result, verified };
     };
     const resolveBrowserTarget = (request, fallbackPath) => {
@@ -250,9 +388,12 @@ export async function paymentRoutes(app) {
         app.get(`${routeBase}/webhook`, webhookInfo);
         app.post(`${routeBase}/webhook`, handleWebhook);
     }
-    const loadChargeContext = async (client, txRef, authUser) => {
+    const loadTransactionByReference = async (client, txRef) => {
         const txnRes = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1', [txRef]);
-        const txn = txnRes.rows[0];
+        return txnRes.rows[0];
+    };
+    const loadChargeContext = async (client, txRef, authUser) => {
+        const txn = await loadTransactionByReference(client, txRef);
         if (!txn) {
             return { error: 'txn_not_found' };
         }
@@ -307,6 +448,9 @@ export async function paymentRoutes(app) {
             payment_method: paymentMethod,
             charge_id: chargeId,
             transaction_id: chargeId,
+            provider_reference: chargeId,
+            provider_transaction_reference: chargeId,
+            yo_transaction_reference: chargeId,
             provider_status: providerStatus,
             redirect_url: null,
             instruction,
@@ -317,6 +461,18 @@ export async function paymentRoutes(app) {
                 }
                 : null,
             provider: compactProviderSnapshot(chargePayload),
+        };
+    };
+    const resolveSettlementReference = (txn, rawInput) => {
+        const storedProviderReference = resolveStoredYoTransactionReference(txn);
+        const requestedProviderReference = readYoProviderTransactionReference(rawInput);
+        const transactionId = storedProviderReference ?? requestedProviderReference;
+        if (!transactionId) {
+            return null;
+        }
+        return {
+            transactionId,
+            expectedProviderReference: storedProviderReference ?? transactionId,
         };
     };
     const initiatePayment = async (request, reply) => {
@@ -400,6 +556,7 @@ export async function paymentRoutes(app) {
                     await applyVerifiedCharge(client, {
                         transactionId: chargeId ?? parsed.data.tx_ref,
                         reference: parsed.data.tx_ref,
+                        expectedProviderReference: chargeId,
                     }, chargeResponse);
                 }
                 else if (statusFailure.has(providerStatus)) {
@@ -463,11 +620,44 @@ export async function paymentRoutes(app) {
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
         try {
-            const { result, verified } = await settleCharge(parsed.data.transaction_id, parsed.data.tx_ref);
+            const authUser = request.user?.sub;
+            if (!authUser) {
+                reply.code(401);
+                return { error: 'unauthorized' };
+            }
+            const txRef = readYoMerchantReference(request.body) ?? readYoMerchantReference(parsed.data);
+            if (!txRef) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: [{ path: ['tx_ref'] }] };
+            }
+            const verificationContext = await withTransaction(async (client) => {
+                const context = await loadChargeContext(client, txRef, authUser);
+                if ('error' in context) {
+                    return context;
+                }
+                const settlementReference = resolveSettlementReference(context.txn, request.body);
+                if (!settlementReference) {
+                    return { error: 'missing_transaction_reference' };
+                }
+                return settlementReference;
+            });
+            if (!('transactionId' in verificationContext)) {
+                reply.code(verificationContext.error === 'forbidden'
+                    ? 403
+                    : verificationContext.error === 'txn_not_found'
+                        ? 404
+                        : 400);
+                return verificationContext;
+            }
+            const { result, verified } = await settleCharge({
+                transactionId: verificationContext.transactionId,
+                reference: txRef,
+                expectedProviderReference: verificationContext.expectedProviderReference,
+            });
             const verifiedStatus = normalizeTransactionStatus(verified);
             app.log.info({
-                tx_ref: parsed.data.tx_ref,
-                transaction_id: parsed.data.transaction_id,
+                tx_ref: txRef,
+                transaction_id: verificationContext.transactionId,
                 verified_status: verifiedStatus,
                 settlement_ok: result.ok,
                 settlement_result: result,
@@ -480,8 +670,8 @@ export async function paymentRoutes(app) {
             return {
                 ok: true,
                 status: verifiedStatus,
-                tx_ref: parsed.data.tx_ref,
-                transaction_id: parsed.data.transaction_id,
+                tx_ref: txRef,
+                transaction_id: verificationContext.transactionId,
                 result,
             };
         }
@@ -504,27 +694,42 @@ export async function paymentRoutes(app) {
     app.get('/payments/return', async (request, reply) => {
         const query = request.query;
         const status = String(query?.status ?? '').toLowerCase();
-        const cancelled = status === 'cancelled' || status === 'failed';
-        const transactionId = typeof query?.transaction_id === 'string' && query.transaction_id.trim()
-            ? query.transaction_id.trim()
-            : typeof query?.transactionId === 'string' && query.transactionId.trim()
-                ? query.transactionId.trim()
-                : typeof query?.charge_id === 'string' && query.charge_id.trim()
-                    ? query.charge_id.trim()
-                    : undefined;
-        const txRef = typeof query?.tx_ref === 'string' && query.tx_ref.trim()
-            ? query.tx_ref.trim()
-            : typeof query?.txRef === 'string' && query.txRef.trim()
-                ? query.txRef.trim()
-                : typeof query?.reference === 'string' && query.reference.trim()
-                    ? query.reference.trim()
-                    : undefined;
-        if (transactionId && txRef) {
+        const paymentState = String(query?.payment ?? '').toLowerCase();
+        const cancelled = status === 'cancelled' ||
+            status === 'failed' ||
+            status === 'error' ||
+            paymentState === 'cancel';
+        const txRef = readYoMerchantReference(query);
+        if (txRef) {
             try {
-                await settleCharge(transactionId, txRef);
+                const settlementReference = await withTransaction(async (client) => {
+                    const txn = await loadTransactionByReference(client, txRef);
+                    if (!txn) {
+                        return { error: 'txn_not_found' };
+                    }
+                    return resolveSettlementReference(txn, query) ?? {
+                        error: 'missing_transaction_reference',
+                    };
+                });
+                if ('error' in settlementReference) {
+                    app.log.warn({ settlementReference, txRef, query }, 'yo_return_verification_skipped');
+                }
+                else {
+                    await settleCharge({
+                        transactionId: settlementReference.transactionId,
+                        reference: txRef,
+                        expectedProviderReference: settlementReference.expectedProviderReference,
+                    });
+                }
             }
             catch (error) {
-                app.log.error({ error, transactionId, txRef, status }, 'yo_return_verification_failed');
+                app.log.error({
+                    error,
+                    transaction_id: readYoProviderTransactionReference(query),
+                    txRef,
+                    status,
+                    payment: paymentState,
+                }, 'yo_return_verification_failed');
             }
         }
         reply.redirect(resolveBrowserTarget(request, cancelled ? '/payment/cancel' : '/payment/success') ?? (cancelled ? deepLinkCancel : deepLinkReturn));
