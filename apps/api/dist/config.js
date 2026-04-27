@@ -65,7 +65,7 @@ const yoConfig = {
         process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ??
         ''),
 };
-const legacyFlutterwaveConfig = {
+const legacyFlutterwaveCompatConfig = {
     baseUrl: yoConfig.baseUrl,
     secretKey: '',
     clientId: yoConfig.apiUsername,
@@ -84,7 +84,7 @@ export const config = {
     uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
     fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
     yo: yoConfig,
-    flutterwave: legacyFlutterwaveConfig,
+    flutterwave: legacyFlutterwaveCompatConfig,
     pesapal: yoConfig,
     adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? '',
     whatsappVerification: {
@@ -152,6 +152,15 @@ export function hasYoCredentials() {
 export function hasValidYoKeys() {
     return hasYoCredentials();
 }
+export function hasYoClientCredentials() {
+    return hasYoCredentials();
+}
+export function hasYoSecretKey() {
+    return false;
+}
+export function hasYoEncryptionKey() {
+    return false;
+}
 export function resolveYoBaseUrl() {
     return normalizeYoTaskUrl(config.yo.baseUrl, 'https://paymentsapi1.yo.co.ug/ybs/task.php');
 }
@@ -159,11 +168,7 @@ export function resolveYoFallbackBaseUrl() {
     return normalizeYoTaskUrl(config.yo.fallbackBaseUrl, 'https://paymentsapi2.yo.co.ug/ybs/task.php');
 }
 export const hasValidFlutterwaveKeys = hasValidYoKeys;
-export const hasFlutterwaveClientCredentials = hasYoCredentials;
-export function hasFlutterwaveSecretKey() {
-    return false;
-}
-export function hasFlutterwaveEncryptionKey() {
-    return false;
-}
+export const hasFlutterwaveClientCredentials = hasYoClientCredentials;
+export const hasFlutterwaveSecretKey = hasYoSecretKey;
+export const hasFlutterwaveEncryptionKey = hasYoEncryptionKey;
 export const resolveFlutterwaveBaseUrl = resolveYoBaseUrl;

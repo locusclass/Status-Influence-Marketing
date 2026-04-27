@@ -4,8 +4,8 @@ import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
-import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
-import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { ensureChatSchema } from '../services/chat.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
@@ -2466,11 +2466,11 @@ export async function campaignRoutes(app) {
                     wallet_reference: reference,
                 };
             }
-            if (!hasFlutterwaveClientCredentials()) {
+            if (!hasYoClientCredentials()) {
                 reply.code(503);
-                return { error: 'flutterwave_not_configured' };
+                return { error: 'yo_uganda_not_configured' };
             }
-            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(userCountry, { cardEnabled: hasFlutterwaveEncryptionKey() });
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
             const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -2554,7 +2554,7 @@ export async function campaignRoutes(app) {
         const { checkout_payload: checkoutPayload, pesapalTxn, bundle, owner_campaign: ownerCampaign, } = result;
         return {
             checkout_payload: checkoutPayload,
-            flutterwave_txn: pesapalTxn,
+            yo_uganda_txn: pesapalTxn,
             fund_source: fundSource,
             funded: false,
             bundle,
@@ -2649,11 +2649,11 @@ export async function campaignRoutes(app) {
                     wallet_reference: reference,
                 };
             }
-            if (!hasFlutterwaveClientCredentials()) {
+            if (!hasYoClientCredentials()) {
                 reply.code(503);
-                return { error: 'flutterwave_not_configured' };
+                return { error: 'yo_uganda_not_configured' };
             }
-            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(userCountry, { cardEnabled: hasFlutterwaveEncryptionKey() });
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
             const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -2730,7 +2730,7 @@ export async function campaignRoutes(app) {
         const { checkout_payload: checkoutPayload, pesapalTxn } = result;
         return {
             checkout_payload: checkoutPayload,
-            flutterwave_txn: pesapalTxn,
+            yo_uganda_txn: pesapalTxn,
             fund_source: fundSource,
             funded: false,
         };

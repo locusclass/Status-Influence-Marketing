@@ -5,8 +5,8 @@ import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import {
   requestPayout,
-} from '../services/flutterwave.js';
-import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+} from '../services/yoUganda.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
@@ -32,8 +32,8 @@ import {
 } from '../services/userSignals.js';
 import {
   config,
-  hasFlutterwaveClientCredentials,
-  hasFlutterwaveEncryptionKey,
+  hasYoClientCredentials,
+  hasYoEncryptionKey,
 } from '../config.js';
 
 const accountProfileSchema = z.object({
@@ -1266,9 +1266,9 @@ export async function accountRoutes(app: FastifyInstance) {
       return { error: 'payment_redirect_urls_invalid' };
     }
 
-    if (!hasFlutterwaveClientCredentials()) {
+    if (!hasYoClientCredentials()) {
       reply.code(503);
-      return { error: 'flutterwave_not_configured' };
+      return { error: 'yo_uganda_not_configured' };
     }
 
     const result = await withTransaction(async (client) => {
@@ -1282,9 +1282,9 @@ export async function accountRoutes(app: FastifyInstance) {
         return { error: 'user_email_missing' };
       }
 
-      const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
         user.country,
-        { cardEnabled: hasFlutterwaveEncryptionKey() }
+        { cardEnabled: hasYoEncryptionKey() }
       );
       const wallet = await ensureWalletForUser(client, userId);
       const reference = `WDP-${uuid()}`;

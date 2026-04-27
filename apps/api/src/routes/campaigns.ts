@@ -19,10 +19,10 @@ import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import {
   config,
-  hasFlutterwaveClientCredentials,
-  hasFlutterwaveEncryptionKey,
+  hasYoClientCredentials,
+  hasYoEncryptionKey,
 } from '../config.js';
-import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { ensureChatSchema } from '../services/chat.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
@@ -3393,14 +3393,14 @@ export async function campaignRoutes(app: FastifyInstance) {
         };
       }
 
-      if (!hasFlutterwaveClientCredentials()) {
+      if (!hasYoClientCredentials()) {
         reply.code(503);
-        return { error: 'flutterwave_not_configured' } as any;
+        return { error: 'yo_uganda_not_configured' } as any;
       }
 
-      const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
         userCountry,
-        { cardEnabled: hasFlutterwaveEncryptionKey() }
+        { cardEnabled: hasYoEncryptionKey() }
       );
       const paymentCurrency = checkoutProfile.currency;
       const merchantReference = uuid();
@@ -3498,7 +3498,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     } = result as any;
     return {
       checkout_payload: checkoutPayload,
-      flutterwave_txn: pesapalTxn,
+      yo_uganda_txn: pesapalTxn,
       fund_source: fundSource,
       funded: false,
       bundle,
@@ -3613,14 +3613,14 @@ export async function campaignRoutes(app: FastifyInstance) {
         };
       }
 
-      if (!hasFlutterwaveClientCredentials()) {
+      if (!hasYoClientCredentials()) {
         reply.code(503);
-        return { error: 'flutterwave_not_configured' } as any;
+        return { error: 'yo_uganda_not_configured' } as any;
       }
 
-      const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
         userCountry,
-        { cardEnabled: hasFlutterwaveEncryptionKey() }
+        { cardEnabled: hasYoEncryptionKey() }
       );
       const paymentCurrency = checkoutProfile.currency;
       const merchantReference = uuid();
@@ -3706,7 +3706,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     const { checkout_payload: checkoutPayload, pesapalTxn } = result as any;
     return {
       checkout_payload: checkoutPayload,
-      flutterwave_txn: pesapalTxn,
+      yo_uganda_txn: pesapalTxn,
       fund_source: fundSource,
       funded: false,
     };

@@ -16,7 +16,7 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - PostgreSQL
 - Node.js worker for verification jobs
 - Railway deployment
-- PesaPal Aggregator payments
+- YO Uganda mobile money payments
 
 ## Monorepo layout
 - `apps/api` Fastify backend
@@ -34,10 +34,12 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 5. Start worker:
    - `pnpm --filter @prime/worker dev`
 
-## PesaPal sandbox configuration
-- Use PesaPal sandbox credentials.
-- Set `PESAPAL_ENV=sandbox` and `PESAPAL_BASE_URL` to the sandbox API base.
-- Register IPN URL to `/api/payments/pesapal/ipn`.
+## YO Uganda payment configuration
+- Use live YO Uganda API credentials for production.
+- Set `YO_API_URL` to `https://paymentsapi1.yo.co.ug/ybs/task.php`.
+- Set `YO_API_URL_FALLBACK` to `https://paymentsapi2.yo.co.ug/ybs/task.php`.
+- Set `YO_API_USERNAME` and `YO_API_PASSWORD`.
+- Collections in this codebase use status polling through `/api/payments/yo-uganda/verify`.
 
 ## Railway deployment
 - Railway uses Nixpacks and reads `railway.json`.
@@ -59,15 +61,11 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `GOOGLE_CLIENT_ID`
   - Google OAuth web client ID used by Firebase Auth. Comma-separate multiple IDs if needed.
 - `FINGERPRINT_PEPPER`
-- `PESAPAL_ENV` (`sandbox|production`)
-- `PESAPAL_BASE_URL`
-- `PESAPAL_CONSUMER_KEY`
-- `PESAPAL_CONSUMER_SECRET`
-- `PESAPAL_IPN_ID`
-- `PESAPAL_CALLBACK_URL`
-- `PESAPAL_PAYOUT_CALLBACK_URL`
-- `PESAPAL_PAYOUT_WEBHOOK_SECRET`
-- `PESAPAL_IPN_WEBHOOK_SECRET`
+- `YO_API_URL`
+- `YO_API_URL_FALLBACK`
+- `YO_API_USERNAME`
+- `YO_API_PASSWORD`
+- `YO_WEBHOOK_SECRET_HASH`
 
 ### Worker
 - `PORT`
@@ -78,12 +76,10 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `PYTHON_VERIFIER_SCRIPT` (defaults to `apps/worker/scripts/wa_status_verifier.py`)
 - `WA_VERIFIER_FPS`
 - `WA_VERIFIER_MAX_SECONDS`
-- `PESAPAL_ENV`
-- `PESAPAL_BASE_URL`
-- `PESAPAL_CONSUMER_KEY`
-- `PESAPAL_CONSUMER_SECRET`
-- `PESAPAL_PAYOUT_CALLBACK_URL`
-- `PESAPAL_PAYOUT_WEBHOOK_SECRET`
+- `YO_API_URL`
+- `YO_API_USERNAME`
+- `YO_API_PASSWORD`
+- `YO_WEBHOOK_SECRET_HASH`
 - `API_BASE_URL`
 
 ## Threat model for screen recording verification
@@ -103,7 +99,7 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 
 ## Tests
 - Escrow release idempotency tests
-- PesaPal webhook validation tests
+- YO Uganda payment validation tests
 - Trust score update tests
 - Worker job retry tests
 

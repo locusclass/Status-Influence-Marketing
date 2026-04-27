@@ -15,10 +15,10 @@ import {
 } from '@prime/shared';
 import {
   config,
-  hasFlutterwaveClientCredentials,
-  hasFlutterwaveSecretKey,
-  hasValidFlutterwaveKeys,
-  resolveFlutterwaveBaseUrl,
+  hasValidYoKeys,
+  hasYoClientCredentials,
+  hasYoSecretKey,
+  resolveYoBaseUrl,
 } from './config.js';
 import { withTransaction } from './db.js';
 import {
@@ -261,13 +261,13 @@ export function buildServer() {
       await ensureUserSignalSchema(client);
     });
 
-    const hasSecret = hasFlutterwaveSecretKey();
-    const hasClientCreds = hasFlutterwaveClientCredentials();
+    const hasSecret = hasYoSecretKey();
+    const hasClientCreds = hasYoClientCredentials();
 
     app.log.info(
       {
         provider: 'YO_UGANDA',
-        base_url: resolveFlutterwaveBaseUrl(),
+        base_url: resolveYoBaseUrl(),
         auth_mode: hasClientCreds ? 'api_credentials' : 'none',
         has_secret: hasSecret,
         has_client_creds: hasClientCreds,
@@ -275,11 +275,11 @@ export function buildServer() {
       'yo_uganda_config'
     );
 
-    if (!hasValidFlutterwaveKeys()) {
+    if (!hasValidYoKeys()) {
       app.log.warn('YO Uganda credentials are incomplete. Payments will fail.');
     }
 
-    if (!config.flutterwave.webhookSecretHash) {
+    if (!config.yo.webhookSecretHash) {
       app.log.info('YO Uganda collection uses status polling. Webhook verification is not active.');
     }
   });

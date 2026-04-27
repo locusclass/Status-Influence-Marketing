@@ -7,7 +7,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
-import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
+import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
@@ -199,19 +199,19 @@ export function buildServer() {
         await withTransaction(async (client) => {
             await ensureUserSignalSchema(client);
         });
-        const hasSecret = hasFlutterwaveSecretKey();
-        const hasClientCreds = hasFlutterwaveClientCredentials();
+        const hasSecret = hasYoSecretKey();
+        const hasClientCreds = hasYoClientCredentials();
         app.log.info({
             provider: 'YO_UGANDA',
-            base_url: resolveFlutterwaveBaseUrl(),
+            base_url: resolveYoBaseUrl(),
             auth_mode: hasClientCreds ? 'api_credentials' : 'none',
             has_secret: hasSecret,
             has_client_creds: hasClientCreds,
         }, 'yo_uganda_config');
-        if (!hasValidFlutterwaveKeys()) {
+        if (!hasValidYoKeys()) {
             app.log.warn('YO Uganda credentials are incomplete. Payments will fail.');
         }
-        if (!config.flutterwave.webhookSecretHash) {
+        if (!config.yo.webhookSecretHash) {
             app.log.info('YO Uganda collection uses status polling. Webhook verification is not active.');
         }
     });

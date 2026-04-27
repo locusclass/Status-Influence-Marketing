@@ -12,7 +12,7 @@ import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
-import { verifyTransaction } from '../services/flutterwave.js';
+import { verifyTransaction } from '../services/yoUganda.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import {
   ensurePublicIdColumns,
@@ -733,6 +733,8 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         summary: {
           total_amount: Number(totals.total_amount ?? 0),
           payout_amount: payoutAmount,
+          provider_amount: Number(totals.provider_amount ?? 0),
+          yo_uganda_amount: Number(totals.provider_amount ?? 0),
           flutterwave_amount: Number(totals.provider_amount ?? 0),
           pesapal_amount: Number(totals.provider_amount ?? 0),
           platform_fee: platformFee,
@@ -772,6 +774,8 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         wallet_withdrawals: walletWithdrawals.rows[0]?.count ?? 0,
         trust_profiles: trustProfiles.rows[0]?.count ?? 0,
         device_fingerprints: deviceFingerprints.rows[0]?.count ?? 0,
+        provider_transactions: providerTransactions.rows[0]?.count ?? 0,
+        yo_uganda_transactions: providerTransactions.rows[0]?.count ?? 0,
         flutterwave_transactions: providerTransactions.rows[0]?.count ?? 0,
         pesapal_transactions: providerTransactions.rows[0]?.count ?? 0
       };
@@ -2602,7 +2606,10 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     return { payout: res };
   });
 
-  app.get('/admin/flutterwave/transactions', { preHandler: [app.adminOnly] }, async (request, reply) => {
+  const yoAdminRouteBase = '/admin/yo-uganda';
+  const legacyFlutterwaveAdminRouteBase = '/admin/flutterwave';
+
+  const listYoUgandaTransactions = async (request: any, reply: any) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
@@ -2660,9 +2667,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       );
       return { transactions: res.rows };
     });
-  });
+  };
 
-  app.get('/admin/flutterwave/webhooks', { preHandler: [app.adminOnly] }, async (request, reply) => {
+  const listYoUgandaWebhooks = async (request: any, reply: any) => {
     const query = request.query as any;
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
@@ -2698,9 +2705,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       );
       return { webhooks: res.rows };
     });
-  });
+  };
 
-  app.post('/admin/flutterwave/webhooks/:eventId/replay', { preHandler: [app.adminOnly] }, async (request, reply) => {
+  const replayYoUgandaWebhook = async (request: any, reply: any) => {
     const params = request.params as { eventId: string };
     return withTransaction(async (client) => {
       const access = await requireSuperDashboardAccess(client, request, reply);
@@ -2803,7 +2810,17 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       reply.code(400);
       return { error: 'unhandled_payload' };
     });
-  });
+  };
+
+  for (const routeBase of [yoAdminRouteBase, legacyFlutterwaveAdminRouteBase]) {
+    app.get(`${routeBase}/transactions`, { preHandler: [app.adminOnly] }, listYoUgandaTransactions);
+    app.get(`${routeBase}/webhooks`, { preHandler: [app.adminOnly] }, listYoUgandaWebhooks);
+    app.post(
+      `${routeBase}/webhooks/:eventId/replay`,
+      { preHandler: [app.adminOnly] },
+      replayYoUgandaWebhook
+    );
+  }
 }
 
 

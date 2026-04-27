@@ -2,14 +2,14 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
-import { requestPayout, } from '../services/flutterwave.js';
-import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { requestPayout, } from '../services/yoUganda.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADVERTISER, buildAuthClaims, buildUserSession, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { deleteUserNotification, ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
-import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
+import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
 const accountProfileSchema = z.object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
@@ -945,9 +945,9 @@ export async function accountRoutes(app) {
             reply.code(400);
             return { error: 'payment_redirect_urls_invalid' };
         }
-        if (!hasFlutterwaveClientCredentials()) {
+        if (!hasYoClientCredentials()) {
             reply.code(503);
-            return { error: 'flutterwave_not_configured' };
+            return { error: 'yo_uganda_not_configured' };
         }
         const result = await withTransaction(async (client) => {
             const userRes = await client.query('SELECT email, phone, preferred_currency, country FROM users WHERE id=$1 LIMIT 1', [userId]);
@@ -956,7 +956,7 @@ export async function accountRoutes(app) {
                 reply.code(400);
                 return { error: 'user_email_missing' };
             }
-            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(user.country, { cardEnabled: hasFlutterwaveEncryptionKey() });
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(user.country, { cardEnabled: hasYoEncryptionKey() });
             const wallet = await ensureWalletForUser(client, userId);
             const reference = `WDP-${uuid()}`;
             const txn = await client.query(`

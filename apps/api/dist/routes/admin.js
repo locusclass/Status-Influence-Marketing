@@ -6,7 +6,7 @@ import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
-import { verifyTransaction } from '../services/flutterwave.js';
+import { verifyTransaction } from '../services/yoUganda.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, normalizeActiveRole, } from '../services/roles.js';
@@ -568,6 +568,8 @@ export async function adminRoutes(app) {
                 summary: {
                     total_amount: Number(totals.total_amount ?? 0),
                     payout_amount: payoutAmount,
+                    provider_amount: Number(totals.provider_amount ?? 0),
+                    yo_uganda_amount: Number(totals.provider_amount ?? 0),
                     flutterwave_amount: Number(totals.provider_amount ?? 0),
                     pesapal_amount: Number(totals.provider_amount ?? 0),
                     platform_fee: platformFee,
@@ -606,6 +608,8 @@ export async function adminRoutes(app) {
                 wallet_withdrawals: walletWithdrawals.rows[0]?.count ?? 0,
                 trust_profiles: trustProfiles.rows[0]?.count ?? 0,
                 device_fingerprints: deviceFingerprints.rows[0]?.count ?? 0,
+                provider_transactions: providerTransactions.rows[0]?.count ?? 0,
+                yo_uganda_transactions: providerTransactions.rows[0]?.count ?? 0,
                 flutterwave_transactions: providerTransactions.rows[0]?.count ?? 0,
                 pesapal_transactions: providerTransactions.rows[0]?.count ?? 0
             };
@@ -2112,7 +2116,9 @@ export async function adminRoutes(app) {
         }
         return { payout: res };
     });
-    app.get('/admin/flutterwave/transactions', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const yoAdminRouteBase = '/admin/yo-uganda';
+    const legacyFlutterwaveAdminRouteBase = '/admin/flutterwave';
+    const listYoUgandaTransactions = async (request, reply) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const range = parseDateRange(query?.from, query?.to);
@@ -2163,8 +2169,8 @@ export async function adminRoutes(app) {
             const res = await client.query(`SELECT * FROM pesapal_transactions ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
             return { transactions: res.rows };
         });
-    });
-    app.get('/admin/flutterwave/webhooks', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    };
+    const listYoUgandaWebhooks = async (request, reply) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         const range = parseDateRange(query?.from, query?.to);
@@ -2195,8 +2201,8 @@ export async function adminRoutes(app) {
             const res = await client.query(`SELECT * FROM pesapal_webhook_events ${where} ORDER BY received_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
             return { webhooks: res.rows };
         });
-    });
-    app.post('/admin/flutterwave/webhooks/:eventId/replay', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    };
+    const replayYoUgandaWebhook = async (request, reply) => {
         const params = request.params;
         return withTransaction(async (client) => {
             const access = await requireSuperDashboardAccess(client, request, reply);
@@ -2264,5 +2270,10 @@ export async function adminRoutes(app) {
             reply.code(400);
             return { error: 'unhandled_payload' };
         });
-    });
+    };
+    for (const routeBase of [yoAdminRouteBase, legacyFlutterwaveAdminRouteBase]) {
+        app.get(`${routeBase}/transactions`, { preHandler: [app.adminOnly] }, listYoUgandaTransactions);
+        app.get(`${routeBase}/webhooks`, { preHandler: [app.adminOnly] }, listYoUgandaWebhooks);
+        app.post(`${routeBase}/webhooks/:eventId/replay`, { preHandler: [app.adminOnly] }, replayYoUgandaWebhook);
+    }
 }

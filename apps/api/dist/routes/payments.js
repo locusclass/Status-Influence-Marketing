@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
-import { getTransactionStatus, initiateMobileMoneyCollection, } from '../services/flutterwave.js';
-import { hasFlutterwaveClientCredentials } from '../config.js';
+import { getTransactionStatus, initiateMobileMoneyCollection, } from '../services/yoUganda.js';
+import { hasYoClientCredentials } from '../config.js';
 function readTextValue(value) {
     const text = String(value ?? '').trim();
     return text.length > 0 ? text : null;
@@ -82,6 +82,8 @@ export async function paymentRoutes(app) {
     const paymentRepo = new PaymentRepo();
     const deepLinkReturn = 'bakule://payment/return';
     const deepLinkCancel = 'bakule://payment/cancel';
+    const yoRouteBase = '/payments/yo-uganda';
+    const legacyFlutterwaveRouteBase = '/payments/flutterwave';
     const verifySchema = z.object({
         transaction_id: z.union([z.string().trim().min(1), z.number().int().positive()]),
         tx_ref: z.string().trim().min(1),
@@ -244,8 +246,10 @@ export async function paymentRoutes(app) {
             detail: 'YO Uganda payment collection uses transaction polling instead of this webhook endpoint.',
         });
     };
-    app.get('/payments/flutterwave/webhook', webhookInfo);
-    app.post('/payments/flutterwave/webhook', handleWebhook);
+    for (const routeBase of [yoRouteBase, legacyFlutterwaveRouteBase]) {
+        app.get(`${routeBase}/webhook`, webhookInfo);
+        app.post(`${routeBase}/webhook`, handleWebhook);
+    }
     const loadChargeContext = async (client, txRef, authUser) => {
         const txnRes = await client.query('SELECT * FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1', [txRef]);
         const txn = txnRes.rows[0];
@@ -315,7 +319,7 @@ export async function paymentRoutes(app) {
             provider: compactProviderSnapshot(chargePayload),
         };
     };
-    app.post('/payments/flutterwave/initiate', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const initiatePayment = async (request, reply) => {
         const parsed = initiateSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -327,9 +331,9 @@ export async function paymentRoutes(app) {
                 reply.code(401);
                 return { error: 'unauthorized' };
             }
-            if (!hasFlutterwaveClientCredentials()) {
+            if (!hasYoClientCredentials()) {
                 reply.code(503);
-                return { error: 'flutterwave_not_configured' };
+                return { error: 'yo_uganda_not_configured' };
             }
             const result = await withTransaction(async (client) => {
                 const context = await loadChargeContext(client, parsed.data.tx_ref, authUser);
@@ -381,10 +385,9 @@ export async function paymentRoutes(app) {
                     JSON.stringify({
                         payment_method: parsed.data.payment_method,
                         network,
-                        flutterwave_charge_id: chargeId,
                         yo_transaction_reference: chargeId,
-                        flutterwave_last_provider_status: providerStatus,
-                        flutterwave_next_action: statusPending.has(providerStatus)
+                        yo_last_provider_status: providerStatus,
+                        yo_next_action: statusPending.has(providerStatus)
                             ? {
                                 type: 'payment_instruction',
                                 note: buildProviderMessage(chargeResponse) ??
@@ -438,10 +441,10 @@ export async function paymentRoutes(app) {
                 body: request.body,
             }, `yo_initiate_failed: ${detail}`);
             reply.code(502);
-            return { error: 'flutterwave_initiate_failed', detail };
+            return { error: 'yo_uganda_initiate_failed', detail };
         }
-    });
-    app.post('/payments/flutterwave/authorize', { preHandler: [app.authenticate] }, async (request, reply) => {
+    };
+    const authorizePayment = async (request, reply) => {
         const parsed = authorizeSchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -452,8 +455,8 @@ export async function paymentRoutes(app) {
             error: 'authorization_not_supported',
             detail: 'YO Uganda mobile money collections do not require an extra authorization call in this checkout flow.',
         };
-    });
-    app.post('/payments/flutterwave/verify', { preHandler: [app.authenticate] }, async (request, reply) => {
+    };
+    const verifyPayment = async (request, reply) => {
         const parsed = verifySchema.safeParse(request.body);
         if (!parsed.success) {
             reply.code(400);
@@ -490,9 +493,14 @@ export async function paymentRoutes(app) {
                 body: request.body,
             }, `yo_verify_failed: ${detail}`);
             reply.code(502);
-            return { error: 'flutterwave_verify_failed', detail };
+            return { error: 'yo_uganda_verify_failed', detail };
         }
-    });
+    };
+    for (const routeBase of [yoRouteBase, legacyFlutterwaveRouteBase]) {
+        app.post(`${routeBase}/initiate`, { preHandler: [app.authenticate] }, initiatePayment);
+        app.post(`${routeBase}/authorize`, { preHandler: [app.authenticate] }, authorizePayment);
+        app.post(`${routeBase}/verify`, { preHandler: [app.authenticate] }, verifyPayment);
+    }
     app.get('/payments/return', async (request, reply) => {
         const query = request.query;
         const status = String(query?.status ?? '').toLowerCase();

@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 import { describe, expect, it } from 'vitest';
 
-import { verifyWebhookSignature } from '../src/services/flutterwave.js';
-import { resolveFlutterwaveCheckoutProfile } from '../src/services/flutterwaveCheckoutProfile.js';
+import { verifyWebhookSignature } from '../src/services/yoUganda.js';
+import { resolveYoUgandaCheckoutProfile } from '../src/services/yoUgandaCheckoutProfile.js';
 
 describe('YO Uganda payment configuration', () => {
   it('validates signature', () => {
@@ -13,7 +13,7 @@ describe('YO Uganda payment configuration', () => {
   });
 
   it('maps Uganda checkout to UGX mobile money only', () => {
-    expect(resolveFlutterwaveCheckoutProfile('UG')).toEqual({
+    expect(resolveYoUgandaCheckoutProfile('UG')).toEqual({
       country: 'UG',
       currency: 'UGX',
       phoneCountryCode: '256',
@@ -28,7 +28,7 @@ describe('YO Uganda payment configuration', () => {
   });
 
   it('defaults every other country to the Uganda mobile money profile', () => {
-    expect(resolveFlutterwaveCheckoutProfile('KE')).toEqual({
+    expect(resolveYoUgandaCheckoutProfile('KE')).toEqual({
       country: 'UG',
       currency: 'UGX',
       phoneCountryCode: '256',

@@ -479,6 +479,45 @@ async function loadLastMessage(client: any, threadId: string) {
   return res.rows[0] ?? null;
 }
 
+function serializeOfferPreview(row: any) {
+  return {
+    id: String(row?.id ?? ''),
+    status: String(row?.status ?? CHAT_OFFER_STATUS_PENDING),
+    proposed_price_ugx: toInt(row?.proposed_price_ugx),
+    resolved_price_ugx:
+      row?.resolved_price_ugx == null ? null : toInt(row?.resolved_price_ugx),
+    offeror_id: String(row?.offeror_id ?? ''),
+    offeror_name: displayNameFromRow(row),
+    note: String(row?.note ?? ''),
+    created_at: timestampText(row?.created_at),
+    updated_at: timestampText(row?.updated_at),
+  };
+}
+
+async function loadLatestThreadOfferPreview(client: any, threadId: string) {
+  const res = await client.query(
+    `
+    SELECT
+      offer.id,
+      offer.status,
+      offer.proposed_price_ugx,
+      offer.resolved_price_ugx,
+      offer.offeror_id,
+      offer.note,
+      offer.created_at,
+      offer.updated_at,
+      COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name
+    FROM chat_offer_events offer
+    JOIN users u ON u.id = offer.offeror_id
+    WHERE offer.thread_id = $1
+    ORDER BY offer.created_at DESC
+    LIMIT 1
+    `,
+    [threadId]
+  );
+  return res.rows[0] ?? null;
+}
+
 async function loadUnreadCount(client: any, threadId: string, userId: string) {
   const res = await client.query(
     `
@@ -1227,8 +1266,12 @@ async function buildThreadSummary(client: any, threadId: string, userId: string)
   if (!thread) return null;
 
   const lastMessage = await loadLastMessage(client, threadId);
+  const lastOffer = await loadLatestThreadOfferPreview(client, threadId);
   const unreadCount = await loadUnreadCount(client, threadId, userId);
-  const liveDraftText = await loadLiveDraftText(client, threadId, userId);
+  const liveDraftText =
+    thread.kind === CHAT_THREAD_KIND_GROUP_ROOM
+      ? await loadLiveDraftText(client, threadId, userId)
+      : '';
 
   let counterpart: ChatUserSummary | null = null;
   let group: any = null;
@@ -1275,9 +1318,15 @@ async function buildThreadSummary(client: any, threadId: string, userId: string)
     last_activity_at: timestampText(thread.last_message_at ?? thread.created_at),
     unread_count: unreadCount,
     live_draft_text: liveDraftText,
+    media_url: thread.media_url == null ? null : String(thread.media_url),
+    media_type: thread.media_type == null ? null : String(thread.media_type),
     counterpart,
     group,
-    last_message: lastMessage ? serializeMessage(lastMessage) : null,
+    last_message:
+      thread.kind === CHAT_THREAD_KIND_GROUP_ROOM && lastMessage
+        ? serializeMessage(lastMessage)
+        : null,
+    last_offer: lastOffer ? serializeOfferPreview(lastOffer) : null,
   };
 }
 
@@ -1534,6 +1583,107 @@ async function buildThreadOfferContext(
   }
 
   return { error: 'offer_not_supported' } as const;
+}
+
+function resolveInitialOfferorId(context: any, actingUserId: string) {
+  if (context.target_kind === 'USER') {
+    return String(context.target_user_id ?? '').trim();
+  }
+
+  const creatorId = String(context.group?.creator?.id ?? '').trim();
+  if (creatorId && creatorId !== actingUserId) {
+    return creatorId;
+  }
+
+  const members = Array.isArray(context.group?.members)
+    ? context.group.members
+    : [];
+  const adminMember = members.find(
+    (member: any) => String(member?.group_role ?? '').toUpperCase() === 'ADMIN'
+  );
+  const representativeId = String(adminMember?.id ?? members[0]?.id ?? '').trim();
+  if (representativeId && representativeId !== actingUserId) {
+    return representativeId;
+  }
+
+  return '';
+}
+
+async function seedInitialThreadQuoteIfMissing(
+  client: any,
+  threadId: string,
+  actingUserId: string,
+  mediaType: 'IMAGE' | 'VIDEO' | 'TEXT'
+) {
+  const latestOffer = await loadLatestThreadOffer(client, threadId);
+  if (latestOffer) {
+    return latestOffer;
+  }
+
+  const context = await buildThreadOfferContext(
+    client,
+    threadId,
+    actingUserId,
+    mediaType
+  );
+  if ('error' in context || !context.negotiation_allowed) {
+    return null;
+  }
+
+  const offerorId = resolveInitialOfferorId(context, actingUserId);
+  if (!offerorId) {
+    return null;
+  }
+
+  const seedNote =
+    context.target_kind === 'GROUP'
+      ? 'Current group quote'
+      : 'Current promoter quote';
+  const insertRes = await client.query(
+    `
+    INSERT INTO chat_offer_events (
+      thread_id,
+      offeror_id,
+      target_kind,
+      target_user_id,
+      target_group_id,
+      official_price_ugx,
+      proposed_price_ugx,
+      media_type,
+      media_url,
+      media_text,
+      note,
+      status,
+      updated_at
+    )
+    VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, NOW()
+    )
+    RETURNING *
+    `,
+    [
+      threadId,
+      offerorId,
+      context.target_kind,
+      context.target_user_id,
+      context.target_group_id,
+      context.official_price_ugx,
+      context.official_price_ugx,
+      context.thread.media_type ?? mediaType,
+      context.thread.media_url ?? null,
+      seedNote,
+      CHAT_OFFER_STATUS_PENDING,
+    ]
+  );
+  await client.query(
+    `
+    UPDATE chat_threads
+    SET last_message_at = NOW()
+    WHERE id = $1
+    `,
+    [threadId]
+  );
+  return insertRes.rows[0] ?? null;
 }
 
 async function loadLatestThreadOffer(client: any, threadId: string) {
@@ -2083,6 +2233,12 @@ export async function chatRoutes(app: FastifyInstance) {
         userId,
         parsed.data.participant_id,
         parsed.data.media_url,
+        parsed.data.media_type
+      );
+      await seedInitialThreadQuoteIfMissing(
+        client,
+        String(thread.id),
+        userId,
         parsed.data.media_type
       );
       return buildThreadDetail(client, String(thread.id), userId);
@@ -2641,6 +2797,12 @@ export async function chatRoutes(app: FastifyInstance) {
       if (!deal) {
         return { error: 'group_not_found' } as const;
       }
+      await seedInitialThreadQuoteIfMissing(
+        client,
+        deal.threadId,
+        userId,
+        parsed.data.media_type
+      );
 
       if (deal.created) {
         const activeMemberIdsRes = await client.query(
@@ -3367,6 +3529,9 @@ export async function chatRoutes(app: FastifyInstance) {
       await ensureChatSchema(client);
       const thread = await assertThreadMember(client, params.id, userId);
       if (!thread) return { error: 'thread_not_found' } as const;
+      if (thread.kind !== CHAT_THREAD_KIND_GROUP_ROOM) {
+        return { error: 'message_not_supported' } as const;
+      }
 
       const insertRes = await client.query(
         `
@@ -3432,7 +3597,13 @@ export async function chatRoutes(app: FastifyInstance) {
     });
 
     if ((result as any)?.error) {
-      reply.code((result as any).error === 'thread_not_found' ? 404 : 400);
+      reply.code(
+        (result as any).error === 'thread_not_found'
+          ? 404
+          : (result as any).error === 'message_not_supported'
+            ? 409
+            : 400
+      );
       return result;
     }
 
@@ -3460,6 +3631,9 @@ export async function chatRoutes(app: FastifyInstance) {
       await ensureChatSchema(client);
       const thread = await assertThreadMember(client, params.id, userId);
       if (!thread) return { error: 'thread_not_found' } as const;
+      if (thread.kind !== CHAT_THREAD_KIND_GROUP_ROOM) {
+        return { error: 'typing_not_supported' } as const;
+      }
 
       await client.query(
         `
@@ -3484,7 +3658,13 @@ export async function chatRoutes(app: FastifyInstance) {
     });
 
     if ((result as any)?.error) {
-      reply.code((result as any).error === 'thread_not_found' ? 404 : 400);
+      reply.code(
+        (result as any).error === 'thread_not_found'
+          ? 404
+          : (result as any).error === 'typing_not_supported'
+            ? 409
+            : 400
+      );
       return result;
     }
 
