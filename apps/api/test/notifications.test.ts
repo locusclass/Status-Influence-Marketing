@@ -5,6 +5,7 @@ import {
   deleteUserNotification,
   ensureUserSignalSchema,
   listUserNotifications,
+  markAllUserNotificationsRead,
   updateUserNotificationReadState,
 } from '../src/services/userSignals.js';
 
@@ -78,5 +79,43 @@ describe('User notifications', () => {
     });
     expect(afterDelete.notifications).toHaveLength(0);
     expect(afterDelete.unreadCount).toBe(0);
+  });
+
+  it('clears the inbox when marking all notifications as read', async () => {
+    const seed = Date.now() + 1;
+    const user = await pool.query(
+      `
+      INSERT INTO users (email, phone, password_hash, role)
+      VALUES ($1, $2, 'x', 'DISTRIBUTOR')
+      RETURNING id
+      `,
+      [
+        `notifications.clear.${seed}@example.com`,
+        `+2567${String(seed).slice(-8)}`,
+      ]
+    );
+    const userId = String(user.rows[0].id);
+
+    await createUserNotifications(pool, [userId], {
+      title: 'Unread notice',
+      body: 'This should disappear.',
+      category: 'SYSTEM',
+    });
+    await createUserNotifications(pool, [userId], {
+      title: 'Another notice',
+      body: 'This should also disappear.',
+      category: 'SYSTEM',
+    });
+
+    const before = await listUserNotifications(pool, userId, { limit: 10 });
+    expect(before.notifications).toHaveLength(2);
+    expect(before.unreadCount).toBe(2);
+
+    const cleared = await markAllUserNotificationsRead(pool, userId);
+    expect(cleared).toBe(2);
+
+    const after = await listUserNotifications(pool, userId, { limit: 10 });
+    expect(after.notifications).toHaveLength(0);
+    expect(after.unreadCount).toBe(0);
   });
 });

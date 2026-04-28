@@ -1715,7 +1715,7 @@ export async function accountRoutes(app: FastifyInstance) {
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     return withTransaction(async (client) => {
       const updated = await markAllUserNotificationsRead(client, userId);
-      return { ok: true, updated };
+      return { ok: true, updated, unread_count: 0 };
     });
   });
 

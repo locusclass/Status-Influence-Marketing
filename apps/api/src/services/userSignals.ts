@@ -196,10 +196,8 @@ export async function markAllUserNotificationsRead(
   const normalizedUserId = String(userId ?? '').trim();
   const updated = await client.query(
     `
-    UPDATE user_notifications
-    SET read_at = NOW()
+    DELETE FROM user_notifications
     WHERE user_id = $1
-      AND read_at IS NULL
     RETURNING id
     `,
     [normalizedUserId]
