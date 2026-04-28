@@ -59,7 +59,6 @@ export async function requestPayout(input: {
       Account: normalizePhoneNumber(input.receiverPhone),
       AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
       Narrative: input.narration,
-      InternalReference: input.reference,
       ExternalReference: input.reference,
       ProviderReferenceText: input.reference,
     }),

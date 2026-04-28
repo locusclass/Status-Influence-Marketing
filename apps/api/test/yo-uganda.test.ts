@@ -6,7 +6,11 @@ import {
   readYoProviderTransactionReference,
   resolveStoredYoTransactionReference,
 } from '../src/routes/payments.js';
-import { verifyWebhookSignature } from '../src/services/yoUganda.js';
+import {
+  buildYoReferenceFields,
+  buildYoRequestXml,
+  verifyWebhookSignature,
+} from '../src/services/yoUganda.js';
 import { resolveYoUgandaCheckoutProfile } from '../src/services/yoUgandaCheckoutProfile.js';
 
 describe('YO Uganda payment configuration', () => {
@@ -45,6 +49,22 @@ describe('YO Uganda payment configuration', () => {
         'YO Uganda currently routes collections through Uganda mobile money in UGX. Use an MTN or Airtel Uganda number to complete payment.',
       ],
     });
+  });
+
+  it('keeps merchant references external by default in YO XML requests', () => {
+    const xml = buildYoRequestXml({
+      Method: 'acdepositfunds',
+      ...buildYoReferenceFields({
+        reference: 'merchant-ref-123',
+        providerReferenceText: 'Prime merchant-ref-123',
+      }),
+    });
+
+    expect(xml).toContain('<ExternalReference>merchant-ref-123</ExternalReference>');
+    expect(xml).toContain(
+      '<ProviderReferenceText>Prime merchant-ref-123</ProviderReferenceText>'
+    );
+    expect(xml).not.toContain('<InternalReference>');
   });
 
   it('reads provider transaction reference aliases from nested reference payloads', () => {

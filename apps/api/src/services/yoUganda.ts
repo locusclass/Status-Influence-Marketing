@@ -130,6 +130,19 @@ export function parseYoResponseXml(xml: string): YoPaymentResponse {
   };
 }
 
+export function buildYoReferenceFields(input: {
+  reference?: string;
+  providerReferenceText?: string;
+  linkedTransactionReference?: string;
+}) {
+  return {
+    // YO only accepts InternalReference when linking to an existing YO transaction.
+    InternalReference: input.linkedTransactionReference,
+    ExternalReference: input.reference,
+    ProviderReferenceText: input.providerReferenceText,
+  };
+}
+
 async function postXml(endpoint: string, body: string) {
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -188,9 +201,9 @@ export async function initiateMobileMoneyCollection(input: {
   amount: number;
   phoneNumber: string;
   narrative: string;
-  internalReference?: string;
-  externalReference?: string;
+  reference?: string;
   providerReferenceText?: string;
+  linkedTransactionReference?: string;
   network?: 'MTN' | 'AIRTEL' | 'M-PESA';
   nonBlocking?: boolean;
 }) {
@@ -201,9 +214,11 @@ export async function initiateMobileMoneyCollection(input: {
     Account: normalizePhoneNumber(input.phoneNumber),
     AccountProviderCode: resolveAccountProviderCode(input.network),
     Narrative: input.narrative,
-    InternalReference: input.internalReference,
-    ExternalReference: input.externalReference,
-    ProviderReferenceText: input.providerReferenceText,
+    ...buildYoReferenceFields({
+      reference: input.reference,
+      providerReferenceText: input.providerReferenceText,
+      linkedTransactionReference: input.linkedTransactionReference,
+    }),
   });
 }
 
@@ -226,6 +241,8 @@ export async function requestPayout(input: {
   currency: string;
   narration: string;
   reference: string;
+  linkedTransactionReference?: string;
+  providerReferenceText?: string;
   receiverName: string;
   receiverPhone: string;
   receiverNetwork?: string;
@@ -238,9 +255,11 @@ export async function requestPayout(input: {
     Account: normalizePhoneNumber(input.receiverPhone),
     AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
     Narrative: input.narration,
-    InternalReference: input.reference,
-    ExternalReference: input.reference,
-    ProviderReferenceText: input.reference,
+    ...buildYoReferenceFields({
+      reference: input.reference,
+      providerReferenceText: input.providerReferenceText ?? input.reference,
+      linkedTransactionReference: input.linkedTransactionReference,
+    }),
   });
 }
 

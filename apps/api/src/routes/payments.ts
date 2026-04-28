@@ -697,8 +697,7 @@ export async function paymentRoutes(app: FastifyInstance) {
             String(context.rawPayload.kind ?? '').toUpperCase() === 'WALLET_DEPOSIT'
               ? `Wallet deposit ${parsed.data.tx_ref}`
               : `Campaign funding ${parsed.data.tx_ref}`,
-          internalReference: parsed.data.tx_ref,
-          externalReference: parsed.data.tx_ref,
+          reference: parsed.data.tx_ref,
           providerReferenceText: `Prime ${parsed.data.tx_ref}`,
           nonBlocking: true,
         });

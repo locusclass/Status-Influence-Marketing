@@ -97,6 +97,14 @@ export function parseYoResponseXml(xml) {
         raw,
     };
 }
+export function buildYoReferenceFields(input) {
+    return {
+        // YO only accepts InternalReference when linking to an existing YO transaction.
+        InternalReference: input.linkedTransactionReference,
+        ExternalReference: input.reference,
+        ProviderReferenceText: input.providerReferenceText,
+    };
+}
 async function postXml(endpoint, body) {
     const res = await fetch(endpoint, {
         method: 'POST',
@@ -149,9 +157,11 @@ export async function initiateMobileMoneyCollection(input) {
         Account: normalizePhoneNumber(input.phoneNumber),
         AccountProviderCode: resolveAccountProviderCode(input.network),
         Narrative: input.narrative,
-        InternalReference: input.internalReference,
-        ExternalReference: input.externalReference,
-        ProviderReferenceText: input.providerReferenceText,
+        ...buildYoReferenceFields({
+            reference: input.reference,
+            providerReferenceText: input.providerReferenceText,
+            linkedTransactionReference: input.linkedTransactionReference,
+        }),
     });
 }
 export async function getTransactionStatus(transactionId, _merchantReference) {
@@ -171,9 +181,11 @@ export async function requestPayout(input) {
         Account: normalizePhoneNumber(input.receiverPhone),
         AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
         Narrative: input.narration,
-        InternalReference: input.reference,
-        ExternalReference: input.reference,
-        ProviderReferenceText: input.reference,
+        ...buildYoReferenceFields({
+            reference: input.reference,
+            providerReferenceText: input.providerReferenceText ?? input.reference,
+            linkedTransactionReference: input.linkedTransactionReference,
+        }),
     });
 }
 export function verifyWebhookSignature(rawBody, signature, secret) {

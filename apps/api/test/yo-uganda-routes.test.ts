@@ -254,6 +254,19 @@ describe('YO Uganda payment routes', () => {
       provider_reference: 'yo-init-123',
       provider_status: 'PENDING',
     });
+    expect(yoMocks.initiateMobileMoneyCollection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount: Number(txn.amount),
+        phoneNumber: advertiser.phone,
+        network: 'MTN',
+        reference: txn.merchant_reference,
+        providerReferenceText: `Prime ${txn.merchant_reference}`,
+        nonBlocking: true,
+      })
+    );
+    expect(yoMocks.initiateMobileMoneyCollection.mock.calls[0]?.[0]).not.toHaveProperty(
+      'internalReference'
+    );
 
     const stored = await pool!.query(
       'SELECT status, transaction_reference, raw_payload FROM pesapal_transactions WHERE merchant_reference=$1',
