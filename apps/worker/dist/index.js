@@ -7,7 +7,7 @@ import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-import { generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
+import { calculatePromoterPayoutBreakdown, generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, PROMOTER_PLATFORM_FEE_PERCENT, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
@@ -132,6 +132,25 @@ async function ensureCampaignAllocatorColumns(client) {
     ON campaigns (bundle_root_campaign_id)
   `);
 }
+async function ensurePromoterPayoutColumns(client) {
+    await client.query(`
+    ALTER TABLE payout_requests
+      ADD COLUMN IF NOT EXISTS platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT ${PROMOTER_PLATFORM_FEE_PERCENT}
+  `);
+    await client.query(`
+    ALTER TABLE payout_requests
+      ADD COLUMN IF NOT EXISTS platform_fee_amount INTEGER NOT NULL DEFAULT 0
+  `);
+    await client.query(`
+    ALTER TABLE payout_requests
+      ADD COLUMN IF NOT EXISTS net_amount INTEGER
+  `);
+    await client.query(`
+    UPDATE payout_requests
+    SET net_amount = COALESCE(net_amount, amount)
+    WHERE net_amount IS NULL
+  `);
+}
 async function ensureCreatorMarketingTables(client) {
     await client.query(`
     CREATE TABLE IF NOT EXISTS creators (
@@ -220,9 +239,7 @@ async function syncCreatorsFromUsers(client) {
   `);
 }
 function getDistributableCampaignBudget(campaign) {
-    const budgetTotal = Math.max(0, Number(campaign?.budget_total ?? 0));
-    const feePercent = Math.max(0, Number(campaign?.platform_fee_percent ?? 0));
-    return Math.floor(budgetTotal * ((100 - feePercent) / 100));
+    return Math.max(0, Number(campaign?.budget_total ?? 0));
 }
 function getEscrowCampaignId(campaign) {
     return String(campaign?.bundle_root_campaign_id ??
@@ -926,7 +943,10 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     await recordCampaignRevenueEntry(client, proofContext.campaign_id);
 }
 async function preparePayoutRequest(client, proof, campaign) {
+    await ensurePromoterPayoutColumns(client);
     const escrowCampaignId = getEscrowCampaignId(campaign);
+    const payoutBreakdown = calculatePromoterPayoutBreakdown(Number(campaign?.payout_amount ?? campaign?.budget_total ?? 0));
+    const escrowDebitAmount = Math.max(0, Math.round(Number(campaign?.budget_total ?? payoutBreakdown.gross_amount)));
     const contractRes = await client.query(`SELECT id
      FROM contracts
      WHERE campaign_id=$1
@@ -944,10 +964,43 @@ async function preparePayoutRequest(client, proof, campaign) {
     const existingPayoutRes = await client.query('SELECT * FROM payout_requests WHERE proof_id=$1', [proof.id]);
     let payoutRow = existingPayoutRes.rows[0];
     if (!payoutRow) {
-        const payoutInsert = await client.query(`INSERT INTO payout_requests (proof_id, user_id, amount, status)
-       VALUES ($1,$2,$3,'REQUESTED')
-       RETURNING *`, [proof.id, proof.user_id, campaign.payout_amount]);
+        const payoutInsert = await client.query(`INSERT INTO payout_requests (
+         proof_id,
+         user_id,
+         amount,
+         platform_fee_percent,
+         platform_fee_amount,
+         net_amount,
+         status
+       )
+       VALUES ($1,$2,$3,$4,$5,$6,'REQUESTED')
+       RETURNING *`, [
+            proof.id,
+            proof.user_id,
+            payoutBreakdown.gross_amount,
+            payoutBreakdown.platform_fee_percent,
+            payoutBreakdown.platform_fee_amount,
+            payoutBreakdown.net_amount,
+        ]);
         payoutRow = payoutInsert.rows[0];
+    }
+    else {
+        const payoutUpdate = await client.query(`
+      UPDATE payout_requests
+      SET amount = $2,
+          platform_fee_percent = $3,
+          platform_fee_amount = $4,
+          net_amount = $5
+      WHERE id = $1
+      RETURNING *
+      `, [
+            payoutRow.id,
+            payoutBreakdown.gross_amount,
+            payoutBreakdown.platform_fee_percent,
+            payoutBreakdown.platform_fee_amount,
+            payoutBreakdown.net_amount,
+        ]);
+        payoutRow = payoutUpdate.rows[0] ?? payoutRow;
     }
     if (!payoutRow)
         return null;
@@ -968,7 +1021,7 @@ async function preparePayoutRequest(client, proof, campaign) {
            ELSE 'PARTIALLY_DISBURSED'
          END
      WHERE id=$1 AND amount_available >= $2
-     RETURNING *`, [escrow.id, campaign.budget_total]);
+     RETURNING *`, [escrow.id, escrowDebitAmount]);
     if (!updatedEscrow.rows[0]) {
         throw new Error('insufficient_escrow');
     }
@@ -992,12 +1045,42 @@ async function preparePayoutRequest(client, proof, campaign) {
     SET balance_available = balance_available + $2,
         balance = balance + $2
     WHERE id=$1
-    `, [wallet.id, campaign.payout_amount]);
+    `, [wallet.id, payoutBreakdown.gross_amount]);
     await client.query(`
     INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
     VALUES ($1,$2,'CREDIT',$3)
-    `, [wallet.id, campaign.payout_amount, `PROOF_PAYOUT:${proof.id}`]);
-    await client.query("UPDATE payout_requests SET status='PAID', pesapal_reference=$2 WHERE id=$1", [payoutRow.id, `WALLET_CREDIT:${proof.id}`]);
+    `, [wallet.id, payoutBreakdown.gross_amount, `PROOF_PAYOUT_GROSS:${proof.id}`]);
+    if (payoutBreakdown.platform_fee_amount > 0) {
+        await client.query(`
+      UPDATE wallets
+      SET balance_available = balance_available - $2,
+          balance = balance - $2
+      WHERE id=$1
+      `, [wallet.id, payoutBreakdown.platform_fee_amount]);
+        await client.query(`
+      INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+      VALUES ($1,$2,'DEBIT',$3)
+      `, [
+            wallet.id,
+            payoutBreakdown.platform_fee_amount,
+            `PROMOTER_PLATFORM_FEE:${proof.id}`,
+        ]);
+    }
+    await client.query(`
+    UPDATE payout_requests
+    SET status='PAID',
+        pesapal_reference=$2,
+        platform_fee_percent=$3,
+        platform_fee_amount=$4,
+        net_amount=$5
+    WHERE id=$1
+    `, [
+        payoutRow.id,
+        `WALLET_CREDIT:${proof.id}`,
+        payoutBreakdown.platform_fee_percent,
+        payoutBreakdown.platform_fee_amount,
+        payoutBreakdown.net_amount,
+    ]);
     return null;
 }
 async function upsertContentSubmission(client, campaign, proof, validation, finalDecision) {

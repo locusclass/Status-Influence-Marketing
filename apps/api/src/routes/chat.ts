@@ -26,17 +26,41 @@ import {
   CHAT_OFFER_STATUS_REJECTED,
   ensureChatSchema,
 } from '../services/chat.js';
+import {
+  ensurePromoterReviewsSchema,
+  listPromoterReviews,
+  loadLatestCompletedContractForReview,
+  loadPromoterReviewSummaryMap,
+} from '../services/promoterReviews.js';
 import { createUserNotifications } from '../services/userSignals.js';
 
 const groupDealThreadSchema = z.object({
-  media_url: z.string(),
+  media_url: z.string().url().optional(),
+  media_urls: z.array(z.string().url()).min(1).max(8).optional(),
   media_type: z.enum(['IMAGE', 'VIDEO', 'TEXT']),
+}).superRefine((value, ctx) => {
+  if (normalizeMediaUrls(value).length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['media_urls'],
+      message: 'At least one media asset is required.',
+    });
+  }
 });
 
 const directThreadSchema = z.object({
   participant_id: z.string().uuid(),
-  media_url: z.string(),
+  media_url: z.string().url().optional(),
+  media_urls: z.array(z.string().url()).min(1).max(8).optional(),
   media_type: z.enum(['IMAGE', 'VIDEO', 'TEXT']),
+}).superRefine((value, ctx) => {
+  if (normalizeMediaUrls(value).length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['media_urls'],
+      message: 'At least one media asset is required.',
+    });
+  }
 });
 
 const sendMessageSchema = z.object({
@@ -96,13 +120,13 @@ const createOfferSchema = z
   .object({
     media_type: MediaTypeSchema,
     media_url: z.string().url().optional(),
+    media_urls: z.array(z.string().url()).max(8).optional(),
     media_text: z.string().trim().min(3).max(4000).optional(),
     proposed_price_ugx: z.number().int().positive(),
     note: z.string().trim().max(500).optional(),
   })
   .superRefine((value, ctx) => {
-    const hasMediaUrl =
-      typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+    const hasMediaUrl = normalizeMediaUrls(value).length > 0;
     const hasMediaText =
       typeof value.media_text === 'string' &&
       value.media_text.trim().length > 0;
@@ -179,6 +203,9 @@ type ChatUserSummary = {
   negotiation_allowed: boolean;
   has_existing_thread: boolean;
   direct_thread_id: string | null;
+  average_rating: number;
+  rating_count: number;
+  latest_review_comment: string | null;
 };
 
 function isPromoterChatBizRole(role: unknown) {
@@ -331,6 +358,9 @@ function serializeUserSummary(row: any): ChatUserSummary {
     has_existing_thread: row?.has_existing_thread === true,
     direct_thread_id:
       row?.direct_thread_id == null ? null : String(row.direct_thread_id),
+    average_rating: 0,
+    rating_count: 0,
+    latest_review_comment: null,
   };
 }
 
@@ -390,7 +420,29 @@ async function loadUserSummary(client: any, userId: string) {
     `,
     [userId]
   );
-  return res.rows[0] ? serializeUserSummary(res.rows[0]) : null;
+  return res.rows[0]
+    ? applyPromoterReviewSummary(client, serializeUserSummary(res.rows[0]))
+    : null;
+}
+
+async function resolvePromoterProfileUser(client: any, reference: string) {
+  const normalizedReference = String(reference ?? '').trim();
+  if (!normalizedReference) return null;
+  const res = await client.query(
+    `
+    SELECT id, role
+    FROM users
+    WHERE id::text = $1
+       OR public_id = $1
+    LIMIT 1
+    `,
+    [normalizedReference]
+  );
+  const row = res.rows[0];
+  if (!row || !isPromoterChatBizRole(row.role)) {
+    return null;
+  }
+  return row;
 }
 
 function usersCanChatDirectly(
@@ -478,6 +530,63 @@ async function loadLastMessage(client: any, threadId: string) {
   );
   return res.rows[0] ?? null;
 }
+
+function normalizeMediaUrls(value: {
+  media_url?: unknown;
+  media_urls?: unknown;
+}) {
+  const urls = [
+    ...(Array.isArray(value.media_urls) ? value.media_urls : []),
+    value.media_url,
+  ]
+    .map((entry) => String(entry ?? '').trim())
+    .filter((entry) => entry.length > 0);
+  return Array.from(new Set(urls));
+}
+
+function primaryMediaUrl(value: { media_url?: unknown; media_urls?: unknown }) {
+  return normalizeMediaUrls(value)[0] ?? null;
+}
+
+async function applyPromoterReviewSummary<T extends ChatUserSummary>(
+  client: any,
+  summary: T | null
+) {
+  if (!summary) return null;
+  const summaryMap = await loadPromoterReviewSummaryMap(client, [summary.id]);
+  const review = summaryMap.get(summary.id);
+  return {
+    ...summary,
+    average_rating: Number(review?.average_rating ?? 0),
+    rating_count: Math.max(0, Number(review?.rating_count ?? 0)),
+    latest_review_comment: review?.latest_comment ?? null,
+  };
+}
+
+async function applyPromoterReviewSummaries<T extends ChatUserSummary>(
+  client: any,
+  summaries: T[]
+) {
+  if (summaries.length === 0) return summaries;
+  const summaryMap = await loadPromoterReviewSummaryMap(
+    client,
+    summaries.map((entry) => entry.id)
+  );
+  return summaries.map((entry) => {
+    const review = summaryMap.get(entry.id);
+    return {
+      ...entry,
+      average_rating: Number(review?.average_rating ?? 0),
+      rating_count: Math.max(0, Number(review?.rating_count ?? 0)),
+      latest_review_comment: review?.latest_comment ?? null,
+    };
+  });
+}
+
+const createPromoterReviewSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  comment: z.string().trim().max(400).optional(),
+});
 
 function serializeOfferPreview(row: any) {
   return {
@@ -601,7 +710,9 @@ async function loadDirectCounterpart(client: any, threadId: string, userId: stri
     `,
     [threadId, userId]
   );
-  return res.rows[0] ? serializeUserSummary(res.rows[0]) : null;
+  return res.rows[0]
+    ? applyPromoterReviewSummary(client, serializeUserSummary(res.rows[0]))
+    : null;
 }
 
 async function listThreadMessages(
@@ -865,7 +976,7 @@ async function buildGroupSnapshot(
     memberRows.map((row: any) => row.price_privacy_mode)
   );
 
-  const members = memberRows.map((row: any) => {
+  const rawMembers = memberRows.map((row: any) => {
     const viewers24h = toInt(row.viewers_24h);
     const officialPriceUgx = resolveOfficialPriceUgx(row);
     return {
@@ -889,6 +1000,22 @@ async function buildGroupSnapshot(
       joined_at: timestampText(row.joined_at),
     };
   });
+  const members = await applyPromoterReviewSummaries(client, rawMembers);
+  const creatorSummary =
+    groupRow.creator_id == null
+      ? null
+      : await applyPromoterReviewSummary(
+          client,
+          serializeUserSummary({
+            id: groupRow.creator_id,
+            public_id: groupRow.creator_public_id,
+            display_name: groupRow.creator_display_name,
+            role: groupRow.creator_role,
+            active_role: groupRow.creator_active_role,
+            last_seen_at: groupRow.creator_last_seen_at,
+            is_online: groupRow.creator_is_online,
+          })
+        );
 
   return {
     profile_type: 'GROUP',
@@ -924,17 +1051,7 @@ async function buildGroupSnapshot(
       String(groupRow.current_membership_role ?? '') === 'ADMIN' &&
       String(groupRow.current_membership_status ?? '') === 'ACTIVE',
     creator:
-      groupRow.creator_id == null
-        ? null
-        : serializeUserSummary({
-            id: groupRow.creator_id,
-            public_id: groupRow.creator_public_id,
-            display_name: groupRow.creator_display_name,
-            role: groupRow.creator_role,
-            active_role: groupRow.creator_active_role,
-            last_seen_at: groupRow.creator_last_seen_at,
-            is_online: groupRow.creator_is_online,
-          }),
+      creatorSummary,
     members: options.includeMembers ? members : [],
   };
 }
@@ -978,7 +1095,10 @@ async function listChatContacts(client: any, userId: string) {
     [userId]
   );
 
-  return res.rows.map(serializeUserSummary);
+  return applyPromoterReviewSummaries(
+    client,
+    res.rows.map(serializeUserSummary)
+  );
 }
 
 async function listDiscoverableChatContacts(
@@ -1072,7 +1192,10 @@ async function listDiscoverableChatContacts(
     params
   );
 
-  return res.rows.map(serializeUserSummary);
+  return applyPromoterReviewSummaries(
+    client,
+    res.rows.map(serializeUserSummary)
+  );
 }
 
 async function listMyGroups(client: any, userId: string) {
@@ -1247,9 +1370,12 @@ async function listGroupCandidates(
   `;
 
   const res = await client.query(sql, params);
-  return res.rows
-    .filter((row: any) => isPromoterChatBizRole(row.role))
-    .map(serializeUserSummary);
+  return applyPromoterReviewSummaries(
+    client,
+    res.rows
+      .filter((row: any) => isPromoterChatBizRole(row.role))
+      .map(serializeUserSummary)
+  );
 }
 
 async function buildThreadSummary(client: any, threadId: string, userId: string) {
@@ -1319,6 +1445,7 @@ async function buildThreadSummary(client: any, threadId: string, userId: string)
     unread_count: unreadCount,
     live_draft_text: liveDraftText,
     media_url: thread.media_url == null ? null : String(thread.media_url),
+    media_urls: normalizeMediaUrls({ media_url: thread.media_url }),
     media_type: thread.media_type == null ? null : String(thread.media_type),
     counterpart,
     group,
@@ -1436,7 +1563,13 @@ async function ensureGroupDealThread(
       VALUES ($1, $2, $3, $4, $5)
       RETURNING id
       `,
-      [CHAT_THREAD_KIND_GROUP_DEAL, String(group.name ?? 'Group Pool').trim(), createdBy]
+      [
+        CHAT_THREAD_KIND_GROUP_DEAL,
+        String(group.name ?? 'Group Pool').trim(),
+        createdBy,
+        mediaUrl,
+        mediaType,
+      ]
     );
     threadId = String(threadRes.rows[0]?.id ?? '').trim();
 
@@ -1491,10 +1624,12 @@ async function ensureGroupDealThread(
   await client.query(
     `
     UPDATE chat_threads
-    SET title = $2
+    SET title = $2,
+        media_url = COALESCE(NULLIF($3, ''), media_url),
+        media_type = COALESCE(NULLIF($4, ''), media_type)
     WHERE id = $1
     `,
-    [threadId, String(group.name ?? 'Group Pool').trim()]
+    [threadId, String(group.name ?? 'Group Pool').trim(), mediaUrl, mediaType]
   );
 
   return { threadId, created, group };
@@ -1965,6 +2100,7 @@ async function buildCampaignPrefillFromOffer(client: any, offer: any) {
     platform: 'WHATSAPP_STATUS',
     media_type: String(offer.media_type ?? 'IMAGE'),
     media_url: offer.media_url == null ? null : String(offer.media_url),
+    media_urls: normalizeMediaUrls({ media_url: offer.media_url }),
     media_text: offer.media_text == null ? null : String(offer.media_text),
     payout_amount: acceptedPrice,
     budget_total: acceptedPrice,
@@ -2033,6 +2169,7 @@ async function serializeOffer(client: any, offer: any) {
       offer.resolved_price_ugx == null ? null : toInt(offer.resolved_price_ugx),
     media_type: String(offer.media_type ?? 'IMAGE'),
     media_url: offer.media_url == null ? null : String(offer.media_url),
+    media_urls: normalizeMediaUrls({ media_url: offer.media_url }),
     media_text: offer.media_text == null ? null : String(offer.media_text),
     note: String(offer.note ?? ''),
     created_at: timestampText(offer.created_at),
@@ -2071,6 +2208,7 @@ export async function chatRoutes(app: FastifyInstance) {
   app.addHook('onReady', async () => {
     await withTransaction(async (client) => {
       await ensureChatSchema(client);
+      await ensurePromoterReviewsSchema(client);
     });
   });
 
@@ -2106,6 +2244,144 @@ export async function chatRoutes(app: FastifyInstance) {
       return listChatContacts(client, userId);
     });
     return { contacts };
+  });
+
+  app.get('/chat/profiles/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userId = authUserId(request);
+    const params = request.params as { id: string };
+    if (!userId) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+
+    const activeRole = authActiveRole(request);
+    const result = await withTransaction(async (client) => {
+      await ensureChatSchema(client);
+      await ensurePromoterReviewsSchema(client);
+      const promoter = await resolvePromoterProfileUser(client, params.id);
+      if (!promoter) {
+        return { error: 'profile_not_found' } as const;
+      }
+
+      const profile = await loadUserSummary(client, String(promoter.id));
+      if (!profile) {
+        return { error: 'profile_not_found' } as const;
+      }
+
+      const latestCompletedContract =
+        userId !== String(promoter.id) && isAdvertiserChatBizRole(activeRole)
+          ? await loadLatestCompletedContractForReview(
+              client,
+              userId,
+              String(promoter.id)
+            )
+          : null;
+
+      return {
+        profile,
+        reviews: await listPromoterReviews(client, String(promoter.id)),
+        can_review: latestCompletedContract != null,
+        review_contract_id:
+          latestCompletedContract == null
+            ? null
+            : String(latestCompletedContract.id),
+      };
+    });
+
+    if ((result as any)?.error) {
+      reply.code((result as any).error === 'profile_not_found' ? 404 : 400);
+      return result;
+    }
+
+    return result;
+  });
+
+  app.post('/chat/profiles/:id/reviews', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userId = authUserId(request);
+    const activeRole = authActiveRole(request);
+    const params = request.params as { id: string };
+    const parsed = createPromoterReviewSchema.safeParse(request.body);
+    if (!userId) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    if (!isAdvertiserChatBizRole(activeRole)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+
+    const result = await withTransaction(async (client) => {
+      await ensureChatSchema(client);
+      await ensurePromoterReviewsSchema(client);
+      const promoter = await resolvePromoterProfileUser(client, params.id);
+      if (!promoter) {
+        return { error: 'profile_not_found' } as const;
+      }
+      if (String(promoter.id) === userId) {
+        return { error: 'cannot_review_self' } as const;
+      }
+
+      const contract = await loadLatestCompletedContractForReview(
+        client,
+        userId,
+        String(promoter.id)
+      );
+      if (!contract?.id) {
+        return { error: 'review_contract_required' } as const;
+      }
+
+      const savedReview = await client.query(
+        `
+        INSERT INTO promoter_profile_reviews (
+          promoter_id,
+          advertiser_id,
+          contract_id,
+          rating,
+          comment,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (contract_id) DO UPDATE
+          SET rating = EXCLUDED.rating,
+              comment = EXCLUDED.comment,
+              updated_at = NOW()
+        RETURNING id, promoter_id, advertiser_id, contract_id, rating, comment, created_at, updated_at
+        `,
+        [
+          String(promoter.id),
+          userId,
+          String(contract.id),
+          parsed.data.rating,
+          parsed.data.comment?.trim() ?? '',
+        ]
+      );
+
+      return {
+        review: savedReview.rows[0] ?? null,
+        profile: await loadUserSummary(client, String(promoter.id)),
+        reviews: await listPromoterReviews(client, String(promoter.id)),
+        can_review: true,
+        review_contract_id: String(contract.id),
+      };
+    });
+
+    if ((result as any)?.error) {
+      const error = (result as any).error;
+      reply.code(
+        error === 'profile_not_found'
+          ? 404
+          : error === 'forbidden' || error === 'review_contract_required'
+            ? 403
+            : 400
+      );
+      return result;
+    }
+
+    return result;
   });
 
   app.get('/chat/threads', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -2232,7 +2508,7 @@ export async function chatRoutes(app: FastifyInstance) {
         client,
         userId,
         parsed.data.participant_id,
-        parsed.data.media_url,
+        primaryMediaUrl(parsed.data) ?? '',
         parsed.data.media_type
       );
       await seedInitialThreadQuoteIfMissing(
@@ -2793,7 +3069,14 @@ export async function chatRoutes(app: FastifyInstance) {
       if (groupSnapshot.negotiation_allowed !== true) {
         return { error: 'pricing_fixed' } as const;
       }
-      const deal = await ensureGroupDealThread(client, params.id, userId, userId, parsed.data.media_url, parsed.data.media_type);
+      const deal = await ensureGroupDealThread(
+        client,
+        params.id,
+        userId,
+        userId,
+        primaryMediaUrl(parsed.data) ?? '',
+        parsed.data.media_type
+      );
       if (!deal) {
         return { error: 'group_not_found' } as const;
       }
@@ -3120,7 +3403,7 @@ export async function chatRoutes(app: FastifyInstance) {
           context.official_price_ugx,
           parsed.data.proposed_price_ugx,
           parsed.data.media_type,
-          parsed.data.media_url ?? null,
+          primaryMediaUrl(parsed.data),
           parsed.data.media_text ?? null,
           parsed.data.note ?? '',
           CHAT_OFFER_STATUS_PENDING,

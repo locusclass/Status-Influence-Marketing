@@ -8,6 +8,7 @@ import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
 import {
+  calculatePromoterPayoutBreakdown,
   generateMonthlyPayouts,
   deriveEngagementRate,
   doesSubmissionExist,
@@ -23,6 +24,7 @@ import {
   getSubmissionPrimaryMetric,
   getSubmissionVideoUrl,
   isCreatorPlatform,
+  PROMOTER_PLATFORM_FEE_PERCENT,
   isSubmissionPublic,
   normalizeCampaignPlatform,
   recordCampaignRevenueEntry,
@@ -187,6 +189,26 @@ async function ensureCampaignAllocatorColumns(client: any) {
   `);
 }
 
+async function ensurePromoterPayoutColumns(client: any) {
+  await client.query(`
+    ALTER TABLE payout_requests
+      ADD COLUMN IF NOT EXISTS platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT ${PROMOTER_PLATFORM_FEE_PERCENT}
+  `);
+  await client.query(`
+    ALTER TABLE payout_requests
+      ADD COLUMN IF NOT EXISTS platform_fee_amount INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE payout_requests
+      ADD COLUMN IF NOT EXISTS net_amount INTEGER
+  `);
+  await client.query(`
+    UPDATE payout_requests
+    SET net_amount = COALESCE(net_amount, amount)
+    WHERE net_amount IS NULL
+  `);
+}
+
 async function ensureCreatorMarketingTables(client: any) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS creators (
@@ -277,9 +299,7 @@ async function syncCreatorsFromUsers(client: any) {
 }
 
 function getDistributableCampaignBudget(campaign: any) {
-  const budgetTotal = Math.max(0, Number(campaign?.budget_total ?? 0));
-  const feePercent = Math.max(0, Number(campaign?.platform_fee_percent ?? 0));
-  return Math.floor(budgetTotal * ((100 - feePercent) / 100));
+  return Math.max(0, Number(campaign?.budget_total ?? 0));
 }
 
 function getEscrowCampaignId(campaign: any) {
@@ -1187,7 +1207,15 @@ async function markContractCompletedForVerifiedProof(client: any, proofId: strin
 }
 
 async function preparePayoutRequest(client: any, proof: any, campaign: any) {
+  await ensurePromoterPayoutColumns(client);
   const escrowCampaignId = getEscrowCampaignId(campaign);
+  const payoutBreakdown = calculatePromoterPayoutBreakdown(
+    Number(campaign?.payout_amount ?? campaign?.budget_total ?? 0)
+  );
+  const escrowDebitAmount = Math.max(
+    0,
+    Math.round(Number(campaign?.budget_total ?? payoutBreakdown.gross_amount))
+  );
   const contractRes = await client.query(
     `SELECT id
      FROM contracts
@@ -1218,12 +1246,47 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
   let payoutRow = existingPayoutRes.rows[0];
   if (!payoutRow) {
     const payoutInsert = await client.query(
-      `INSERT INTO payout_requests (proof_id, user_id, amount, status)
-       VALUES ($1,$2,$3,'REQUESTED')
+      `INSERT INTO payout_requests (
+         proof_id,
+         user_id,
+         amount,
+         platform_fee_percent,
+         platform_fee_amount,
+         net_amount,
+         status
+       )
+       VALUES ($1,$2,$3,$4,$5,$6,'REQUESTED')
        RETURNING *`,
-      [proof.id, proof.user_id, campaign.payout_amount]
+      [
+        proof.id,
+        proof.user_id,
+        payoutBreakdown.gross_amount,
+        payoutBreakdown.platform_fee_percent,
+        payoutBreakdown.platform_fee_amount,
+        payoutBreakdown.net_amount,
+      ]
     );
     payoutRow = payoutInsert.rows[0];
+  } else {
+    const payoutUpdate = await client.query(
+      `
+      UPDATE payout_requests
+      SET amount = $2,
+          platform_fee_percent = $3,
+          platform_fee_amount = $4,
+          net_amount = $5
+      WHERE id = $1
+      RETURNING *
+      `,
+      [
+        payoutRow.id,
+        payoutBreakdown.gross_amount,
+        payoutBreakdown.platform_fee_percent,
+        payoutBreakdown.platform_fee_amount,
+        payoutBreakdown.net_amount,
+      ]
+    );
+    payoutRow = payoutUpdate.rows[0] ?? payoutRow;
   }
 
   if (!payoutRow) return null;
@@ -1251,7 +1314,7 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
          END
      WHERE id=$1 AND amount_available >= $2
      RETURNING *`,
-    [escrow.id, campaign.budget_total]
+    [escrow.id, escrowDebitAmount]
   );
 
   if (!updatedEscrow.rows[0]) {
@@ -1290,18 +1353,54 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
         balance = balance + $2
     WHERE id=$1
     `,
-    [wallet.id, campaign.payout_amount]
+    [wallet.id, payoutBreakdown.gross_amount]
   );
   await client.query(
     `
     INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
     VALUES ($1,$2,'CREDIT',$3)
     `,
-    [wallet.id, campaign.payout_amount, `PROOF_PAYOUT:${proof.id}`]
+    [wallet.id, payoutBreakdown.gross_amount, `PROOF_PAYOUT_GROSS:${proof.id}`]
   );
+  if (payoutBreakdown.platform_fee_amount > 0) {
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_available = balance_available - $2,
+          balance = balance - $2
+      WHERE id=$1
+      `,
+      [wallet.id, payoutBreakdown.platform_fee_amount]
+    );
+    await client.query(
+      `
+      INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+      VALUES ($1,$2,'DEBIT',$3)
+      `,
+      [
+        wallet.id,
+        payoutBreakdown.platform_fee_amount,
+        `PROMOTER_PLATFORM_FEE:${proof.id}`,
+      ]
+    );
+  }
   await client.query(
-    "UPDATE payout_requests SET status='PAID', pesapal_reference=$2 WHERE id=$1",
-    [payoutRow.id, `WALLET_CREDIT:${proof.id}`]
+    `
+    UPDATE payout_requests
+    SET status='PAID',
+        pesapal_reference=$2,
+        platform_fee_percent=$3,
+        platform_fee_amount=$4,
+        net_amount=$5
+    WHERE id=$1
+    `,
+    [
+      payoutRow.id,
+      `WALLET_CREDIT:${proof.id}`,
+      payoutBreakdown.platform_fee_percent,
+      payoutBreakdown.platform_fee_amount,
+      payoutBreakdown.net_amount,
+    ]
   );
   return null;
 }

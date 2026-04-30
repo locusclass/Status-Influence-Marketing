@@ -725,6 +725,40 @@ function resolveDeterministicEngagements24h(
   return Math.max(1, capacity24h);
 }
 
+function normalizeCampaignMediaUrls(value: {
+  media_url?: unknown;
+  media_urls?: unknown;
+  execution_meta?: unknown;
+}) {
+  const executionMeta =
+    value.execution_meta && typeof value.execution_meta === 'object'
+      ? (value.execution_meta as Record<string, unknown>)
+      : null;
+  const urls = [
+    ...(Array.isArray(value.media_urls) ? value.media_urls : []),
+    ...(Array.isArray(executionMeta?.media_urls) ? executionMeta.media_urls : []),
+    value.media_url,
+  ]
+    .map((entry) => String(entry ?? '').trim())
+    .filter((entry) => entry.length > 0);
+  return Array.from(new Set(urls));
+}
+
+function primaryCampaignMediaUrl(value: {
+  media_url?: unknown;
+  media_urls?: unknown;
+  execution_meta?: unknown;
+}) {
+  return normalizeCampaignMediaUrls(value)[0] ?? null;
+}
+
+function withCampaignMediaUrls<T extends Record<string, any>>(campaign: T) {
+  return {
+    ...campaign,
+    media_urls: normalizeCampaignMediaUrls(campaign),
+  };
+}
+
 async function buildPrivatePricingQuote(
   client: any,
   distributor: any,
@@ -1434,7 +1468,7 @@ async function loadBundleSummary(
     amount_total: Number(escrow?.amount_total ?? 0),
     amount_available: Number(escrow?.amount_available ?? 0),
     campaigns: campaigns.map((row: any) => ({
-      ...row,
+      ...withCampaignMediaUrls(row),
       status_summary:
         summaries.get(String(row.id)) ?? {
           campaign_status: String(row.status ?? 'ACTIVE'),
@@ -1775,6 +1809,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       end_date: z.string(),
       media_type: MediaTypeSchema,
       media_url: z.string().url().optional(),
+      media_urls: z.array(z.string().url()).max(8).optional(),
       media_text: z.string().trim().min(3).max(4000).optional(),
       execution_meta: z.record(z.any()).optional(),
       impression_target: z.number().int().min(1).optional(),
@@ -1785,8 +1820,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional(),
     })
     .superRefine((value, ctx) => {
-      const hasMediaUrl =
-        typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+      const hasMediaUrl = primaryCampaignMediaUrl(value) != null;
       const hasMediaText =
         typeof value.media_text === 'string' &&
         value.media_text.trim().length > 0;
@@ -2183,7 +2217,7 @@ export async function campaignRoutes(app: FastifyInstance) {
             })
           : [];
       return {
-        ...found,
+        ...withCampaignMediaUrls(found),
         beneficiaries,
         managed_contracts: managedContracts,
         active_contract: activeContractRow,
@@ -2222,7 +2256,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     const result = await withTransaction(async (client) => {
       return loadBundleForAdvertiser(client, params.id, authUser, role);
     });
-    if ((result as any).error) {
+  if ((result as any).error) {
       const error = (result as any).error as string;
       reply.code(
         error === 'campaign_bundle_not_found' || error === 'campaign_not_found'
@@ -2232,7 +2266,14 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { error };
     }
 
-    return { bundle: (result as any).bundle };
+    return {
+      bundle: {
+        ...(result as any).bundle,
+        campaigns: ((result as any).bundle?.campaigns ?? []).map((row: any) =>
+          withCampaignMediaUrls(row)
+        ),
+      },
+    };
   });
 
   app.get('/campaigns/:id/proofs', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -2564,6 +2605,8 @@ export async function campaignRoutes(app: FastifyInstance) {
             estimatedAllocationCount = publicBudget.estimatedAllocationCount;
             perAllocationTarget = publicBudget.perAllocationTarget;
           }
+          const resolvedMediaUrls = normalizeCampaignMediaUrls(item);
+          const resolvedMediaUrl = primaryCampaignMediaUrl(item);
 
           const executionMeta = buildCampaignExecutionMeta(
             item.platform,
@@ -2581,6 +2624,7 @@ export async function campaignRoutes(app: FastifyInstance) {
                   private_total_rate_ugx: resolvedBudgetTotal,
                   private_total_proven_engagements_24h:
                     resolvedImpressionTarget,
+                  media_urls: resolvedMediaUrls,
                 }
               : isCreatorPlatform(item.platform) &&
                     executionMode === 'OPEN_BUDGET'
@@ -2592,11 +2636,13 @@ export async function campaignRoutes(app: FastifyInstance) {
                       public_contract_rate_ugx: getPublicContractUnitRate(
                         item.media_type
                       ),
+                      media_urls: resolvedMediaUrls,
                     }
                   : {
                       public_contract_rate_ugx: getPublicContractUnitRate(
                         item.media_type
                       ),
+                      media_urls: resolvedMediaUrls,
                     }
           );
           const campaignBurstMode = getCampaignBurstMode({
@@ -2619,7 +2665,7 @@ export async function campaignRoutes(app: FastifyInstance) {
             advertiser_wallet_mode: 'CAMPAIGN_ONLY',
             media_type: item.media_type,
             media_text: item.media_text,
-            media_url: item.media_url,
+            media_url: resolvedMediaUrl ?? undefined,
             execution_meta: executionMeta,
             campaign_burst_mode: campaignBurstMode,
             terms_keep_hours: resolvedTermsKeepHours,
@@ -2684,7 +2730,7 @@ export async function campaignRoutes(app: FastifyInstance) {
                 advertiser_wallet_mode: 'CAMPAIGN_ONLY',
                 media_type: item.media_type,
                 media_text: item.media_text,
-                media_url: item.media_url,
+                media_url: resolvedMediaUrl ?? undefined,
                 execution_meta: childExecutionMeta,
                 campaign_burst_mode: campaignBurstMode,
                 terms_keep_hours: resolvedTermsKeepHours,
@@ -2696,7 +2742,7 @@ export async function campaignRoutes(app: FastifyInstance) {
             }
           }
 
-          createdRootCampaigns.push({
+          createdRootCampaigns.push(withCampaignMediaUrls({
             ...root,
             campaign_bundle_id: bundleId,
             bundle_root_campaign_id: bundleRootCampaignId,
@@ -2706,7 +2752,7 @@ export async function campaignRoutes(app: FastifyInstance) {
             estimated_minimum_users: estimatedAllocationCount,
             estimated_allocations: estimatedAllocationCount,
             per_allocation_target: perAllocationTarget,
-          });
+          }));
         }
 
         await paymentRepo.createEscrow(
@@ -2931,6 +2977,8 @@ export async function campaignRoutes(app: FastifyInstance) {
         ) {
           return { error: 'campaign_edit_budget_locked' } as any;
         }
+        const resolvedMediaUrls = normalizeCampaignMediaUrls(body);
+        const resolvedMediaUrl = primaryCampaignMediaUrl(body);
         const executionMeta = buildCampaignExecutionMeta(
           platformKey,
           body.execution_meta,
@@ -2947,6 +2995,7 @@ export async function campaignRoutes(app: FastifyInstance) {
                 private_total_rate_ugx: resolvedBudgetTotal,
                 private_total_proven_engagements_24h:
                   resolvedImpressionTarget,
+                media_urls: resolvedMediaUrls,
               }
             : isCreatorPlatform(body.platform) &&
                   executionMode === 'OPEN_BUDGET'
@@ -2958,11 +3007,13 @@ export async function campaignRoutes(app: FastifyInstance) {
                     public_contract_rate_ugx: getPublicContractUnitRate(
                       body.media_type
                     ),
+                    media_urls: resolvedMediaUrls,
                   }
                 : {
                     public_contract_rate_ugx: getPublicContractUnitRate(
                       body.media_type
                     ),
+                    media_urls: resolvedMediaUrls,
                   }
         );
         const campaignBurstMode = getCampaignBurstMode({
@@ -3009,7 +3060,7 @@ export async function campaignRoutes(app: FastifyInstance) {
             platformFeePercent,
             body.media_type,
             body.media_text ?? null,
-            body.media_url ?? null,
+            resolvedMediaUrl,
             executionMetaJson,
             campaignBurstMode,
             resolvedTermsKeepHours,
@@ -3072,12 +3123,13 @@ export async function campaignRoutes(app: FastifyInstance) {
               platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
               advertiser_wallet_mode: 'CAMPAIGN_ONLY',
               impression_target: share.impression_target,
+              media_url: resolvedMediaUrl,
               terms_keep_hours: resolvedTermsKeepHours,
             });
           }
         }
 
-        return {
+        return withCampaignMediaUrls({
           ...updatedRoot,
           campaign_bundle_id: bundleId,
           bundle_root_campaign_id: getEscrowCampaignId(editable.root),
@@ -3091,7 +3143,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           ...(bundleId
             ? { bundle: await loadBundleSummary(client, bundleId, authUser) }
             : {}),
-        };
+        });
       });
 
       if ((campaign as any).error) {
