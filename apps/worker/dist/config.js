@@ -1,3 +1,4 @@
+import { allowDirectYoHostBypass, DEFAULT_YO_GATEWAY_TASK_URL, normalizeYoTaskUrl, } from '@prime/shared';
 function stripWrappingQuotes(value) {
     const trimmed = value.trim();
     if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
@@ -6,11 +7,13 @@ function stripWrappingQuotes(value) {
     }
     return trimmed;
 }
+const allowDirectApiBypass = allowDirectYoHostBypass(process.env.YO_ALLOW_DIRECT_API_BYPASS);
 const yoConfig = {
-    baseUrl: stripWrappingQuotes(process.env.YO_API_URL ??
-        process.env.YO_BASE_URL ??
+    allowDirectApiBypass,
+    baseUrl: normalizeYoTaskUrl(stripWrappingQuotes(process.env.YO_BASE_URL ??
+        process.env.YO_API_URL ??
         process.env.FLUTTERWAVE_BASE_URL ??
-        'https://paymentsapi1.yo.co.ug/ybs/task.php'),
+        ''), DEFAULT_YO_GATEWAY_TASK_URL, { allowDirectHostBypass: allowDirectApiBypass }),
     apiUsername: stripWrappingQuotes(process.env.YO_API_USERNAME ??
         process.env.YO_USERNAME ??
         process.env.FLUTTERWAVE_CLIENT_ID ??
@@ -36,3 +39,6 @@ export const config = {
     },
     pesapal: yoConfig,
 };
+export function resolveYoBaseUrl() {
+    return config.yo.baseUrl;
+}

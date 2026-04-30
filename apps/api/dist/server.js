@@ -7,7 +7,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
-import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, } from './config.js';
+import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
@@ -204,15 +204,20 @@ export function buildServer() {
         app.log.info({
             provider: 'YO_UGANDA',
             base_url: resolveYoBaseUrl(),
+            fallback_base_url: resolveYoFallbackBaseUrl(),
             auth_mode: hasClientCreds ? 'api_credentials' : 'none',
             has_secret: hasSecret,
             has_client_creds: hasClientCreds,
+            allow_direct_api_bypass: config.yo.allowDirectApiBypass,
         }, 'yo_uganda_config');
         if (!hasValidYoKeys()) {
             app.log.warn('YO Uganda credentials are incomplete. Payments will fail.');
         }
         if (!config.yo.webhookSecretHash) {
             app.log.info('YO Uganda collection uses status polling. Webhook verification is not active.');
+        }
+        if (config.yo.allowDirectApiBypass) {
+            app.log.warn('YO_ALLOW_DIRECT_API_BYPASS is enabled. Direct YO hosts can bypass the static-IP gateway.');
         }
     });
     return app;

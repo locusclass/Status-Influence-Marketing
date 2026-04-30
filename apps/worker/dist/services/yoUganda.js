@@ -1,5 +1,5 @@
 import { fetch } from 'undici';
-import { config } from '../config.js';
+import { config, resolveYoBaseUrl } from '../config.js';
 function normalizePhoneNumber(phoneNumber) {
     const digits = phoneNumber.replace(/[^\d]/g, '');
     if (!digits) {
@@ -31,7 +31,7 @@ function buildRequestXml(request) {
     return `<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Request>${body}</Request></AutoCreate>`;
 }
 export async function requestPayout(input) {
-    const res = await fetch(config.yo.baseUrl, {
+    const res = await fetch(resolveYoBaseUrl(), {
         method: 'POST',
         headers: {
             Accept: 'application/xml, text/xml, */*',

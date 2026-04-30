@@ -19,6 +19,7 @@ import {
   hasYoClientCredentials,
   hasYoSecretKey,
   resolveYoBaseUrl,
+  resolveYoFallbackBaseUrl,
 } from './config.js';
 import { withTransaction } from './db.js';
 import {
@@ -268,9 +269,11 @@ export function buildServer() {
       {
         provider: 'YO_UGANDA',
         base_url: resolveYoBaseUrl(),
+        fallback_base_url: resolveYoFallbackBaseUrl(),
         auth_mode: hasClientCreds ? 'api_credentials' : 'none',
         has_secret: hasSecret,
         has_client_creds: hasClientCreds,
+        allow_direct_api_bypass: config.yo.allowDirectApiBypass,
       },
       'yo_uganda_config'
     );
@@ -281,6 +284,10 @@ export function buildServer() {
 
     if (!config.yo.webhookSecretHash) {
       app.log.info('YO Uganda collection uses status polling. Webhook verification is not active.');
+    }
+
+    if (config.yo.allowDirectApiBypass) {
+      app.log.warn('YO_ALLOW_DIRECT_API_BYPASS is enabled. Direct YO hosts can bypass the static-IP gateway.');
     }
   });
 

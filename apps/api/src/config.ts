@@ -1,6 +1,11 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
+import {
+  allowDirectYoHostBypass,
+  DEFAULT_YO_GATEWAY_TASK_URL,
+  normalizeYoTaskUrl,
+} from '@prime/shared';
 
 function stripWrappingQuotes(value: string) {
   const trimmed = value.trim();
@@ -39,31 +44,33 @@ function resolveUploadDir() {
   return './uploads';
 }
 
-function normalizeYoTaskUrl(configuredValue: string, fallback: string) {
-  const configured = configuredValue.trim().replace(/\/+$/, '');
-  if (!configured) {
-    return fallback;
-  }
-  if (/task\.php$/i.test(configured)) {
-    return configured;
-  }
-  if (/\/ybs$/i.test(configured)) {
-    return `${configured}/task.php`;
-  }
-  return `${configured}/ybs/task.php`;
-}
+const allowDirectApiBypass = allowDirectYoHostBypass(
+  process.env.YO_ALLOW_DIRECT_API_BYPASS
+);
 
 const yoConfig = {
-  baseUrl: stripWrappingQuotes(
-    process.env.YO_API_URL ??
+  allowDirectApiBypass,
+  baseUrl: normalizeYoTaskUrl(
+    stripWrappingQuotes(
       process.env.YO_BASE_URL ??
-      process.env.FLUTTERWAVE_BASE_URL ??
-      'https://paymentsapi1.yo.co.ug/ybs/task.php'
+        process.env.YO_API_URL ??
+        process.env.FLUTTERWAVE_BASE_URL ??
+        ''
+    ),
+    DEFAULT_YO_GATEWAY_TASK_URL,
+    { allowDirectHostBypass: allowDirectApiBypass }
   ),
-  fallbackBaseUrl: stripWrappingQuotes(
-    process.env.YO_API_URL_FALLBACK ??
-      process.env.YO_FALLBACK_BASE_URL ??
-      'https://paymentsapi2.yo.co.ug/ybs/task.php'
+  fallbackBaseUrl: normalizeYoTaskUrl(
+    stripWrappingQuotes(
+      process.env.YO_API_URL_FALLBACK ??
+        process.env.YO_FALLBACK_BASE_URL ??
+        process.env.YO_BASE_URL ??
+        process.env.YO_API_URL ??
+        process.env.FLUTTERWAVE_BASE_URL ??
+        ''
+    ),
+    DEFAULT_YO_GATEWAY_TASK_URL,
+    { allowDirectHostBypass: allowDirectApiBypass }
   ),
   apiUsername: stripWrappingQuotes(
     process.env.YO_API_USERNAME ??
@@ -147,6 +154,11 @@ export function getStartupConfigIssues() {
   if (!config.yo.apiPassword.trim()) {
     issues.push('YO_API_PASSWORD is missing');
   }
+  if (config.yo.allowDirectApiBypass) {
+    issues.push(
+      'YO_ALLOW_DIRECT_API_BYPASS is enabled, so direct YO hosts can bypass the static-IP gateway'
+    );
+  }
 
   if (
     config.firebase.projectId ||
@@ -207,17 +219,11 @@ export function hasYoEncryptionKey() {
 }
 
 export function resolveYoBaseUrl() {
-  return normalizeYoTaskUrl(
-    config.yo.baseUrl,
-    'https://paymentsapi1.yo.co.ug/ybs/task.php'
-  );
+  return config.yo.baseUrl;
 }
 
 export function resolveYoFallbackBaseUrl() {
-  return normalizeYoTaskUrl(
-    config.yo.fallbackBaseUrl,
-    'https://paymentsapi2.yo.co.ug/ybs/task.php'
-  );
+  return config.yo.fallbackBaseUrl;
 }
 
 export const hasValidFlutterwaveKeys = hasValidYoKeys;

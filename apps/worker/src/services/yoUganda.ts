@@ -1,5 +1,5 @@
 import { fetch } from 'undici';
-import { config } from '../config.js';
+import { config, resolveYoBaseUrl } from '../config.js';
 
 function normalizePhoneNumber(phoneNumber: string) {
   const digits = phoneNumber.replace(/[^\d]/g, '');
@@ -43,7 +43,7 @@ export async function requestPayout(input: {
   receiverPhone: string;
   receiverNetwork?: string;
 }) {
-  const res = await fetch(config.yo.baseUrl, {
+  const res = await fetch(resolveYoBaseUrl(), {
     method: 'POST',
     headers: {
       Accept: 'application/xml, text/xml, */*',
