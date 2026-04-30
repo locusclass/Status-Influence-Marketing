@@ -1,9 +1,11 @@
 import { fetch } from 'undici';
 import crypto from 'crypto';
+import { isDirectYoTaskUrl } from '@prime/shared';
 import {
   config,
   hasYoCredentials,
   resolveYoBaseUrl,
+  resolveYoDirectFailoverBaseUrls,
   resolveYoFallbackBaseUrl,
 } from '../config.js';
 
@@ -38,6 +40,16 @@ function xmlUnescape(value: string) {
 function uniqueEndpoints() {
   return Array.from(
     new Set([resolveYoBaseUrl(), resolveYoFallbackBaseUrl()].filter(Boolean))
+  );
+}
+
+function directFailoverEndpoints() {
+  return Array.from(
+    new Set(
+      resolveYoDirectFailoverBaseUrls().filter(
+        (endpoint) => endpoint && !uniqueEndpoints().includes(endpoint)
+      )
+    )
   );
 }
 
@@ -167,6 +179,22 @@ async function postXml(endpoint: string, body: string) {
   return text;
 }
 
+function isGatewayFailoverError(error: unknown, endpoint: string) {
+  if (!endpoint || isDirectYoTaskUrl(endpoint)) {
+    return false;
+  }
+
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return (
+    /YO proxy request failed/i.test(message) ||
+    /timeout of \d+ms exceeded/i.test(message) ||
+    /fetch failed/i.test(message) ||
+    /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(
+      message
+    )
+  );
+}
+
 async function yoRequest(
   request: Record<string, string | number | boolean | null | undefined>
 ) {
@@ -181,14 +209,30 @@ async function yoRequest(
   });
 
   const endpoints = uniqueEndpoints();
+  const failoverEndpoints = directFailoverEndpoints();
   let lastError: unknown = null;
+  let shouldTryDirectFailover = false;
 
   for (const endpoint of endpoints) {
     try {
       const responseText = await postXml(endpoint, body);
       return parseYoResponseXml(responseText);
     } catch (error) {
+      if (isGatewayFailoverError(error, endpoint)) {
+        shouldTryDirectFailover = true;
+      }
       lastError = error;
+    }
+  }
+
+  if (shouldTryDirectFailover) {
+    for (const endpoint of failoverEndpoints) {
+      try {
+        const responseText = await postXml(endpoint, body);
+        return parseYoResponseXml(responseText);
+      } catch (error) {
+        lastError = error;
+      }
     }
   }
 

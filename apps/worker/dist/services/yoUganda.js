@@ -1,5 +1,6 @@
 import { fetch } from 'undici';
-import { config, resolveYoBaseUrl } from '../config.js';
+import { isDirectYoTaskUrl } from '@prime/shared';
+import { config, resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls, } from '../config.js';
 function normalizePhoneNumber(phoneNumber) {
     const digits = phoneNumber.replace(/[^\d]/g, '');
     if (!digits) {
@@ -23,6 +24,9 @@ function resolveAccountProviderCode(network) {
     }
     return undefined;
 }
+function failoverEndpoints() {
+    return Array.from(new Set(resolveYoDirectFailoverBaseUrls().filter((endpoint) => endpoint && endpoint !== resolveYoBaseUrl())));
+}
 function buildRequestXml(request) {
     const body = Object.entries(request)
         .filter(([, value]) => value != null && String(value).trim().length > 0)
@@ -30,30 +34,61 @@ function buildRequestXml(request) {
         .join('');
     return `<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Request>${body}</Request></AutoCreate>`;
 }
-export async function requestPayout(input) {
-    const res = await fetch(resolveYoBaseUrl(), {
+async function postXml(endpoint, body) {
+    const res = await fetch(endpoint, {
         method: 'POST',
         headers: {
             Accept: 'application/xml, text/xml, */*',
             'Content-Type': 'text/xml',
             'Content-transfer-encoding': 'text',
         },
-        body: buildRequestXml({
-            APIUsername: config.yo.apiUsername,
-            APIPassword: config.yo.apiPassword,
-            Method: 'acwithdrawfunds',
-            NonBlocking: 'FALSE',
-            Amount: input.amount,
-            Account: normalizePhoneNumber(input.receiverPhone),
-            AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
-            Narrative: input.narration,
-            ExternalReference: input.reference,
-            ProviderReferenceText: input.reference,
-        }),
+        body,
     });
+    const text = await res.text();
     if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`YO Uganda payout failed: ${res.status} ${text}`);
+        throw new Error(`YO Uganda payout failed: ${res.status} ${text}`.trim());
     }
-    return res.text();
+    return text;
+}
+function isGatewayFailoverError(error, endpoint) {
+    if (!endpoint || isDirectYoTaskUrl(endpoint)) {
+        return false;
+    }
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return (/YO proxy request failed/i.test(message) ||
+        /timeout of \d+ms exceeded/i.test(message) ||
+        /fetch failed/i.test(message) ||
+        /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message));
+}
+export async function requestPayout(input) {
+    const body = buildRequestXml({
+        APIUsername: config.yo.apiUsername,
+        APIPassword: config.yo.apiPassword,
+        Method: 'acwithdrawfunds',
+        NonBlocking: 'FALSE',
+        Amount: input.amount,
+        Account: normalizePhoneNumber(input.receiverPhone),
+        AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
+        Narrative: input.narration,
+        ExternalReference: input.reference,
+        ProviderReferenceText: input.reference,
+    });
+    try {
+        return await postXml(resolveYoBaseUrl(), body);
+    }
+    catch (error) {
+        if (!isGatewayFailoverError(error, resolveYoBaseUrl())) {
+            throw error;
+        }
+        let lastError = error;
+        for (const endpoint of failoverEndpoints()) {
+            try {
+                return await postXml(endpoint, body);
+            }
+            catch (failoverError) {
+                lastError = failoverError;
+            }
+        }
+        throw lastError;
+    }
 }

@@ -16,6 +16,19 @@ function isDirectYoHost(hostname: string) {
   return DIRECT_YO_HOSTS.has(hostname.trim().toLowerCase());
 }
 
+export function isDirectYoTaskUrl(value: string | null | undefined) {
+  const configured = String(value ?? '').trim();
+  if (!configured) {
+    return false;
+  }
+
+  try {
+    return isDirectYoHost(new URL(configured).hostname);
+  } catch {
+    return /paymentsapi[12]\.yo\.co\.ug/i.test(configured);
+  }
+}
+
 function normalizeYoTaskPath(pathname: string) {
   let normalized = pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '');
   normalized = normalized.replace(/(?:\/ybs\/task\.php)+$/i, '');
@@ -69,4 +82,24 @@ export function normalizeYoTaskUrl(
 
 export function allowDirectYoHostBypass(value: string | null | undefined) {
   return isTruthyEnv(value);
+}
+
+export function collectDirectYoTaskUrls(
+  configuredValues: Array<string | null | undefined>
+) {
+  const urls = new Set<string>();
+
+  for (const configuredValue of configuredValues) {
+    if (!isDirectYoTaskUrl(configuredValue)) {
+      continue;
+    }
+
+    urls.add(
+      normalizeYoTaskUrl(configuredValue, DEFAULT_YO_GATEWAY_TASK_URL, {
+        allowDirectHostBypass: true,
+      })
+    );
+  }
+
+  return Array.from(urls);
 }

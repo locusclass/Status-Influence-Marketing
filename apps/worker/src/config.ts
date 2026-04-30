@@ -1,5 +1,6 @@
 import {
   allowDirectYoHostBypass,
+  collectDirectYoTaskUrls,
   DEFAULT_YO_GATEWAY_TASK_URL,
   normalizeYoTaskUrl,
 } from '@prime/shared';
@@ -31,6 +32,11 @@ const yoConfig = {
     DEFAULT_YO_GATEWAY_TASK_URL,
     { allowDirectHostBypass: allowDirectApiBypass }
   ),
+  directFailoverBaseUrls: collectDirectYoTaskUrls([
+    stripWrappingQuotes(process.env.YO_API_URL_FALLBACK ?? ''),
+    stripWrappingQuotes(process.env.YO_FALLBACK_BASE_URL ?? ''),
+    stripWrappingQuotes(process.env.YO_API_URL ?? ''),
+  ]),
   apiUsername: stripWrappingQuotes(
     process.env.YO_API_USERNAME ??
       process.env.YO_USERNAME ??
@@ -66,4 +72,8 @@ export const config = {
 
 export function resolveYoBaseUrl() {
   return config.yo.baseUrl;
+}
+
+export function resolveYoDirectFailoverBaseUrls() {
+  return config.yo.directFailoverBaseUrls;
 }

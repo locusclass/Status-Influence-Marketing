@@ -1,6 +1,7 @@
 import { fetch } from 'undici';
 import crypto from 'crypto';
-import { config, hasYoCredentials, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from '../config.js';
+import { isDirectYoTaskUrl } from '@prime/shared';
+import { config, hasYoCredentials, resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls, resolveYoFallbackBaseUrl, } from '../config.js';
 function xmlEscape(value) {
     return value
         .replace(/&/g, '&amp;')
@@ -19,6 +20,9 @@ function xmlUnescape(value) {
 }
 function uniqueEndpoints() {
     return Array.from(new Set([resolveYoBaseUrl(), resolveYoFallbackBaseUrl()].filter(Boolean)));
+}
+function directFailoverEndpoints() {
+    return Array.from(new Set(resolveYoDirectFailoverBaseUrls().filter((endpoint) => endpoint && !uniqueEndpoints().includes(endpoint))));
 }
 function normalizePhoneNumber(phoneNumber) {
     const digits = phoneNumber.replace(/[^\d]/g, '');
@@ -125,6 +129,16 @@ async function postXml(endpoint, body) {
     }
     return text;
 }
+function isGatewayFailoverError(error, endpoint) {
+    if (!endpoint || isDirectYoTaskUrl(endpoint)) {
+        return false;
+    }
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return (/YO proxy request failed/i.test(message) ||
+        /timeout of \d+ms exceeded/i.test(message) ||
+        /fetch failed/i.test(message) ||
+        /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message));
+}
 async function yoRequest(request) {
     if (!hasYoCredentials()) {
         throw new Error('YO Uganda API credentials are not configured');
@@ -135,14 +149,30 @@ async function yoRequest(request) {
         ...request,
     });
     const endpoints = uniqueEndpoints();
+    const failoverEndpoints = directFailoverEndpoints();
     let lastError = null;
+    let shouldTryDirectFailover = false;
     for (const endpoint of endpoints) {
         try {
             const responseText = await postXml(endpoint, body);
             return parseYoResponseXml(responseText);
         }
         catch (error) {
+            if (isGatewayFailoverError(error, endpoint)) {
+                shouldTryDirectFailover = true;
+            }
             lastError = error;
+        }
+    }
+    if (shouldTryDirectFailover) {
+        for (const endpoint of failoverEndpoints) {
+            try {
+                const responseText = await postXml(endpoint, body);
+                return parseYoResponseXml(responseText);
+            }
+            catch (error) {
+                lastError = error;
+            }
         }
     }
     throw lastError instanceof Error

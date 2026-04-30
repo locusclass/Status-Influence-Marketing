@@ -1,4 +1,4 @@
-import { allowDirectYoHostBypass, DEFAULT_YO_GATEWAY_TASK_URL, normalizeYoTaskUrl, } from '@prime/shared';
+import { allowDirectYoHostBypass, collectDirectYoTaskUrls, DEFAULT_YO_GATEWAY_TASK_URL, normalizeYoTaskUrl, } from '@prime/shared';
 function stripWrappingQuotes(value) {
     const trimmed = value.trim();
     if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
@@ -14,6 +14,11 @@ const yoConfig = {
         process.env.YO_API_URL ??
         process.env.FLUTTERWAVE_BASE_URL ??
         ''), DEFAULT_YO_GATEWAY_TASK_URL, { allowDirectHostBypass: allowDirectApiBypass }),
+    directFailoverBaseUrls: collectDirectYoTaskUrls([
+        stripWrappingQuotes(process.env.YO_API_URL_FALLBACK ?? ''),
+        stripWrappingQuotes(process.env.YO_FALLBACK_BASE_URL ?? ''),
+        stripWrappingQuotes(process.env.YO_API_URL ?? ''),
+    ]),
     apiUsername: stripWrappingQuotes(process.env.YO_API_USERNAME ??
         process.env.YO_USERNAME ??
         process.env.FLUTTERWAVE_CLIENT_ID ??
@@ -41,4 +46,7 @@ export const config = {
 };
 export function resolveYoBaseUrl() {
     return config.yo.baseUrl;
+}
+export function resolveYoDirectFailoverBaseUrls() {
+    return config.yo.directFailoverBaseUrls;
 }

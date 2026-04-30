@@ -73,11 +73,15 @@ describe('YO Uganda URL configuration', () => {
   });
 
   it('rewrites the legacy direct YO_API_URL to the gateway by default', async () => {
-    const { resolveYoBaseUrl } = await loadConfig({
+    const { resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls } =
+      await loadConfig({
       YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
     });
 
     expect(resolveYoBaseUrl()).toBe(GATEWAY_TASK_URL);
+    expect(resolveYoDirectFailoverBaseUrls()).toEqual([
+      'https://paymentsapi1.yo.co.ug/ybs/task.php',
+    ]);
   });
 
   it('allows an explicit direct-host bypass for the legacy YO_API_URL', async () => {
@@ -109,10 +113,14 @@ describe('YO Uganda URL configuration', () => {
   });
 
   it('rewrites a direct YO_API_URL_FALLBACK to the gateway by default', async () => {
-    const { resolveYoFallbackBaseUrl } = await loadConfig({
+    const { resolveYoFallbackBaseUrl, resolveYoDirectFailoverBaseUrls } =
+      await loadConfig({
       YO_API_URL_FALLBACK: 'https://paymentsapi2.yo.co.ug/ybs/task.php',
     });
 
     expect(resolveYoFallbackBaseUrl()).toBe(GATEWAY_TASK_URL);
+    expect(resolveYoDirectFailoverBaseUrls()).toEqual([
+      'https://paymentsapi2.yo.co.ug/ybs/task.php',
+    ]);
   });
 });

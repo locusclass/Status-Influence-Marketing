@@ -6,6 +6,8 @@ const GATEWAY_TASK_URL = `${GATEWAY_BASE_URL}/ybs/task.php`;
 const YO_ENV_KEYS = [
   'YO_BASE_URL',
   'YO_API_URL',
+  'YO_API_URL_FALLBACK',
+  'YO_FALLBACK_BASE_URL',
   'YO_ALLOW_DIRECT_API_BYPASS',
   'FLUTTERWAVE_BASE_URL',
 ] as const;
@@ -70,11 +72,15 @@ describe('Worker YO Uganda URL configuration', () => {
   });
 
   it('rewrites the legacy direct YO_API_URL to the gateway by default', async () => {
-    const { resolveYoBaseUrl } = await loadConfig({
+    const { resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls } =
+      await loadConfig({
       YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
     });
 
     expect(resolveYoBaseUrl()).toBe(GATEWAY_TASK_URL);
+    expect(resolveYoDirectFailoverBaseUrls()).toEqual([
+      'https://paymentsapi1.yo.co.ug/ybs/task.php',
+    ]);
   });
 
   it('allows an explicit direct-host bypass for the legacy YO_API_URL', async () => {
@@ -95,5 +101,18 @@ describe('Worker YO Uganda URL configuration', () => {
     });
 
     expect(resolveYoBaseUrl()).toBe(GATEWAY_TASK_URL);
+  });
+
+  it('captures a direct fallback URL as a failover candidate without making it primary', async () => {
+    const { resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls } =
+      await loadConfig({
+        YO_BASE_URL: GATEWAY_BASE_URL,
+        YO_API_URL_FALLBACK: 'https://paymentsapi2.yo.co.ug/ybs/task.php',
+      });
+
+    expect(resolveYoBaseUrl()).toBe(GATEWAY_TASK_URL);
+    expect(resolveYoDirectFailoverBaseUrls()).toEqual([
+      'https://paymentsapi2.yo.co.ug/ybs/task.php',
+    ]);
   });
 });
