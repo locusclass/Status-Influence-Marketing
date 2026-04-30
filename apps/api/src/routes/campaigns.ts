@@ -24,6 +24,11 @@ import {
 } from '../config.js';
 import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { ensureChatSchema } from '../services/chat.js';
+import {
+  buildPhoneLookupVariants,
+  normalizePhoneSearchInput,
+  splitSearchTerms,
+} from '../services/contactLookup.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
   canAccessAdvertiserFeatures,
@@ -140,7 +145,17 @@ type PublicContractEligibility = {
 };
 
 function normalizePhone(input: string) {
-  return input.replace(/[^\d+]/g, '').trim();
+  return normalizePhoneSearchInput(input);
+}
+
+function normalizeDigits(input: string) {
+  return String(input ?? '').replace(/\D/g, '').trim();
+}
+
+function isUuidLike(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  );
 }
 
 function normalizePricePrivacyMode(value: unknown) {
@@ -822,7 +837,7 @@ async function findDistributorById(client: any, distributorId: string) {
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
-    WHERE u.id = $1
+    WHERE (u.id::text = $1 OR COALESCE(NULLIF(u.public_id, ''), '') = $1)
       AND u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
     `,
@@ -832,7 +847,10 @@ async function findDistributorById(client: any, distributorId: string) {
 }
 
 async function findDistributorByPhone(client: any, rawPhone: string) {
-  const phone = normalizePhone(rawPhone);
+  const phoneVariants = buildPhoneLookupVariants(rawPhone);
+  if (phoneVariants.length === 0) {
+    return null;
+  }
   const hasFullName = await usersHasColumn(client, 'full_name');
   const fullNameSelect = hasFullName
     ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
@@ -851,12 +869,97 @@ async function findDistributorByPhone(client: any, rawPhone: string) {
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
-    WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9+]', '', 'g') = $1
+    WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($1::text[])
       AND u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
     `,
-    [phone]
+    [phoneVariants]
   );
+  return res.rows[0] ?? null;
+}
+
+async function findDistributorBySearch(client: any, rawQuery: string) {
+  const query = String(rawQuery ?? '').trim();
+  if (!query) {
+    return null;
+  }
+
+  const directPhoneMatch = await findDistributorByPhone(client, query);
+  if (directPhoneMatch) {
+    return directPhoneMatch;
+  }
+
+  const directReferenceMatch = await findDistributorById(client, query);
+  if (directReferenceMatch) {
+    return directReferenceMatch;
+  }
+
+  const hasFullName = await usersHasColumn(client, 'full_name');
+  const fullNameSelect = hasFullName
+    ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+    : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+  const searchTerms = splitSearchTerms(query);
+  const searchPattern = `%${query}%`;
+  const phoneVariants = buildPhoneLookupVariants(query);
+  const params: any[] = [query, searchPattern];
+  const termClauses: string[] = [];
+
+  for (const term of searchTerms) {
+    params.push(`%${term}%`);
+    termClauses.push(`${fullNameSelect} ILIKE $${params.length}`);
+  }
+
+  let phoneSearchSql = '';
+  if (phoneVariants.length > 0) {
+    params.push(phoneVariants);
+    phoneSearchSql = `
+      OR regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($${params.length}::text[])
+    `;
+  }
+
+  const tokenSearchSql =
+    termClauses.length > 0 ? `OR (${termClauses.join(' AND ')})` : '';
+
+  const res = await client.query(
+    `
+    SELECT
+      u.id,
+      u.public_id,
+      u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      ${fullNameSelect} AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email
+    FROM users u
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
+      AND (
+        LOWER(${fullNameSelect}) = LOWER($1)
+        OR COALESCE(NULLIF(u.public_id, ''), '') = $1
+        OR COALESCE(NULLIF(u.email, ''), '') = $1
+        OR ${fullNameSelect} ILIKE $2
+        OR COALESCE(NULLIF(u.public_id, ''), '') ILIKE $2
+        OR COALESCE(NULLIF(u.email, ''), '') ILIKE $2
+        OR COALESCE(NULLIF(u.phone, ''), '') ILIKE $2
+        ${tokenSearchSql}
+        ${phoneSearchSql}
+      )
+    ORDER BY
+      CASE
+        WHEN LOWER(${fullNameSelect}) = LOWER($1) THEN 0
+        WHEN COALESCE(NULLIF(u.public_id, ''), '') = $1 THEN 0
+        WHEN COALESCE(NULLIF(u.email, ''), '') = $1 THEN 1
+        WHEN ${fullNameSelect} ILIKE $2 THEN 2
+        ELSE 3
+      END,
+      ${fullNameSelect} ASC
+    LIMIT 1
+    `,
+    params
+  );
+
   return res.rows[0] ?? null;
 }
 
@@ -1028,6 +1131,91 @@ async function buildGroupBeneficiaryQuote(
       pricingReferenceTotal || weightValues.reduce((sum, value) => sum + value, 0)
     ),
   };
+}
+
+async function findGroupBeneficiaryIdBySearch(client: any, rawQuery: string) {
+  const query = String(rawQuery ?? '').trim();
+  if (!query) {
+    return null;
+  }
+
+  if (isUuidLike(query)) {
+    return query;
+  }
+
+  const phoneVariants = buildPhoneLookupVariants(query);
+  const searchTerms = splitSearchTerms(query);
+  const params: any[] = [query, `%${query}%`];
+  const memberTermClauses: string[] = [];
+
+  for (const term of searchTerms) {
+    params.push(`%${term}%`);
+    memberTermClauses.push(
+      `COALESCE(NULLIF(member_user.full_name, ''), NULLIF(member_profile.full_name, ''), NULLIF(member_user.email, ''), NULLIF(member_user.phone, ''), '') ILIKE $${params.length}`
+    );
+  }
+
+  let phoneSearchSql = '';
+  if (phoneVariants.length > 0) {
+    params.push(phoneVariants);
+    phoneSearchSql = `
+      OR regexp_replace(COALESCE(member_user.phone, ''), '[^0-9]', '', 'g') = ANY($${params.length}::text[])
+    `;
+  }
+
+  const memberTokenSql =
+    memberTermClauses.length > 0
+      ? `OR (${memberTermClauses.join(' AND ')})`
+      : '';
+
+  const result = await client.query(
+    `
+    SELECT g.id
+    FROM chat_groups g
+    WHERE EXISTS (
+      SELECT 1
+      FROM chat_group_memberships membership
+      WHERE membership.group_id = g.id
+        AND membership.status = 'ACTIVE'
+    )
+      AND (
+        g.id::text = $1
+        OR COALESCE(NULLIF(g.public_id, ''), '') = $1
+        OR g.name ILIKE $2
+        OR g.description ILIKE $2
+        OR EXISTS (
+          SELECT 1
+          FROM chat_group_memberships membership
+          JOIN users member_user ON member_user.id = membership.user_id
+          LEFT JOIN user_profiles member_profile
+            ON member_profile.user_id = membership.user_id
+          WHERE membership.group_id = g.id
+            AND membership.status = 'ACTIVE'
+            AND (
+              COALESCE(NULLIF(member_user.full_name, ''), NULLIF(member_profile.full_name, ''), NULLIF(member_user.email, ''), NULLIF(member_user.phone, ''), '') ILIKE $2
+              OR COALESCE(NULLIF(member_user.phone, ''), '') ILIKE $2
+              OR COALESCE(NULLIF(member_user.public_id, ''), '') ILIKE $2
+              ${memberTokenSql}
+              ${phoneSearchSql}
+            )
+        )
+      )
+    ORDER BY
+      CASE
+        WHEN g.id::text = $1 THEN 0
+        WHEN COALESCE(NULLIF(g.public_id, ''), '') = $1 THEN 0
+        WHEN LOWER(g.name) = LOWER($1) THEN 1
+        WHEN g.name ILIKE $2 THEN 2
+        ELSE 3
+      END,
+      g.updated_at DESC,
+      g.created_at DESC
+    LIMIT 1
+    `,
+    params
+  );
+
+  return result.rows[0]?.id ? String(result.rows[0].id) : null;
 }
 
 async function loadEditableCampaign(client: any, campaignId: string, advertiserId: string) {
@@ -1835,18 +2023,29 @@ export async function campaignRoutes(app: FastifyInstance) {
   const FundBundleSchema = FundCampaignSchema.omit({ campaign_id: true });
   const LookupDistributorSchema = z
     .object({
+      q: z.string().trim().min(1).max(120).optional(),
       phone: z.string().trim().min(7).max(20).optional(),
       user_id: z.string().uuid().optional(),
       media_type: MediaTypeSchema.optional(),
     })
-    .refine((value) => Boolean(value.phone || value.user_id), {
-      message: 'Either phone or user_id is required.',
-      path: ['phone'],
+    .refine((value) => Boolean(value.q || value.phone || value.user_id), {
+      message: 'Either q, phone or user_id is required.',
+      path: ['q'],
     });
-  const LookupGroupSchema = z.object({
-    group_id: z.string().uuid(),
-    media_type: MediaTypeSchema.optional(),
-  });
+  const LookupGroupSchema = z
+    .object({
+      q: z.string().trim().min(1).max(120).optional(),
+      group_id: z.string().uuid().optional(),
+      group_public_id: z.string().trim().min(3).max(64).optional(),
+      media_type: MediaTypeSchema.optional(),
+    })
+    .refine(
+      (value) => Boolean(value.q || value.group_id || value.group_public_id),
+      {
+        message: 'Either q, group_id or group_public_id is required.',
+        path: ['q'],
+      }
+    );
 
   app.get('/campaigns/distributor-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
     const role = (request.user as any)?.role as string | undefined;
@@ -1862,7 +2061,10 @@ export async function campaignRoutes(app: FastifyInstance) {
     const distributor = await withTransaction(async (client) => {
       const found = parsed.data.user_id
         ? await findDistributorById(client, String(parsed.data.user_id))
-        : await findDistributorByPhone(client, String(parsed.data.phone));
+        : await findDistributorBySearch(
+            client,
+            String(parsed.data.q ?? parsed.data.phone ?? '')
+          );
       if (!found) {
         return null;
       }
@@ -1884,6 +2086,50 @@ export async function campaignRoutes(app: FastifyInstance) {
     return { distributor };
   });
 
+  app.get('/promoters/lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const role = (request.user as any)?.role as string | undefined;
+    if (!canAccessAdvertiserFeatures(role)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+    const parsed = LookupDistributorSchema.safeParse(request.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+
+    const profile = await withTransaction(async (client) => {
+      const found = parsed.data.user_id
+        ? await findDistributorById(client, String(parsed.data.user_id))
+        : await findDistributorBySearch(
+            client,
+            String(parsed.data.q ?? parsed.data.phone ?? '')
+          );
+      if (!found) {
+        return null;
+      }
+      const pricing = await buildPrivatePricingQuote(
+        client,
+        found,
+        parsed.data.media_type ?? 'IMAGE',
+        'WHATSAPP_STATUS'
+      );
+      return {
+        ...found,
+        ...pricing,
+        display_name:
+          String(found.full_name ?? '').trim() || String(found.phone ?? '').trim(),
+      };
+    });
+
+    if (!profile) {
+      reply.code(404);
+      return { error: 'promoter_not_found' };
+    }
+
+    return { profile };
+  });
+
   app.get('/campaigns/group-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
     const role = (request.user as any)?.role as string | undefined;
     if (!canAccessAdvertiserFeatures(role)) {
@@ -1896,9 +2142,22 @@ export async function campaignRoutes(app: FastifyInstance) {
       return { error: 'validation_failed', issues: parsed.error.issues };
     }
     const group = await withTransaction(async (client) => {
+      const resolvedGroupId =
+        parsed.data.group_id ??
+        (parsed.data.group_public_id
+          ? await findGroupBeneficiaryIdBySearch(
+              client,
+              String(parsed.data.group_public_id)
+            )
+          : parsed.data.q
+            ? await findGroupBeneficiaryIdBySearch(client, String(parsed.data.q))
+            : null);
+      if (!resolvedGroupId) {
+        return null;
+      }
       return buildGroupBeneficiaryQuote(
         client,
-        parsed.data.group_id,
+        String(resolvedGroupId),
         parsed.data.media_type ?? 'IMAGE'
       );
     });

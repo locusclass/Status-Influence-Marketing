@@ -1,4 +1,5 @@
 import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_USER, normalizeAdminDashboardRole, } from '@prime/shared';
+import { buildPolicyAcceptanceState } from './policies.js';
 export const ACCOUNT_ROLE_ADMIN = 'ADMIN';
 export const ACCOUNT_ROLE_ADVERTISER = 'ADVERTISER';
 export const ACCOUNT_ROLE_DISTRIBUTOR = 'DISTRIBUTOR';
@@ -110,5 +111,6 @@ export function buildUserSession(user) {
         last_seen_at: user.last_seen_at ?? null,
         is_online: user.is_online === true,
         requires_distributor_capacity_setup: false,
+        ...buildPolicyAcceptanceState(user),
     };
 }

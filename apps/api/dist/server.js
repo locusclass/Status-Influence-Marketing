@@ -11,6 +11,7 @@ import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolve
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
+import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
     const app = Fastify({
         pluginTimeout: Number(process.env.FASTIFY_PLUGIN_TIMEOUT ?? 30000),
@@ -84,6 +85,12 @@ export function buildServer() {
         secret: config.jwtSecret,
     });
     app.register(multipart);
+    app.addHook('onReady', async () => {
+        await withTransaction(async (client) => {
+            await ensureUserSignalSchema(client);
+            await ensurePolicyAcceptanceColumns(client);
+        });
+    });
     app.addContentTypeParser(/^application\/([a-z0-9.+-]+\+)?json(?:;.*)?$/i, { parseAs: 'string' }, (request, body, done) => {
         request.rawBody = body;
         if (!body) {
@@ -141,8 +148,21 @@ export function buildServer() {
         try {
             await request.jwtVerify();
             const userId = String(request.user?.sub ?? '').trim();
+            if (!userId) {
+                return reply.code(401).send({ error: 'unauthorized' });
+            }
             if (userId) {
                 void touchUserPresence(userId).catch(() => { });
+            }
+            if (isPolicyAcceptanceBypassRoute(request)) {
+                return;
+            }
+            const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
+            if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+                return reply.code(428).send({
+                    error: 'policy_acceptance_required',
+                    ...buildPolicyAcceptanceState(acceptance ?? {}),
+                });
             }
         }
         catch {
@@ -153,8 +173,20 @@ export function buildServer() {
         try {
             await request.jwtVerify();
             const userId = String(request.user?.sub ?? '').trim();
+            if (!userId) {
+                return reply.code(401).send({ error: 'unauthorized' });
+            }
             if (userId) {
                 void touchUserPresence(userId).catch(() => { });
+            }
+            if (!isPolicyAcceptanceBypassRoute(request)) {
+                const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
+                if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+                    return reply.code(428).send({
+                        error: 'policy_acceptance_required',
+                        ...buildPolicyAcceptanceState(acceptance ?? {}),
+                    });
+                }
             }
             const role = request.user?.role;
             const adminRole = normalizeAdminDashboardRole(request.user?.admin_role);

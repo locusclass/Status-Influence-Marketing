@@ -31,6 +31,14 @@ import {
   updateUserNotificationReadState,
 } from '../services/userSignals.js';
 import {
+  buildCurrentPolicyDocuments,
+  buildPolicyAcceptanceState,
+  CURRENT_PLATFORM_POLICY_VERSION,
+  CURRENT_PRIVACY_POLICY_VERSION,
+  ensurePolicyAcceptanceColumns,
+  policyAcceptanceSelectSql,
+} from '../services/policies.js';
+import {
   config,
   hasYoClientCredentials,
   hasYoEncryptionKey,
@@ -64,6 +72,13 @@ const distributorCapacitySchema = z.object({
 
 const accountWhatsappVerifySchema = z.object({
   phone: z.string().trim().min(7).max(20).optional(),
+});
+
+const accountPolicyAcceptanceSchema = z.object({
+  privacy_policy_version: z.string().trim().min(1),
+  platform_policy_version: z.string().trim().min(1),
+  accept_privacy_policy: z.literal(true),
+  accept_platform_policy: z.literal(true),
 });
 
 const accountNotificationUpdateSchema = z.object({
@@ -497,6 +512,7 @@ async function refundWalletWithdrawal(
 export async function accountRoutes(app: FastifyInstance) {
   await withTransaction(async (client) => {
     await ensureAccountSchema(client);
+    await ensurePolicyAcceptanceColumns(client);
   });
 
   const parsePaging = (query: any) => {
@@ -542,6 +558,7 @@ export async function accountRoutes(app: FastifyInstance) {
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
           COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          ${policyAcceptanceSelectSql('u')},
           u.last_login_at,
           u.last_seen_at,
           CASE
@@ -584,12 +601,107 @@ export async function accountRoutes(app: FastifyInstance) {
         profile: res.rows[0]
           ? {
               ...res.rows[0],
+              ...buildPolicyAcceptanceState(res.rows[0]),
               promoter_platforms: promoterPlatforms,
             }
           : null,
       };
     });
   });
+
+  app.get('/account/policies', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userSub = (request.user as any).sub as string;
+    const userId =
+      userSub === 'ariaka-access'
+        ? '00000000-0000-0000-0000-000000000000'
+        : userSub;
+
+    return withTransaction(async (client) => {
+      await ensurePolicyAcceptanceColumns(client);
+      const res = await client.query(
+        `
+        SELECT
+          id,
+          ${policyAcceptanceSelectSql('u')}
+        FROM users u
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [userId]
+      );
+      const user = res.rows[0];
+      if (!user) {
+        reply.code(404);
+        return { error: 'user_not_found' };
+      }
+
+      return {
+        policies: buildCurrentPolicyDocuments(),
+        acceptance: buildPolicyAcceptanceState(user),
+      };
+    });
+  });
+
+  app.post(
+    '/account/policies/accept',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userSub = (request.user as any).sub as string;
+      const userId =
+        userSub === 'ariaka-access'
+          ? '00000000-0000-0000-0000-000000000000'
+          : userSub;
+      const parsed = accountPolicyAcceptanceSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+
+      if (
+        parsed.data.privacy_policy_version !== CURRENT_PRIVACY_POLICY_VERSION ||
+        parsed.data.platform_policy_version !== CURRENT_PLATFORM_POLICY_VERSION
+      ) {
+        reply.code(409);
+        return {
+          error: 'policy_version_mismatch',
+          policies: buildCurrentPolicyDocuments(),
+        };
+      }
+
+      return withTransaction(async (client) => {
+        await ensurePolicyAcceptanceColumns(client);
+        const updated = await client.query(
+          `
+          UPDATE users
+          SET privacy_policy_accepted_version = $2,
+              privacy_policy_accepted_at = NOW(),
+              platform_policy_accepted_version = $3,
+              platform_policy_accepted_at = NOW()
+          WHERE id = $1
+          RETURNING *
+          `,
+          [
+            userId,
+            CURRENT_PRIVACY_POLICY_VERSION,
+            CURRENT_PLATFORM_POLICY_VERSION,
+          ]
+        );
+        const user = updated.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+
+        const token = app.jwt.sign(buildAuthClaims(user));
+        return {
+          ok: true,
+          token,
+          user: buildUserSession(user),
+          acceptance: buildPolicyAcceptanceState(user),
+        };
+      });
+    }
+  );
 
   app.patch(
     '/account/me',
@@ -925,7 +1037,8 @@ export async function accountRoutes(app: FastifyInstance) {
             preferred_currency AS currency,
             ${canMultiSelect},
             COALESCE(max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
-            COALESCE(private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx
+            COALESCE(private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+            ${policyAcceptanceSelectSql('users')}
           FROM users
           WHERE id=$1
           LIMIT 1
@@ -967,7 +1080,7 @@ export async function accountRoutes(app: FastifyInstance) {
           UPDATE users
           SET max_status_viewers_12h=$2
           WHERE id=$1
-          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx
+          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx, privacy_policy_accepted_version, privacy_policy_accepted_at, platform_policy_accepted_version, platform_policy_accepted_at
           `,
           [userId, parsed.data.max_status_viewers_12h]
         );

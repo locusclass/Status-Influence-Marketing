@@ -39,6 +39,13 @@ import {
   ensureUserSignalSchema,
   touchUserPresence,
 } from './services/userSignals.js';
+import {
+  buildPolicyAcceptanceState,
+  ensurePolicyAcceptanceColumns,
+  hasAcceptedRequiredPolicies,
+  isPolicyAcceptanceBypassRoute,
+  loadUserPolicyAcceptance,
+} from './services/policies.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -116,6 +123,13 @@ export function buildServer() {
   });
 
   app.register(multipart);
+
+  app.addHook('onReady', async () => {
+    await withTransaction(async (client) => {
+      await ensureUserSignalSchema(client);
+      await ensurePolicyAcceptanceColumns(client);
+    });
+  });
 
   app.addContentTypeParser(
     /^application\/([a-z0-9.+-]+\+)?json(?:;.*)?$/i,
@@ -195,8 +209,23 @@ export function buildServer() {
     try {
       await request.jwtVerify();
       const userId = String((request.user as any)?.sub ?? '').trim();
+      if (!userId) {
+        return reply.code(401).send({ error: 'unauthorized' });
+      }
       if (userId) {
         void touchUserPresence(userId).catch(() => {});
+      }
+      if (isPolicyAcceptanceBypassRoute(request)) {
+        return;
+      }
+      const acceptance = await withTransaction(async (client) =>
+        loadUserPolicyAcceptance(client, userId)
+      );
+      if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+        return reply.code(428).send({
+          error: 'policy_acceptance_required',
+          ...buildPolicyAcceptanceState(acceptance ?? {}),
+        });
       }
     } catch {
       reply.code(401).send({ error: 'unauthorized' });
@@ -207,8 +236,22 @@ export function buildServer() {
     try {
       await request.jwtVerify();
       const userId = String((request.user as any)?.sub ?? '').trim();
+      if (!userId) {
+        return reply.code(401).send({ error: 'unauthorized' });
+      }
       if (userId) {
         void touchUserPresence(userId).catch(() => {});
+      }
+      if (!isPolicyAcceptanceBypassRoute(request)) {
+        const acceptance = await withTransaction(async (client) =>
+          loadUserPolicyAcceptance(client, userId)
+        );
+        if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+          return reply.code(428).send({
+            error: 'policy_acceptance_required',
+            ...buildPolicyAcceptanceState(acceptance ?? {}),
+          });
+        }
       }
       const role = (request.user as any)?.role as string | undefined;
       const adminRole = normalizeAdminDashboardRole(

@@ -5,6 +5,7 @@ import { withTransaction } from '../db.js';
 import { ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_GROUP_ROOM, CHAT_OFFER_RESPONSE_ACCEPT, CHAT_OFFER_RESPONSE_COUNTER, CHAT_OFFER_RESPONSE_REJECT, CHAT_OFFER_STATUS_ACCEPTED, CHAT_OFFER_STATUS_COUNTERED, CHAT_OFFER_STATUS_PENDING, CHAT_OFFER_STATUS_REJECTED, ensureChatSchema, } from '../services/chat.js';
 import { ensurePromoterReviewsSchema, listPromoterReviews, loadLatestCompletedContractForReview, loadPromoterReviewSummaryMap, } from '../services/promoterReviews.js';
+import { buildPhoneLookupVariants, splitSearchTerms, } from '../services/contactLookup.js';
 import { createUserNotifications } from '../services/userSignals.js';
 const groupDealThreadSchema = z.object({
     media_url: z.string().url().optional(),
@@ -990,11 +991,41 @@ async function listDiscoverableGroups(client, userId, searchText) {
     let whereSearch = '';
     if (search) {
         params.push(searchPattern);
+        const phoneVariants = buildPhoneLookupVariants(search);
+        const memberTermClauses = [];
+        for (const term of splitSearchTerms(search)) {
+            params.push(`%${term}%`);
+            memberTermClauses.push(`COALESCE(NULLIF(member_user.full_name, ''), NULLIF(member_user.email, ''), NULLIF(member_user.phone, ''), '') ILIKE $${params.length}`);
+        }
+        let memberPhoneSql = '';
+        if (phoneVariants.length > 0) {
+            params.push(phoneVariants);
+            memberPhoneSql = `
+        OR regexp_replace(COALESCE(member_user.phone, ''), '[^0-9]', '', 'g') = ANY($${params.length}::text[])
+      `;
+        }
+        const memberTokenSql = memberTermClauses.length > 0
+            ? `OR (${memberTermClauses.join(' AND ')})`
+            : '';
         whereSearch = `
       AND (
         g.name ILIKE $1
         OR g.description ILIKE $1
         OR COALESCE(NULLIF(g.public_id, ''), '') ILIKE $1
+        OR EXISTS (
+          SELECT 1
+          FROM chat_group_memberships membership
+          JOIN users member_user ON member_user.id = membership.user_id
+          WHERE membership.group_id = g.id
+            AND membership.status = 'ACTIVE'
+            AND (
+              COALESCE(NULLIF(member_user.full_name, ''), NULLIF(member_user.email, ''), NULLIF(member_user.phone, ''), '') ILIKE $1
+              OR COALESCE(NULLIF(member_user.phone, ''), '') ILIKE $1
+              OR COALESCE(NULLIF(member_user.public_id, ''), '') ILIKE $1
+              ${memberTokenSql}
+              ${memberPhoneSql}
+            )
+        )
       )
     `;
     }
@@ -1040,11 +1071,29 @@ async function listGroupCandidates(client, userId, options = {}) {
     const search = String(options.search ?? '').trim();
     if (search) {
         params.push(`%${search}%`);
+        const searchParamIndex = params.length;
+        const phoneVariants = buildPhoneLookupVariants(search);
+        const termClauses = [];
+        for (const term of splitSearchTerms(search)) {
+            params.push(`%${term}%`);
+            termClauses.push(`COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), '') ILIKE $${params.length}`);
+        }
+        let phoneSearchSql = '';
+        if (phoneVariants.length > 0) {
+            params.push(phoneVariants);
+            phoneSearchSql = `
+        OR regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($${params.length}::text[])
+      `;
+        }
+        const tokenSearchSql = termClauses.length > 0 ? `OR (${termClauses.join(' AND ')})` : '';
         sql += `
       AND (
-        COALESCE(NULLIF(u.full_name, ''), '') ILIKE $${params.length}
-        OR COALESCE(NULLIF(u.email, ''), '') ILIKE $${params.length}
-        OR COALESCE(NULLIF(u.phone, ''), '') ILIKE $${params.length}
+        COALESCE(NULLIF(u.full_name, ''), '') ILIKE $${searchParamIndex}
+        OR COALESCE(NULLIF(u.email, ''), '') ILIKE $${searchParamIndex}
+        OR COALESCE(NULLIF(u.phone, ''), '') ILIKE $${searchParamIndex}
+        OR COALESCE(NULLIF(u.public_id, ''), '') ILIKE $${searchParamIndex}
+        ${tokenSearchSql}
+        ${phoneSearchSql}
       )
     `;
     }

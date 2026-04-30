@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS users (
   max_status_viewers_12h INTEGER NOT NULL DEFAULT 0,
   private_contract_rate_ugx INTEGER NOT NULL DEFAULT 0,
   current_advertiser_viewers INTEGER NOT NULL DEFAULT 0,
+  privacy_policy_accepted_version TEXT,
+  privacy_policy_accepted_at TIMESTAMPTZ,
+  platform_policy_accepted_version TEXT,
+  platform_policy_accepted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -211,6 +215,38 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE users
       ADD COLUMN current_advertiser_viewers INTEGER NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'privacy_policy_accepted_version'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN privacy_policy_accepted_version TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'privacy_policy_accepted_at'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN privacy_policy_accepted_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'platform_policy_accepted_version'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN platform_policy_accepted_version TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'platform_policy_accepted_at'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN platform_policy_accepted_at TIMESTAMPTZ;
   END IF;
   IF NOT EXISTS (
     SELECT 1
