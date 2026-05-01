@@ -29,7 +29,7 @@ const loginSchema = z.object({
 const googleAuthSchema = z.object({
   id_token: z.string().min(20),
   role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
-  phone: z.string().min(7).max(20),
+  phone: z.string().trim().min(7).max(20).optional(),
   country: z.string().min(2),
   full_name: z.string().min(2).max(120).optional(),
   avatar_url: z.string().url().max(1024).optional(),
@@ -120,6 +120,20 @@ function buildSyntheticPassword(sub: string, email: string) {
     .update(`prime_status_google::${sub}::${email}`)
     .digest('hex');
   return `Gp!${seed.substring(0, 18)}a9`;
+}
+
+function buildSyntheticGooglePhone(sub: string) {
+  const digits = sub.replace(/\D/g, '');
+  if (digits.length > 0) {
+    return `+999${digits.padStart(12, '0').slice(-12)}`;
+  }
+
+  const hash = crypto
+    .createHash('sha256')
+    .update(`prime_status_google_phone::${sub}`)
+    .digest('hex')
+    .replace(/\D/g, '');
+  return `+999${hash.padStart(12, '0').slice(-12)}`;
 }
 
 function isAdminSessionUser(user: Record<string, unknown> | null | undefined) {
@@ -300,7 +314,7 @@ export async function authRoutes(app: FastifyInstance) {
     const user = await withTransaction(async (client) => {
       await ensurePublicIdColumns(client);
       const existing = await userRepo.findByEmail(client, email);
-      const typedPhone = body.phone.trim();
+      const typedPhone = body.phone?.trim() ?? '';
       if (existing) {
         const existingDistributorCapacity = currentDistributorCapacity(existing);
         if (typedPhone && typedPhone !== String(existing.phone ?? '').trim()) {
@@ -362,9 +376,10 @@ export async function authRoutes(app: FastifyInstance) {
         return refreshed ?? existing;
       }
 
+      const typedOrSyntheticPhone = typedPhone || buildSyntheticGooglePhone(sub);
       const phoneOwner = await client.query(
         `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
-        [typedPhone]
+        [typedOrSyntheticPhone]
       );
       if (phoneOwner.rows[0]) {
         reply.code(400);
@@ -376,7 +391,7 @@ export async function authRoutes(app: FastifyInstance) {
         client,
         fullName,
         email,
-        typedPhone,
+        typedOrSyntheticPhone,
         hashPassword(syntheticPassword),
         body.role,
         countryData.iso2,
