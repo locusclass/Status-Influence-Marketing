@@ -221,14 +221,18 @@ export function isPolicyAcceptanceBypassRoute(request: {
 }) {
   const method = String(request.method ?? 'GET').trim().toUpperCase();
   const routeUrl = String(request.routeOptions?.url ?? '').trim();
+  const normalizedRouteUrl = routeUrl.replace(/^\/api(?=\/|$)/, '') || routeUrl;
 
-  if (method === 'GET' && routeUrl === '/account/me') {
+  if (method === 'GET' && normalizedRouteUrl === '/account/me') {
     return true;
   }
-  if (method === 'GET' && routeUrl === '/account/policies') {
+  if (method === 'GET' && normalizedRouteUrl === '/account/policies') {
     return true;
   }
-  if (method === 'POST' && routeUrl === '/account/policies/accept') {
+  if (
+    method === 'POST' &&
+    normalizedRouteUrl === '/account/policies/accept'
+  ) {
     return true;
   }
 

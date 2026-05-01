@@ -180,4 +180,52 @@ describe('Policy acceptance gate', () => {
 
     expect(unlockedResponse.statusCode).toBe(200);
   });
+
+  it('allows prefixed policy routes to bypass the acceptance gate', async () => {
+    await insertAdvertiser();
+
+    const loginResponse = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: {
+        email: 'policy-advertiser@example.com',
+        password: 'Password123!',
+      },
+    });
+
+    expect(loginResponse.statusCode).toBe(200);
+    const loginBody = loginResponse.json();
+
+    const policyResponse = await app.inject({
+      method: 'GET',
+      url: '/api/account/policies',
+      headers: { authorization: `Bearer ${loginBody.token}` },
+    });
+
+    expect(policyResponse.statusCode).toBe(200);
+    expect(policyResponse.json()).toMatchObject({
+      acceptance: {
+        policies_accepted: false,
+      },
+    });
+
+    const acceptResponse = await app.inject({
+      method: 'POST',
+      url: '/api/account/policies/accept',
+      headers: { authorization: `Bearer ${loginBody.token}` },
+      payload: {
+        privacy_policy_version: CURRENT_PRIVACY_POLICY_VERSION,
+        platform_policy_version: CURRENT_PLATFORM_POLICY_VERSION,
+        accept_privacy_policy: true,
+        accept_platform_policy: true,
+      },
+    });
+
+    expect(acceptResponse.statusCode).toBe(200);
+    expect(acceptResponse.json()).toMatchObject({
+      user: {
+        policies_accepted: true,
+      },
+    });
+  });
 });
