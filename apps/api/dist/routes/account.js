@@ -547,12 +547,16 @@ export async function accountRoutes(app) {
                 reply.code(404);
                 return { error: 'user_not_found' };
             }
+            const acceptance = buildPolicyAcceptanceState(user);
             const token = app.jwt.sign(buildAuthClaims(user));
             return {
                 ok: true,
                 token,
-                user: buildUserSession(user),
-                acceptance: buildPolicyAcceptanceState(user),
+                user: {
+                    ...buildUserSession(user),
+                    ...acceptance,
+                },
+                acceptance,
             };
         });
     });
