@@ -5,7 +5,7 @@
     "moduleResolution": "nodenext",
     "baseUrl": ".",
     "paths": {
-      "@prime/shared": ["../../packages/shared/dist/index.d.ts"]
+      "@prime/shared": ["../../packages/shared/dist/index"]
     },
     "outDir": "dist",
     "rootDir": "src",

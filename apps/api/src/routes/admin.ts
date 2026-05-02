@@ -2,14 +2,35 @@ import crypto from 'crypto';
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
-  recordCampaignRevenueEntry,
+  ADMIN_MODULE_ADMIN_MANAGEMENT,
+  ADMIN_MODULE_AUDIT_LOGS,
+  ADMIN_MODULE_CAMPAIGNS,
+  ADMIN_MODULE_CONTRACTS,
+  ADMIN_MODULE_DRAFTS,
+  ADMIN_MODULE_ESCROWS,
+  ADMIN_MODULE_FINANCE,
+  ADMIN_MODULE_GATEWAY,
+  ADMIN_MODULE_JOBS,
+  ADMIN_MODULE_OVERVIEW,
+  ADMIN_MODULE_PAYOUT_REQUESTS,
+  ADMIN_MODULE_PROOFS,
+  ADMIN_MODULE_RISK,
+  ADMIN_MODULE_SESSIONS,
+  ADMIN_MODULE_USERS,
+  ADMIN_MODULE_WALLETS,
+  ADMIN_MODULE_WITHDRAWALS,
+  ADMIN_ROLE_ADMIN,
   ADMIN_ROLE_SUPER_ADMIN,
-  ADMIN_ROLE_COUNTRY_ADMIN,
-  ADMIN_ROLE_DIVISION_ADMIN,
+  ASSIGNABLE_ADMIN_MODULE_KEYS,
+  adminModuleDefinitions,
+  recordCampaignRevenueEntry,
+  type AdminModuleKey,
+  normalizeAdminModuleKey,
 } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
+import { resolveCountry } from '../countryResolver.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
 import { verifyTransaction } from '../services/yoUganda.js';
@@ -27,8 +48,17 @@ import {
   normalizeActiveRole,
 } from '../services/roles.js';
 import {
+  appendDashboardTenantScope,
+  ensureAdminAccountRecord,
+  grantAdminModuleAssignments,
   getRequestDashboardAccess,
+  hasAdminModuleAccess,
+  isSuperDashboardAccess as hasSuperDashboardAccess,
   loadDashboardAccessContext,
+  matchesDashboardTenantScope,
+  replaceAdminModuleAssignments,
+  replaceAdminScopeAssignments,
+  type AdminAccountStatus,
   type DashboardAccessContext,
 } from '../services/adminTenant.js';
 import {
@@ -36,6 +66,7 @@ import {
   createUserNotifications,
   ensureUserSignalSchema,
 } from '../services/userSignals.js';
+import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER'])
@@ -116,21 +147,78 @@ const AuditQuerySchema = z.object({
   offset: z.string().optional()
 });
 
+const ManagedAdminRoleSchema = z.enum(['SUPER_ADMIN', 'ADMIN']);
+const ManagedAdminStatusSchema = z.enum(['ACTIVE', 'SUSPENDED', 'DELETED']);
+
+const CreateAdminSchema = z
+  .object({
+    user_id: z.string().trim().min(1).optional(),
+    full_name: z.string().trim().min(2).max(120).optional(),
+    email: z.string().email().optional(),
+    phone: z.string().trim().min(7).max(20).optional(),
+    password: z.string().min(8).optional(),
+    role: ManagedAdminRoleSchema.default('ADMIN'),
+    status: z.enum(['ACTIVE', 'SUSPENDED']).default('ACTIVE'),
+    module_keys: z.array(z.string()).default([]),
+    country_ids: z.array(z.string().uuid()).default([]),
+    division_ids: z.array(z.string().uuid()).default([]),
+  })
+  .refine(
+    (value) =>
+      Boolean(
+        value.user_id ||
+          (value.full_name && value.email && value.phone && value.password)
+      ),
+    {
+      message: 'user_id or full_name/email/phone/password is required',
+    }
+  );
+
+const UpdateAdminSchema = z
+  .object({
+    full_name: z.string().trim().min(2).max(120).optional(),
+    email: z.string().email().optional(),
+    phone: z.string().trim().min(7).max(20).optional(),
+    role: ManagedAdminRoleSchema.optional(),
+    module_keys: z.array(z.string()).optional(),
+    country_ids: z.array(z.string().uuid()).optional(),
+    division_ids: z.array(z.string().uuid()).optional(),
+  })
+  .refine(
+    (value) =>
+      value.full_name !== undefined ||
+      value.email !== undefined ||
+      value.phone !== undefined ||
+      value.role !== undefined ||
+      value.module_keys !== undefined ||
+      value.country_ids !== undefined ||
+      value.division_ids !== undefined,
+    {
+      message: 'at least one field is required',
+    }
+  );
+
+const UpdateManagedAdminStatusSchema = z.object({
+  status: z.enum(['ACTIVE', 'SUSPENDED']),
+});
+
+const ManageAdminPermissionsSchema = z.object({
+  module_keys: z.array(z.string()).default([]),
+});
+
+const AdminListQuerySchema = z.object({
+  q: z.string().optional(),
+  role: ManagedAdminRoleSchema.optional(),
+  status: ManagedAdminStatusSchema.optional(),
+  limit: z.string().optional(),
+  offset: z.string().optional(),
+});
+
 type FilterState = {
   conditions: string[];
   params: any[];
   idx: number;
 };
-
-function pushScopedCondition(
-  state: FilterState,
-  condition: string,
-  value: unknown
-) {
-  state.conditions.push(condition.replaceAll('?', `$${state.idx}`));
-  state.params.push(value);
-  state.idx += 1;
-}
 
 function appendTenantScope(
   state: FilterState,
@@ -140,22 +228,7 @@ function appendTenantScope(
     division?: string | null;
   }
 ) {
-  if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
-    if (!access.country_id) {
-      state.conditions.push('1 = 0');
-      return;
-    }
-    pushScopedCondition(state, `${scope.country} = ?`, access.country_id);
-    return;
-  }
-
-  if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
-    if (!access.division_id || !scope.division) {
-      state.conditions.push('1 = 0');
-      return;
-    }
-    pushScopedCondition(state, `${scope.division} = ?`, access.division_id);
-  }
+  appendDashboardTenantScope(state, access, scope);
 }
 
 function matchesTenantScope(
@@ -165,27 +238,11 @@ function matchesTenantScope(
     division_id?: unknown;
   } | null | undefined
 ) {
-  if (!row) return false;
-  if (access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
-    return true;
-  }
-  if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN) {
-    return (
-      Boolean(access.country_id) &&
-      String(row.country_id ?? '') === String(access.country_id)
-    );
-  }
-  if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN) {
-    return (
-      Boolean(access.division_id) &&
-      String(row.division_id ?? '') === String(access.division_id)
-    );
-  }
-  return false;
+  return matchesDashboardTenantScope(access, row);
 }
 
 function isSuperDashboardAccess(access: DashboardAccessContext) {
-  return access.admin_role === ADMIN_ROLE_SUPER_ADMIN;
+  return hasSuperDashboardAccess(access);
 }
 
 function isManagedAdminAccount(row: {
@@ -223,6 +280,20 @@ async function requireSuperDashboardAccess(
 ) {
   const access = await getLiveDashboardAccess(client, request);
   if (!isSuperDashboardAccess(access)) {
+    reply.code(403);
+    return null;
+  }
+  return access;
+}
+
+async function requireModuleAccess(
+  client: any,
+  request: any,
+  reply: any,
+  moduleKey: string
+) {
+  const access = await getLiveDashboardAccess(client, request);
+  if (!hasAdminModuleAccess(access, moduleKey)) {
     reply.code(403);
     return null;
   }
@@ -366,6 +437,367 @@ function parseNumberRange(min?: string, max?: string) {
   };
 }
 
+type AdminCountryRow = {
+  id: string;
+  code: string | null;
+  name: string | null;
+};
+
+type AdminDivisionRow = {
+  id: string;
+  name: string | null;
+  type: string | null;
+  country_id: string;
+  country_code: string | null;
+  country_name: string | null;
+};
+
+function normalizeManagedAdminStatus(
+  value: unknown
+): AdminAccountStatus {
+  const status = String(value ?? '').trim().toUpperCase();
+  if (status === 'ACTIVE') return 'ACTIVE';
+  if (status === 'SUSPENDED') return 'SUSPENDED';
+  if (status === 'DELETED' || status === 'BANNED') return 'DELETED';
+  return 'NONE';
+}
+
+function uniqueStringValues(values: Iterable<unknown>) {
+  return Array.from(
+    new Set(
+      Array.from(values, (value) => String(value ?? '').trim()).filter(Boolean)
+    )
+  );
+}
+
+function normalizeAssignableModuleKeys(
+  values: Iterable<unknown>
+): AdminModuleKey[] {
+  const normalized: AdminModuleKey[] = [];
+  for (const value of values) {
+    const moduleKey = normalizeAdminModuleKey(value);
+    if (!moduleKey) {
+      continue;
+    }
+    if (
+      moduleKey === ADMIN_MODULE_OVERVIEW ||
+      moduleKey === ADMIN_MODULE_ADMIN_MANAGEMENT
+    ) {
+      continue;
+    }
+    if (
+      !(ASSIGNABLE_ADMIN_MODULE_KEYS as readonly string[]).includes(moduleKey)
+    ) {
+      continue;
+    }
+    normalized.push(moduleKey);
+  }
+  return Array.from(new Set(normalized));
+}
+
+async function ensureUniqueAdminIdentity(
+  client: any,
+  input: {
+    email?: string | null;
+    phone?: string | null;
+  },
+  excludeUserId?: string | null
+) {
+  const email = String(input.email ?? '').trim().toLowerCase();
+  if (email) {
+    const res = await client.query(
+      `
+      SELECT id
+      FROM users
+      WHERE email = $1
+        AND ($2::uuid IS NULL OR id <> $2::uuid)
+      LIMIT 1
+      `,
+      [email, excludeUserId ?? null]
+    );
+    if (res.rows[0]) {
+      throw new Error('email_taken');
+    }
+  }
+
+  const phone = String(input.phone ?? '').trim();
+  if (phone) {
+    const res = await client.query(
+      `
+      SELECT id
+      FROM users
+      WHERE phone = $1
+        AND ($2::uuid IS NULL OR id <> $2::uuid)
+      LIMIT 1
+      `,
+      [phone, excludeUserId ?? null]
+    );
+    if (res.rows[0]) {
+      throw new Error('phone_taken');
+    }
+  }
+}
+
+async function validateAdminScopeAssignments(
+  client: any,
+  input: {
+    countryIds?: Iterable<unknown>;
+    divisionIds?: Iterable<unknown>;
+  }
+) {
+  const countryIds = uniqueStringValues(input.countryIds ?? []);
+  const divisionIds = uniqueStringValues(input.divisionIds ?? []);
+
+  const countryRowsById = new Map<string, AdminCountryRow>();
+  if (countryIds.length > 0) {
+    const countryRes = await client.query(
+      `
+      SELECT id, code, name
+      FROM countries
+      WHERE id = ANY($1::uuid[])
+      `,
+      [countryIds]
+    );
+    for (const row of countryRes.rows) {
+      countryRowsById.set(String(row.id), {
+        id: String(row.id),
+        code: row.code ? String(row.code) : null,
+        name: row.name ? String(row.name) : null,
+      });
+    }
+    if (countryRowsById.size !== countryIds.length) {
+      throw new Error('country_scope_not_found');
+    }
+  }
+
+  const divisionRowsById = new Map<string, AdminDivisionRow>();
+  if (divisionIds.length > 0) {
+    const divisionRes = await client.query(
+      `
+      SELECT
+        d.id,
+        d.name,
+        d.type,
+        d.country_id,
+        c.code AS country_code,
+        c.name AS country_name
+      FROM divisions d
+      JOIN countries c ON c.id = d.country_id
+      WHERE d.id = ANY($1::uuid[])
+      `,
+      [divisionIds]
+    );
+    for (const row of divisionRes.rows) {
+      divisionRowsById.set(String(row.id), {
+        id: String(row.id),
+        name: row.name ? String(row.name) : null,
+        type: row.type ? String(row.type) : null,
+        country_id: String(row.country_id),
+        country_code: row.country_code ? String(row.country_code) : null,
+        country_name: row.country_name ? String(row.country_name) : null,
+      });
+    }
+    if (divisionRowsById.size !== divisionIds.length) {
+      throw new Error('division_scope_not_found');
+    }
+  }
+
+  const orderedCountryRows = countryIds.map((countryId) => countryRowsById.get(countryId)!);
+  const orderedDivisionRows = divisionIds.map(
+    (divisionId) => divisionRowsById.get(divisionId)!
+  );
+  const primaryDivision = orderedDivisionRows[0] ?? null;
+  const primaryCountry =
+    orderedCountryRows[0] ??
+    (primaryDivision
+      ? {
+          id: primaryDivision.country_id,
+          code: primaryDivision.country_code,
+          name: primaryDivision.country_name,
+        }
+      : null);
+
+  return {
+    countryIds,
+    divisionIds,
+    countryRows: orderedCountryRows,
+    divisionRows: orderedDivisionRows,
+    primaryCountry,
+    primaryDivision,
+  };
+}
+
+async function createManagedAdminUser(
+  client: any,
+  input: {
+    full_name: string;
+    email: string;
+    phone: string;
+    password: string;
+    role: 'SUPER_ADMIN' | 'ADMIN';
+    primaryCountry?: AdminCountryRow | null;
+    primaryDivision?: AdminDivisionRow | null;
+  }
+) {
+  const fallbackCountryCode = String(input.primaryCountry?.code ?? 'UG')
+    .trim()
+    .toUpperCase() || 'UG';
+  const countryProfile = resolveCountry(fallbackCountryCode);
+
+  await ensureUniqueAdminIdentity(client, {
+    email: input.email,
+    phone: input.phone,
+  });
+
+  const res = await client.query(
+    `
+    INSERT INTO users (
+      full_name,
+      email,
+      phone,
+      password_hash,
+      role,
+      active_role,
+      country,
+      preferred_currency,
+      admin_role,
+      country_id,
+      division_id
+    )
+    VALUES ($1,$2,$3,$4,'ADMIN','ADMIN',$5,$6,$7,$8,$9)
+    RETURNING *
+    `,
+    [
+      input.full_name.trim(),
+      input.email.trim().toLowerCase(),
+      input.phone.trim(),
+      hashPassword(input.password),
+      countryProfile.iso2,
+      countryProfile.currency,
+      input.role,
+      input.primaryCountry?.id ?? null,
+      input.primaryDivision?.id ?? null,
+    ]
+  );
+
+  return res.rows[0];
+}
+
+async function loadManagedAdminTarget(client: any, rawUserId: string) {
+  await ensurePublicIdColumns(client);
+  const resolvedUserId = await resolveUserId(client, rawUserId);
+  if (!resolvedUserId) {
+    return null;
+  }
+
+  const userRes = await client.query(
+    `
+    SELECT
+      u.id,
+      u.public_id,
+      u.full_name,
+      u.email,
+      u.phone,
+      u.status AS user_status,
+      u.role,
+      u.active_role,
+      u.admin_role AS legacy_admin_role,
+      u.country,
+      u.country_id,
+      u.division_id,
+      u.created_at AS user_created_at,
+      u.updated_at AS user_updated_at,
+      au.id AS admin_user_id,
+      au.role AS admin_account_role,
+      au.status AS admin_account_status,
+      au.created_by_super_admin_id,
+      au.last_login_at,
+      au.created_at AS admin_created_at,
+      au.updated_at AS admin_updated_at
+    FROM users u
+    LEFT JOIN admin_users au ON au.user_id = u.id
+    WHERE u.id = $1
+    LIMIT 1
+    `,
+    [resolvedUserId]
+  );
+  const row = userRes.rows[0] ?? null;
+  if (!row) {
+    return null;
+  }
+
+  const access = await loadDashboardAccessContext(client, resolvedUserId);
+  return {
+    resolvedUserId,
+    row,
+    access,
+  };
+}
+
+function serializeManagedAdminRecord(target: {
+  row: Record<string, unknown>;
+  access: DashboardAccessContext;
+}) {
+  return {
+    id: String(target.row.id ?? target.access.user_id),
+    public_id: String(target.row.public_id ?? ''),
+    admin_user_id: target.access.admin_user_id,
+    full_name: String(target.row.full_name ?? ''),
+    email: String(target.row.email ?? ''),
+    phone: String(target.row.phone ?? ''),
+    user_status: String(target.row.user_status ?? 'ACTIVE'),
+    admin_status: target.access.admin_status,
+    role: target.access.admin_role,
+    legacy_admin_role: target.access.legacy_admin_role,
+    permissions: target.access.permissions,
+    module_keys: target.access.module_keys,
+    country: String(target.row.country ?? ''),
+    country_id: target.access.country_id,
+    division_id: target.access.division_id,
+    country_ids: target.access.country_ids,
+    division_ids: target.access.division_ids,
+    country_scopes: target.access.country_scopes,
+    division_scopes: target.access.division_scopes,
+    created_by_super_admin_id: target.access.created_by_super_admin_id,
+    last_login_at: target.access.last_login_at,
+    created_at:
+      target.row.admin_created_at ?? target.row.user_created_at ?? null,
+    updated_at:
+      target.row.admin_updated_at ?? target.row.user_updated_at ?? null,
+  };
+}
+
+async function ensurePersistedAdminAccountId(
+  client: any,
+  target: {
+    resolvedUserId: string;
+    row: Record<string, unknown>;
+    access: DashboardAccessContext | null;
+  }
+) {
+  if (target.access?.admin_user_id) {
+    return target.access.admin_user_id;
+  }
+
+  const role =
+    target.access?.admin_role === ADMIN_ROLE_SUPER_ADMIN
+      ? ADMIN_ROLE_SUPER_ADMIN
+      : ADMIN_ROLE_ADMIN;
+  const status =
+    target.access?.admin_status && target.access.admin_status !== 'NONE'
+      ? target.access.admin_status
+      : normalizeManagedAdminStatus(target.row.admin_account_status);
+  const account = await ensureAdminAccountRecord(client, {
+    userId: target.resolvedUserId,
+    role,
+    status: status === 'NONE' ? 'ACTIVE' : status,
+    createdBySuperAdminId: target.row.created_by_super_admin_id
+      ? String(target.row.created_by_super_admin_id)
+      : null,
+  });
+  return String(account.id);
+}
+
 async function ensureCampaignDraftsTable(client: any) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS campaign_creation_drafts (
@@ -391,11 +823,13 @@ async function logAudit(
   targetId: string | null,
   meta: any
 ) {
-  await client.query(
-    `INSERT INTO admin_audit_logs (actor_id, action, target_type, target_id, meta)
-     VALUES ($1,$2,$3,$4,$5)`,
-    [actorId || null, action, targetType, targetId, meta ?? null]
-  );
+  await recordAdminAudit(client, {
+    actorId,
+    action,
+    targetType,
+    targetId,
+    meta,
+  });
 }
 
 function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
@@ -471,12 +905,658 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     };
   });
 
+  app.get('/admin/me', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      if (access.user_id === 'ariaka-access') {
+        return {
+          admin: {
+            id: access.user_id,
+            public_id: null,
+            admin_user_id: null,
+            full_name: 'Emergency Super Admin',
+            email: access.email,
+            phone: '',
+            user_status: 'ACTIVE',
+            admin_status: access.admin_status,
+            role: access.admin_role,
+            legacy_admin_role: access.legacy_admin_role,
+            permissions: access.permissions,
+            module_keys: access.module_keys,
+            country: '',
+            country_id: access.country_id,
+            division_id: access.division_id,
+            country_ids: access.country_ids,
+            division_ids: access.division_ids,
+            country_scopes: access.country_scopes,
+            division_scopes: access.division_scopes,
+            created_by_super_admin_id: access.created_by_super_admin_id,
+            last_login_at: access.last_login_at,
+            created_at: null,
+            updated_at: null,
+          },
+        };
+      }
+
+      const target = await loadManagedAdminTarget(client, access.user_id);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(404);
+        return { error: 'admin_not_found' };
+      }
+      return {
+        admin: serializeManagedAdminRecord({
+          row: target.row,
+          access: target.access,
+        }),
+      };
+    });
+  });
+
+  app.get('/admin/modules', { preHandler: [app.adminOnly] }, async (request) => {
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      return {
+        modules: adminModuleDefinitions,
+        assignable_module_keys: ASSIGNABLE_ADMIN_MODULE_KEYS,
+        current_permissions: access.permissions,
+      };
+    });
+  });
+
+  app.get('/admin/admins', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const query = AdminListQuerySchema.parse(request.query ?? {});
+    const { limit, offset } = parsePaging(query);
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      await ensurePublicIdColumns(client);
+      const candidates = await client.query(
+        `
+        SELECT u.id
+        FROM users u
+        LEFT JOIN admin_users au ON au.user_id = u.id
+        WHERE au.id IS NOT NULL
+           OR u.role = 'ADMIN'
+           OR u.active_role = 'ADMIN'
+           OR COALESCE(u.admin_role, 'USER') <> 'USER'
+        ORDER BY COALESCE(au.created_at, u.created_at) DESC, u.created_at DESC
+        `
+      );
+
+      const q = String(query.q ?? '').trim().toLowerCase();
+      const filtered: Array<Record<string, unknown>> = [];
+      for (const row of candidates.rows) {
+        const target = await loadManagedAdminTarget(client, String(row.id));
+        if (!target?.access || target.access.admin_role === 'USER') {
+          continue;
+        }
+        const record = serializeManagedAdminRecord({
+          row: target.row,
+          access: target.access,
+        });
+        if (
+          query.role &&
+          String(record.role ?? '').trim().toUpperCase() !== query.role
+        ) {
+          continue;
+        }
+        if (
+          query.status &&
+          String(record.admin_status ?? '').trim().toUpperCase() !== query.status
+        ) {
+          continue;
+        }
+        if (q) {
+          const haystack = [
+            record.public_id,
+            record.full_name,
+            record.email,
+            record.phone,
+          ]
+            .map((value) => String(value ?? '').toLowerCase())
+            .join(' ');
+          if (!haystack.includes(q)) {
+            continue;
+          }
+        }
+        filtered.push(record);
+      }
+
+      return {
+        admins: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+      };
+    });
+  });
+
+  app.post('/admin/admins', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const body = CreateAdminSchema.parse(request.body);
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      const role = body.role === ADMIN_ROLE_SUPER_ADMIN
+        ? ADMIN_ROLE_SUPER_ADMIN
+        : ADMIN_ROLE_ADMIN;
+      const validatedScopes =
+        role === ADMIN_ROLE_ADMIN
+          ? await validateAdminScopeAssignments(client, {
+              countryIds: body.country_ids,
+              divisionIds: body.division_ids,
+            })
+          : {
+              countryIds: [] as string[],
+              divisionIds: [] as string[],
+              countryRows: [] as AdminCountryRow[],
+              divisionRows: [] as AdminDivisionRow[],
+              primaryCountry: null,
+              primaryDivision: null,
+            };
+
+      let targetUserId: string;
+      if (body.user_id) {
+        const resolvedUserId = await resolveUserId(client, body.user_id);
+        if (!resolvedUserId) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+        const existing = await loadDashboardAccessContext(client, resolvedUserId);
+        if (existing && existing.admin_role !== 'USER') {
+          reply.code(409);
+          return { error: 'admin_already_exists' };
+        }
+        targetUserId = resolvedUserId;
+      } else {
+        const created = await createManagedAdminUser(client, {
+          full_name: body.full_name!,
+          email: body.email!,
+          phone: body.phone!,
+          password: body.password!,
+          role,
+          primaryCountry: validatedScopes.primaryCountry,
+          primaryDivision: validatedScopes.primaryDivision,
+        });
+        targetUserId = String(created.id);
+      }
+
+      const account = await ensureAdminAccountRecord(client, {
+        userId: targetUserId,
+        role,
+        status: body.status,
+        createdBySuperAdminId:
+          actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+      });
+
+      if (role === ADMIN_ROLE_ADMIN) {
+        await replaceAdminModuleAssignments(
+          client,
+          String(account.id),
+          role,
+          body.module_keys
+        );
+        await replaceAdminScopeAssignments(client, String(account.id), {
+          countryIds: validatedScopes.countryIds,
+          divisionIds: validatedScopes.divisionIds,
+        });
+      } else {
+        await replaceAdminModuleAssignments(client, String(account.id), role, []);
+        await replaceAdminScopeAssignments(client, String(account.id), {
+          countryIds: [],
+          divisionIds: [],
+        });
+      }
+
+      const target = await loadManagedAdminTarget(client, targetUserId);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(500);
+        return { error: 'admin_create_failed' };
+      }
+
+      await recordAdminAudit(client, {
+        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        action: 'ADMIN_CREATED',
+        targetType: 'admin_user',
+        targetId: targetUserId,
+        meta: {
+          role: target.access.admin_role,
+          admin_status: target.access.admin_status,
+          permissions: target.access.permissions,
+          country_ids: target.access.country_ids,
+          division_ids: target.access.division_ids,
+        },
+        ...auditScopeFromAccess(target.access),
+      });
+
+      return {
+        admin: serializeManagedAdminRecord({
+          row: target.row,
+          access: target.access,
+        }),
+      };
+    });
+  });
+
+  app.patch('/admin/admins/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = UpdateAdminSchema.parse(request.body);
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      const target = await loadManagedAdminTarget(client, params.id);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(404);
+        return { error: 'admin_not_found' };
+      }
+      if (actorAccess.user_id === target.resolvedUserId) {
+        reply.code(403);
+        return { error: 'cannot_modify_own_admin_account' };
+      }
+      if (target.access.admin_status === 'DELETED') {
+        reply.code(409);
+        return { error: 'admin_deleted' };
+      }
+
+      if (body.email !== undefined || body.phone !== undefined) {
+        await ensureUniqueAdminIdentity(
+          client,
+          {
+            email: body.email ?? null,
+            phone: body.phone ?? null,
+          },
+          target.resolvedUserId
+        );
+      }
+
+      const profileUpdates: string[] = [];
+      const profileParams: unknown[] = [target.resolvedUserId];
+      let profileIdx = 2;
+      if (body.full_name !== undefined) {
+        profileUpdates.push(`full_name = $${profileIdx}`);
+        profileParams.push(body.full_name.trim());
+        profileIdx += 1;
+      }
+      if (body.email !== undefined) {
+        profileUpdates.push(`email = $${profileIdx}`);
+        profileParams.push(body.email.trim().toLowerCase());
+        profileIdx += 1;
+      }
+      if (body.phone !== undefined) {
+        profileUpdates.push(`phone = $${profileIdx}`);
+        profileParams.push(body.phone.trim());
+        profileIdx += 1;
+      }
+      if (profileUpdates.length > 0) {
+        await client.query(
+          `
+          UPDATE users
+          SET ${profileUpdates.join(', ')}
+          WHERE id = $1
+          `,
+          profileParams
+        );
+      }
+
+      const currentRole =
+        target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN
+          ? ADMIN_ROLE_SUPER_ADMIN
+          : ADMIN_ROLE_ADMIN;
+      const nextRole =
+        body.role === ADMIN_ROLE_SUPER_ADMIN
+          ? ADMIN_ROLE_SUPER_ADMIN
+          : body.role === ADMIN_ROLE_ADMIN
+            ? ADMIN_ROLE_ADMIN
+            : currentRole;
+      const account = await ensureAdminAccountRecord(client, {
+        userId: target.resolvedUserId,
+        role: nextRole,
+        status:
+          target.access.admin_status === 'NONE'
+            ? 'ACTIVE'
+            : target.access.admin_status,
+        createdBySuperAdminId: target.access.created_by_super_admin_id,
+      });
+
+      const shouldReplaceScopes =
+        nextRole === ADMIN_ROLE_SUPER_ADMIN
+          ? true
+          : body.country_ids !== undefined || body.division_ids !== undefined;
+      if (shouldReplaceScopes) {
+        const nextCountryIds =
+          nextRole === ADMIN_ROLE_SUPER_ADMIN
+            ? []
+            : body.country_ids ?? target.access.country_scopes.map((scope) => scope.id);
+        const nextDivisionIds =
+          nextRole === ADMIN_ROLE_SUPER_ADMIN
+            ? []
+            : body.division_ids ?? target.access.division_scopes.map((scope) => scope.id);
+        const validatedScopes = await validateAdminScopeAssignments(client, {
+          countryIds: nextCountryIds,
+          divisionIds: nextDivisionIds,
+        });
+        await replaceAdminScopeAssignments(client, String(account.id), {
+          countryIds: validatedScopes.countryIds,
+          divisionIds: validatedScopes.divisionIds,
+        });
+      }
+
+      const shouldReplaceModules =
+        nextRole === ADMIN_ROLE_SUPER_ADMIN || body.module_keys !== undefined;
+      if (shouldReplaceModules) {
+        await replaceAdminModuleAssignments(
+          client,
+          String(account.id),
+          nextRole,
+          nextRole === ADMIN_ROLE_SUPER_ADMIN ? [] : body.module_keys ?? target.access.permissions
+        );
+      }
+
+      const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
+      if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
+        reply.code(500);
+        return { error: 'admin_update_failed' };
+      }
+
+      await recordAdminAudit(client, {
+        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        action: 'ADMIN_UPDATED',
+        targetType: 'admin_user',
+        targetId: target.resolvedUserId,
+        meta: {
+          profile_fields: {
+            full_name: body.full_name ?? null,
+            email: body.email ?? null,
+            phone: body.phone ?? null,
+          },
+          role: updatedTarget.access.admin_role,
+          permissions: updatedTarget.access.permissions,
+          country_ids: updatedTarget.access.country_ids,
+          division_ids: updatedTarget.access.division_ids,
+        },
+        ...auditScopeFromAccess(updatedTarget.access),
+      });
+
+      return {
+        admin: serializeManagedAdminRecord({
+          row: updatedTarget.row,
+          access: updatedTarget.access,
+        }),
+      };
+    });
+  });
+
+  app.patch('/admin/admins/:id/status', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = UpdateManagedAdminStatusSchema.parse(request.body);
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      const target = await loadManagedAdminTarget(client, params.id);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(404);
+        return { error: 'admin_not_found' };
+      }
+      if (actorAccess.user_id === target.resolvedUserId) {
+        reply.code(403);
+        return { error: 'cannot_modify_own_admin_account' };
+      }
+      if (target.access.admin_status === 'DELETED') {
+        reply.code(409);
+        return { error: 'admin_deleted' };
+      }
+
+      await ensureAdminAccountRecord(client, {
+        userId: target.resolvedUserId,
+        role:
+          target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN
+            ? ADMIN_ROLE_SUPER_ADMIN
+            : ADMIN_ROLE_ADMIN,
+        status: body.status,
+        createdBySuperAdminId: target.access.created_by_super_admin_id,
+      });
+
+      const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
+      if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
+        reply.code(500);
+        return { error: 'admin_status_update_failed' };
+      }
+
+      await recordAdminAudit(client, {
+        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        action: body.status === 'ACTIVE' ? 'ADMIN_REACTIVATED' : 'ADMIN_SUSPENDED',
+        targetType: 'admin_user',
+        targetId: target.resolvedUserId,
+        meta: {
+          admin_status: updatedTarget.access.admin_status,
+        },
+        ...auditScopeFromAccess(updatedTarget.access),
+      });
+
+      return {
+        admin: serializeManagedAdminRecord({
+          row: updatedTarget.row,
+          access: updatedTarget.access,
+        }),
+      };
+    });
+  });
+
+  app.put('/admin/admins/:id/permissions', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = ManageAdminPermissionsSchema.parse(request.body);
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      const target = await loadManagedAdminTarget(client, params.id);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(404);
+        return { error: 'admin_not_found' };
+      }
+      if (actorAccess.user_id === target.resolvedUserId) {
+        reply.code(403);
+        return { error: 'cannot_modify_own_admin_account' };
+      }
+      if (target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
+        reply.code(409);
+        return { error: 'super_admin_permissions_are_implicit' };
+      }
+      if (target.access.admin_status === 'DELETED') {
+        reply.code(409);
+        return { error: 'admin_deleted' };
+      }
+
+      const normalizedModuleKeys = normalizeAssignableModuleKeys(body.module_keys);
+      const accountId = await ensurePersistedAdminAccountId(client, target);
+      if (normalizedModuleKeys.length > 0) {
+        await grantAdminModuleAssignments(
+          client,
+          accountId,
+          ADMIN_ROLE_ADMIN,
+          normalizedModuleKeys
+        );
+      }
+
+      const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
+      if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
+        reply.code(500);
+        return { error: 'admin_permissions_update_failed' };
+      }
+
+      await recordAdminAudit(client, {
+        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        action: 'ADMIN_PERMISSIONS_ASSIGNED',
+        targetType: 'admin_user',
+        targetId: target.resolvedUserId,
+        meta: {
+          module_keys: normalizedModuleKeys,
+          permissions: updatedTarget.access.permissions,
+        },
+        ...auditScopeFromAccess(updatedTarget.access),
+      });
+
+      return {
+        admin: serializeManagedAdminRecord({
+          row: updatedTarget.row,
+          access: updatedTarget.access,
+        }),
+      };
+    });
+  });
+
+  app.delete('/admin/admins/:id/permissions', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = ManageAdminPermissionsSchema.parse(request.body ?? {});
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      const target = await loadManagedAdminTarget(client, params.id);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(404);
+        return { error: 'admin_not_found' };
+      }
+      if (actorAccess.user_id === target.resolvedUserId) {
+        reply.code(403);
+        return { error: 'cannot_modify_own_admin_account' };
+      }
+      if (target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
+        reply.code(409);
+        return { error: 'super_admin_permissions_are_implicit' };
+      }
+      if (target.access.admin_status === 'DELETED') {
+        reply.code(409);
+        return { error: 'admin_deleted' };
+      }
+
+      const normalizedModuleKeys = normalizeAssignableModuleKeys(body.module_keys);
+      const accountId = await ensurePersistedAdminAccountId(client, target);
+      if (normalizedModuleKeys.length > 0) {
+        await client.query(
+          `
+          DELETE FROM admin_user_modules
+          WHERE admin_user_id = $1
+            AND module_key = ANY($2::text[])
+          `,
+          [accountId, normalizedModuleKeys]
+        );
+      }
+
+      const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
+      if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
+        reply.code(500);
+        return { error: 'admin_permissions_update_failed' };
+      }
+
+      await recordAdminAudit(client, {
+        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        action: 'ADMIN_PERMISSIONS_REMOVED',
+        targetType: 'admin_user',
+        targetId: target.resolvedUserId,
+        meta: {
+          module_keys: normalizedModuleKeys,
+          permissions: updatedTarget.access.permissions,
+        },
+        ...auditScopeFromAccess(updatedTarget.access),
+      });
+
+      return {
+        admin: serializeManagedAdminRecord({
+          row: updatedTarget.row,
+          access: updatedTarget.access,
+        }),
+      };
+    });
+  });
+
+  app.delete('/admin/admins/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    return withTransaction(async (client) => {
+      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+      if (!actorAccess) {
+        return { error: 'forbidden' };
+      }
+
+      const target = await loadManagedAdminTarget(client, params.id);
+      if (!target?.access || target.access.admin_role === 'USER') {
+        reply.code(404);
+        return { error: 'admin_not_found' };
+      }
+      if (actorAccess.user_id === target.resolvedUserId) {
+        reply.code(403);
+        return { error: 'cannot_modify_own_admin_account' };
+      }
+      if (target.access.admin_status === 'DELETED') {
+        return {
+          admin: serializeManagedAdminRecord({
+            row: target.row,
+            access: target.access,
+          }),
+        };
+      }
+
+      await ensureAdminAccountRecord(client, {
+        userId: target.resolvedUserId,
+        role:
+          target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN
+            ? ADMIN_ROLE_SUPER_ADMIN
+            : ADMIN_ROLE_ADMIN,
+        status: 'DELETED',
+        createdBySuperAdminId: target.access.created_by_super_admin_id,
+      });
+
+      const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
+      if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
+        reply.code(500);
+        return { error: 'admin_delete_failed' };
+      }
+
+      await recordAdminAudit(client, {
+        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        action: 'ADMIN_DELETED',
+        targetType: 'admin_user',
+        targetId: target.resolvedUserId,
+        meta: {
+          admin_status: updatedTarget.access.admin_status,
+        },
+        ...auditScopeFromAccess(updatedTarget.access),
+      });
+
+      return {
+        admin: serializeManagedAdminRecord({
+          row: updatedTarget.row,
+          access: updatedTarget.access,
+        }),
+      };
+    });
+  });
+
   app.get('/admin/audit', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const query = AuditQuerySchema.parse(request.query ?? {});
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query.from, query.to);
     return withTransaction(async (client) => {
-      if (!(await requireSuperDashboardAccess(client, request, reply))) {
+      const access = await requireModuleAccess(
+        client,
+        request,
+        reply,
+        ADMIN_MODULE_AUDIT_LOGS
+      );
+      if (!access) {
         return { error: 'forbidden' };
       }
       const conditions: string[] = [];
@@ -516,6 +1596,13 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'country_id',
+        division: 'division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const list = await client.query(
         `SELECT * FROM admin_audit_logs ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -532,7 +1619,13 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     const groupByRaw = (query?.group_by ?? '').toString().toLowerCase();
     const groupBy = groupByRaw === 'day' || groupByRaw === 'month' ? groupByRaw : null;
     return withTransaction(async (client) => {
-      if (!(await requireSuperDashboardAccess(client, request, reply))) {
+      const access = await requireModuleAccess(
+        client,
+        request,
+        reply,
+        ADMIN_MODULE_FINANCE
+      );
+      if (!access) {
         return { error: 'forbidden' };
       }
       const conditions: string[] = [];
@@ -575,6 +1668,13 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         idx++;
       }
 
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'country_id',
+        division: 'division_id',
+      });
+      idx = state.idx;
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const rows = await client.query(
         `
@@ -586,7 +1686,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
             p.amount::int AS amount,
             p.pesapal_reference::text AS reference,
             p.user_id::text AS user_id,
-            p.created_at AS created_at
+            p.created_at AS created_at,
+            p.country_id,
+            p.division_id
           FROM payout_requests p
           UNION ALL
           SELECT
@@ -596,8 +1698,12 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
             t.amount::int AS amount,
             t.merchant_reference::text AS reference,
             NULL::text AS user_id,
-            t.created_at AS created_at
+            t.created_at AS created_at,
+            COALESCE(e.country_id, c.country_id) AS country_id,
+            COALESCE(e.division_id, c.division_id) AS division_id
           FROM pesapal_transactions t
+          LEFT JOIN escrow_ledger e ON e.id = t.escrow_id
+          LEFT JOIN campaigns c ON c.id = e.campaign_id
         )
         SELECT *
         FROM combined
@@ -617,7 +1723,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
             p.amount::int AS amount,
             p.pesapal_reference::text AS reference,
             p.id AS source_id,
-            p.created_at AS created_at
+            p.created_at AS created_at,
+            p.country_id,
+            p.division_id
           FROM payout_requests p
           UNION ALL
           SELECT
@@ -626,8 +1734,12 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
             t.amount::int AS amount,
             t.merchant_reference::text AS reference,
             t.id AS source_id,
-            t.created_at AS created_at
+            t.created_at AS created_at,
+            COALESCE(e.country_id, c.country_id) AS country_id,
+            COALESCE(e.division_id, c.division_id) AS division_id
           FROM pesapal_transactions t
+          LEFT JOIN escrow_ledger e ON e.id = t.escrow_id
+          LEFT JOIN campaigns c ON c.id = e.campaign_id
         ),
         filtered AS (
           SELECT *
@@ -675,6 +1787,17 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         escrowConditions.push(`status IN ('FUNDED','PARTIALLY_DISBURSED','COMPLETED')`);
       }
 
+      const escrowState = {
+        conditions: escrowConditions,
+        params: escrowParams,
+        idx: eidx,
+      };
+      appendTenantScope(escrowState, access, {
+        country: 'country_id',
+        division: 'division_id',
+      });
+      eidx = escrowState.idx;
+
       const escrowWhere = escrowConditions.length ? `WHERE ${escrowConditions.join(' AND ')}` : '';
       const escrowRes = await client.query(
         `SELECT COALESCE(SUM(amount_total), 0)::bigint AS contracts_financed FROM escrow_ledger ${escrowWhere}`,
@@ -692,7 +1815,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
               p.amount::int AS amount,
               p.pesapal_reference::text AS reference,
               p.id AS source_id,
-              p.created_at AS created_at
+              p.created_at AS created_at,
+              p.country_id,
+              p.division_id
             FROM payout_requests p
             UNION ALL
             SELECT
@@ -701,8 +1826,12 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
               t.amount::int AS amount,
               t.merchant_reference::text AS reference,
               t.id AS source_id,
-              t.created_at AS created_at
+              t.created_at AS created_at,
+              COALESCE(e.country_id, c.country_id) AS country_id,
+              COALESCE(e.division_id, c.division_id) AS division_id
             FROM pesapal_transactions t
+            LEFT JOIN escrow_ledger e ON e.id = t.escrow_id
+            LEFT JOIN campaigns c ON c.id = e.campaign_id
           ),
           filtered AS (
             SELECT *
@@ -748,36 +1877,118 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
 
   app.get('/admin/overview', { preHandler: [app.adminOnly] }, async (request, reply) => {
     return withTransaction(async (client) => {
-      if (!(await requireSuperDashboardAccess(client, request, reply))) {
+      const access = await getLiveDashboardAccess(client, request);
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_OVERVIEW)) {
+        reply.code(403);
         return { error: 'forbidden' };
       }
       await ensureCampaignDraftsTable(client);
-      const users = await client.query('SELECT COUNT(*)::int AS count FROM users');
-      const campaigns = await client.query('SELECT COUNT(*)::int AS count FROM campaigns');
-      const proofs = await client.query('SELECT COUNT(*)::int AS count FROM proofs');
-      const verificationSessions = await client.query('SELECT COUNT(*)::int AS count FROM verification_sessions');
-      const payouts = await client.query('SELECT COUNT(*)::int AS count FROM payout_requests');
-      const escrows = await client.query('SELECT COUNT(*)::int AS count FROM escrow_ledger');
-      const campaignDrafts = await client.query('SELECT COUNT(*)::int AS count FROM campaign_creation_drafts');
-      const walletWithdrawals = await client.query('SELECT COUNT(*)::int AS count FROM wallet_withdrawals');
-      const trustProfiles = await client.query('SELECT COUNT(*)::int AS count FROM trust_scores');
-      const deviceFingerprints = await client.query('SELECT COUNT(*)::int AS count FROM device_fingerprints');
-      const providerTransactions = await client.query('SELECT COUNT(*)::int AS count FROM pesapal_transactions');
+
+      const countScoped = async (input: {
+        module: string;
+        from: string;
+        country: string;
+        division?: string | null;
+      }) => {
+        if (!hasAdminModuleAccess(access, input.module)) {
+          return 0;
+        }
+        const state = { conditions: [] as string[], params: [] as any[], idx: 1 };
+        appendTenantScope(state, access, {
+          country: input.country,
+          division: input.division,
+        });
+        const where = state.conditions.length
+          ? `WHERE ${state.conditions.join(' AND ')}`
+          : '';
+        const res = await client.query(
+          `SELECT COUNT(*)::int AS count FROM ${input.from} ${where}`,
+          state.params
+        );
+        return Number(res.rows[0]?.count ?? 0);
+      };
+
+      const users = await countScoped({
+        module: ADMIN_MODULE_USERS,
+        from: 'users u',
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      const campaigns = await countScoped({
+        module: ADMIN_MODULE_CAMPAIGNS,
+        from: 'campaigns c',
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      const proofs = await countScoped({
+        module: ADMIN_MODULE_PROOFS,
+        from: 'proofs p',
+        country: 'p.country_id',
+        division: 'p.division_id',
+      });
+      const verificationSessions = await countScoped({
+        module: ADMIN_MODULE_SESSIONS,
+        from: 'verification_sessions s',
+        country: 's.country_id',
+        division: 's.division_id',
+      });
+      const payouts = await countScoped({
+        module: ADMIN_MODULE_PAYOUT_REQUESTS,
+        from: 'payout_requests p',
+        country: 'p.country_id',
+        division: 'p.division_id',
+      });
+      const escrows = await countScoped({
+        module: ADMIN_MODULE_ESCROWS,
+        from: 'escrow_ledger e',
+        country: 'e.country_id',
+        division: 'e.division_id',
+      });
+      const campaignDrafts = await countScoped({
+        module: ADMIN_MODULE_DRAFTS,
+        from: 'campaign_creation_drafts d JOIN users u ON u.id = d.advertiser_id',
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      const walletWithdrawals = await countScoped({
+        module: ADMIN_MODULE_WITHDRAWALS,
+        from: 'wallet_withdrawals ww JOIN users u ON u.id = ww.user_id',
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      const trustProfiles = await countScoped({
+        module: ADMIN_MODULE_RISK,
+        from: 'trust_scores ts JOIN users u ON u.id = ts.user_id',
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      const deviceFingerprints = await countScoped({
+        module: ADMIN_MODULE_RISK,
+        from: 'device_fingerprints df JOIN users u ON u.id = df.user_id',
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      const providerTransactions = await countScoped({
+        module: ADMIN_MODULE_GATEWAY,
+        from: 'pesapal_transactions pt LEFT JOIN escrow_ledger e ON e.id = pt.escrow_id LEFT JOIN campaigns c ON c.id = e.campaign_id',
+        country: 'COALESCE(e.country_id, c.country_id)',
+        division: 'COALESCE(e.division_id, c.division_id)',
+      });
       return {
-        users: users.rows[0]?.count ?? 0,
-        campaigns: campaigns.rows[0]?.count ?? 0,
-        proofs: proofs.rows[0]?.count ?? 0,
-        verification_sessions: verificationSessions.rows[0]?.count ?? 0,
-        payouts: payouts.rows[0]?.count ?? 0,
-        escrows: escrows.rows[0]?.count ?? 0,
-        campaign_drafts: campaignDrafts.rows[0]?.count ?? 0,
-        wallet_withdrawals: walletWithdrawals.rows[0]?.count ?? 0,
-        trust_profiles: trustProfiles.rows[0]?.count ?? 0,
-        device_fingerprints: deviceFingerprints.rows[0]?.count ?? 0,
-        provider_transactions: providerTransactions.rows[0]?.count ?? 0,
-        yo_uganda_transactions: providerTransactions.rows[0]?.count ?? 0,
-        flutterwave_transactions: providerTransactions.rows[0]?.count ?? 0,
-        pesapal_transactions: providerTransactions.rows[0]?.count ?? 0
+        users,
+        campaigns,
+        proofs,
+        verification_sessions: verificationSessions,
+        payouts,
+        escrows,
+        campaign_drafts: campaignDrafts,
+        wallet_withdrawals: walletWithdrawals,
+        trust_profiles: trustProfiles,
+        device_fingerprints: deviceFingerprints,
+        provider_transactions: providerTransactions,
+        yo_uganda_transactions: providerTransactions,
+        flutterwave_transactions: providerTransactions,
+        pesapal_transactions: providerTransactions,
       };
     });
   });
@@ -1332,6 +2543,18 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         [resolvedUserId]
       );
 
+      const contractsScopeState = {
+        conditions: [] as string[],
+        params: [resolvedUserId],
+        idx: 2,
+      };
+      appendTenantScope(contractsScopeState, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      const contractsScopeClause = contractsScopeState.conditions.length
+        ? `AND ${contractsScopeState.conditions.join(' AND ')}`
+        : '';
       const contractsRes = await client.query(
         `
         SELECT
@@ -1351,23 +2574,25 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
           c.advertiser_id = $1
           OR ctr.distributor_id = $1
         )
-          AND ${
-            access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
-              ? 'c.country_id = $2'
-              : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
-                ? 'c.division_id = $2'
-                : 'TRUE'
-          }
+          ${contractsScopeClause}
         ORDER BY ctr.created_at DESC
         LIMIT 200
         `,
-        access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
-          ? [resolvedUserId, access.country_id]
-          : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
-            ? [resolvedUserId, access.division_id]
-            : [resolvedUserId]
+        contractsScopeState.params
       );
 
+      const campaignsScopeState = {
+        conditions: [] as string[],
+        params: [resolvedUserId],
+        idx: 2,
+      };
+      appendTenantScope(campaignsScopeState, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      const campaignsScopeClause = campaignsScopeState.conditions.length
+        ? `AND ${campaignsScopeState.conditions.join(' AND ')}`
+        : '';
       const campaignsRes = await client.query(
         `
         SELECT
@@ -1400,21 +2625,11 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
               AND ctr.distributor_id = $1
           )
         )
-          AND ${
-            access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
-              ? 'c.country_id = $2'
-              : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
-                ? 'c.division_id = $2'
-                : 'TRUE'
-          }
+          ${campaignsScopeClause}
         ORDER BY c.created_at DESC
         LIMIT 200
         `,
-        access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
-          ? [resolvedUserId, access.country_id]
-          : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
-            ? [resolvedUserId, access.division_id]
-            : [resolvedUserId]
+        campaignsScopeState.params
       );
 
       const statusSummaries = await buildCampaignStatusSummaries(
@@ -2110,31 +3325,28 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     const params = request.params as { id: string };
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      const scopeFilter =
-        access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN
-          ? {
-              sql: 'AND u.country_id = $2',
-              params: [access.country_id],
-            }
-          : access.admin_role === ADMIN_ROLE_DIVISION_ADMIN
-            ? {
-                sql: 'AND u.division_id = $2',
-                params: [access.division_id],
-              }
-            : {
-                sql: '',
-                params: [],
-              };
+      const state = {
+        conditions: [] as string[],
+        params: [params.id],
+        idx: 2,
+      };
+      appendTenantScope(state, access, {
+        country: 'u.country_id',
+        division: 'u.division_id',
+      });
+      const scopeFilter = state.conditions.length
+        ? `AND ${state.conditions.join(' AND ')}`
+        : '';
       const res = await client.query(
         `SELECT wt.*
          FROM wallet_txns wt
          JOIN wallets w ON w.id = wt.wallet_id
          JOIN users u ON u.id = w.user_id
          WHERE wt.wallet_id = $1
-         ${scopeFilter.sql}
+         ${scopeFilter}
          ORDER BY wt.created_at DESC
          LIMIT 200`,
-        [params.id, ...scopeFilter.params]
+        state.params
       );
       return { txns: res.rows };
     });

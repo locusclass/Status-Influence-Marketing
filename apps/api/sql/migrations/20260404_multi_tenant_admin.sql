@@ -46,7 +46,7 @@ ALTER TABLE users
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_admin_role_check;
 ALTER TABLE users
   ADD CONSTRAINT users_admin_role_check
-  CHECK (admin_role IN ('SUPER_ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN', 'USER'));
+  CHECK (admin_role IN ('SUPER_ADMIN', 'ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN', 'USER'));
 
 ALTER TABLE campaigns
   ADD COLUMN IF NOT EXISTS country_id UUID REFERENCES countries(id);

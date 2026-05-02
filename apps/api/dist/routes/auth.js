@@ -7,7 +7,9 @@ import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { buildAuthClaims, buildUserSession } from '../services/roles.js';
-import { canAccessAdminDashboard } from '@prime/shared';
+import { ADMIN_ROLE_USER, canAccessAdminDashboard } from '@prime/shared';
+import { recordAdminAudit, auditScopeFromAccess } from '../services/adminAudit.js';
+import { loadDashboardAccessContext, touchAdminLogin, } from '../services/adminTenant.js';
 import { touchUserPresenceWithClient } from '../services/userSignals.js';
 const registerSchema = z.object({
     full_name: z.string().min(2).max(120),
@@ -116,6 +118,30 @@ function isAdminSessionUser(user) {
         .toUpperCase();
     return role === 'ADMIN' || activeRole === 'ADMIN';
 }
+function mergeDashboardAccessIntoSession(user, access) {
+    const base = buildUserSession(user);
+    if (!access || access.admin_role === ADMIN_ROLE_USER) {
+        return base;
+    }
+    return {
+        ...base,
+        admin_role: access.admin_role,
+        admin_status: access.admin_status,
+        permissions: access.permissions,
+        module_keys: access.module_keys,
+        country_id: access.country_id,
+        division_id: access.division_id,
+        country_name: access.country_name,
+        country_code: access.country_code,
+        division_name: access.division_name,
+        country_ids: access.country_ids,
+        division_ids: access.division_ids,
+        country_scopes: access.country_scopes,
+        division_scopes: access.division_scopes,
+        created_by_super_admin_id: access.created_by_super_admin_id,
+        last_admin_login_at: access.last_login_at,
+    };
+}
 export async function authRoutes(app) {
     const userRepo = new UserRepo();
     const googleClient = new OAuth2Client();
@@ -186,10 +212,33 @@ export async function authRoutes(app) {
             });
         });
         const token = app.jwt.sign(buildAuthClaims(user));
+        const dashboardAccess = await withTransaction(async (client) => {
+            const current = await loadDashboardAccessContext(client, String(user.id));
+            if (current &&
+                current.admin_role !== ADMIN_ROLE_USER &&
+                current.admin_status === 'ACTIVE') {
+                const touched = await touchAdminLogin(client, String(user.id));
+                if (touched) {
+                    await recordAdminAudit(client, {
+                        actorId: String(user.id),
+                        action: 'ADMIN_LOGIN',
+                        targetType: 'admin_user',
+                        targetId: String(user.id),
+                        meta: {
+                            method: 'PASSWORD',
+                            permissions: touched.permissions,
+                        },
+                        ...auditScopeFromAccess(touched),
+                    });
+                    return touched;
+                }
+            }
+            return current;
+        });
         return {
             token,
             user: {
-                ...buildUserSession(user),
+                ...mergeDashboardAccessIntoSession(user, dashboardAccess),
                 full_name: user.full_name ?? '',
             },
         };
@@ -309,10 +358,33 @@ export async function authRoutes(app) {
         const refreshedUser = await withTransaction(async (client) => userRepo.findByEmail(client, email));
         const sessionUser = refreshedUser ?? user;
         const token = app.jwt.sign(buildAuthClaims(sessionUser));
+        const dashboardAccess = await withTransaction(async (client) => {
+            const current = await loadDashboardAccessContext(client, String(sessionUser.id));
+            if (current &&
+                current.admin_role !== ADMIN_ROLE_USER &&
+                current.admin_status === 'ACTIVE') {
+                const touched = await touchAdminLogin(client, String(sessionUser.id));
+                if (touched) {
+                    await recordAdminAudit(client, {
+                        actorId: String(sessionUser.id),
+                        action: 'ADMIN_LOGIN',
+                        targetType: 'admin_user',
+                        targetId: String(sessionUser.id),
+                        meta: {
+                            method: 'GOOGLE',
+                            permissions: touched.permissions,
+                        },
+                        ...auditScopeFromAccess(touched),
+                    });
+                    return touched;
+                }
+            }
+            return current;
+        });
         return {
             token,
             user: {
-                ...buildUserSession(sessionUser),
+                ...mergeDashboardAccessIntoSession(sessionUser, dashboardAccess),
                 full_name: sessionUser.full_name ?? fullName,
                 avatar_url: photoUrl || null,
                 dialCode: countryData.dialCode,
@@ -374,18 +446,51 @@ export async function authRoutes(app) {
             await touchUserPresenceWithClient(client, String(existing.id), {
                 markLogin: true,
             });
+            const access = await touchAdminLogin(client, String(existing.id));
+            if (!access || access.admin_role === ADMIN_ROLE_USER) {
+                reply.code(403);
+                return {
+                    error: 'admin_access_required',
+                    detail: 'This Google account has not been enabled for the admin dashboard yet.',
+                };
+            }
+            if (access.admin_status !== 'ACTIVE') {
+                reply.code(403);
+                return {
+                    error: access.admin_status === 'SUSPENDED'
+                        ? 'admin_suspended'
+                        : 'forbidden',
+                    detail: 'This admin account is not currently allowed to access the dashboard.',
+                };
+            }
+            await recordAdminAudit(client, {
+                actorId: String(existing.id),
+                action: 'ADMIN_LOGIN',
+                targetType: 'admin_user',
+                targetId: String(existing.id),
+                meta: {
+                    method: 'GOOGLE',
+                    permissions: access.permissions,
+                },
+                ...auditScopeFromAccess(access),
+            });
             const refreshed = await userRepo.findByEmail(client, email);
-            return refreshed ?? existing;
+            return {
+                user: refreshed ?? existing,
+                access,
+            };
         });
         if (user?.error) {
             return user;
         }
-        const token = app.jwt.sign(buildAuthClaims(user));
+        const sessionUser = user.user ?? user;
+        const dashboardAccess = user.access;
+        const token = app.jwt.sign(buildAuthClaims(sessionUser));
         return {
             token,
             user: {
-                ...buildUserSession(user),
-                full_name: String(user.full_name ?? fullName),
+                ...mergeDashboardAccessIntoSession(sessionUser, dashboardAccess ?? null),
+                full_name: String(sessionUser.full_name ?? fullName),
                 avatar_url: photoUrl || null,
             },
         };

@@ -1,10 +1,12 @@
 export const ADMIN_ROLE_SUPER_ADMIN = 'SUPER_ADMIN';
+export const ADMIN_ROLE_ADMIN = 'ADMIN';
 export const ADMIN_ROLE_COUNTRY_ADMIN = 'COUNTRY_ADMIN';
 export const ADMIN_ROLE_DIVISION_ADMIN = 'DIVISION_ADMIN';
 export const ADMIN_ROLE_USER = 'USER';
 
 export type AdminDashboardRole =
   | typeof ADMIN_ROLE_SUPER_ADMIN
+  | typeof ADMIN_ROLE_ADMIN
   | typeof ADMIN_ROLE_COUNTRY_ADMIN
   | typeof ADMIN_ROLE_DIVISION_ADMIN
   | typeof ADMIN_ROLE_USER;
@@ -33,6 +35,7 @@ function roundMoney(value: number) {
 export function normalizeAdminDashboardRole(value: unknown): AdminDashboardRole {
   const normalized = String(value ?? '').trim().toUpperCase();
   if (normalized === ADMIN_ROLE_SUPER_ADMIN) return ADMIN_ROLE_SUPER_ADMIN;
+  if (normalized === ADMIN_ROLE_ADMIN) return ADMIN_ROLE_ADMIN;
   if (normalized === ADMIN_ROLE_COUNTRY_ADMIN) return ADMIN_ROLE_COUNTRY_ADMIN;
   if (normalized === ADMIN_ROLE_DIVISION_ADMIN) return ADMIN_ROLE_DIVISION_ADMIN;
   return ADMIN_ROLE_USER;

@@ -1,8 +1,9 @@
 export declare const ADMIN_ROLE_SUPER_ADMIN = "SUPER_ADMIN";
+export declare const ADMIN_ROLE_ADMIN = "ADMIN";
 export declare const ADMIN_ROLE_COUNTRY_ADMIN = "COUNTRY_ADMIN";
 export declare const ADMIN_ROLE_DIVISION_ADMIN = "DIVISION_ADMIN";
 export declare const ADMIN_ROLE_USER = "USER";
-export type AdminDashboardRole = typeof ADMIN_ROLE_SUPER_ADMIN | typeof ADMIN_ROLE_COUNTRY_ADMIN | typeof ADMIN_ROLE_DIVISION_ADMIN | typeof ADMIN_ROLE_USER;
+export type AdminDashboardRole = typeof ADMIN_ROLE_SUPER_ADMIN | typeof ADMIN_ROLE_ADMIN | typeof ADMIN_ROLE_COUNTRY_ADMIN | typeof ADMIN_ROLE_DIVISION_ADMIN | typeof ADMIN_ROLE_USER;
 export type RevenueBreakdown = {
     gross_amount: number;
     platform_fee: number;

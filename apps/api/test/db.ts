@@ -1,6 +1,7 @@
-﻿import { Pool } from 'pg';
 import fs from 'fs';
 import path from 'path';
+import { Pool } from 'pg';
+import { fileURLToPath } from 'url';
 
 export function getTestPool() {
   const url = process.env.TEST_DATABASE_URL;
@@ -9,7 +10,10 @@ export function getTestPool() {
 }
 
 export async function applySchema(pool: Pool) {
-  const schemaPath = path.resolve(process.cwd(), 'apps/api/sql/schema.sql');
+  const schemaPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../sql/schema.sql'
+  );
   const sql = fs.readFileSync(schemaPath, 'utf8');
   await pool.query(sql);
 }

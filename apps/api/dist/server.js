@@ -6,13 +6,63 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
-import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
+import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_CONTRACTS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_JOBS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WALLETS, ADMIN_MODULE_WITHDRAWALS, } from '@prime/shared';
 import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
+import { hasAdminModuleAccess, loadDashboardAccessContext, } from './services/adminTenant.js';
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
+    const resolveAdminModuleForPath = (value) => {
+        const path = value.split('?')[0] ?? value;
+        const normalized = path.startsWith('/api/') ? path.slice(4) : path;
+        if (normalized === '/admin/overview')
+            return ADMIN_MODULE_OVERVIEW;
+        if (normalized.startsWith('/admin/audit'))
+            return ADMIN_MODULE_AUDIT_LOGS;
+        if (normalized.startsWith('/admin/finance'))
+            return ADMIN_MODULE_FINANCE;
+        if (normalized.startsWith('/admin/verification-sessions')) {
+            return ADMIN_MODULE_SESSIONS;
+        }
+        if (normalized.startsWith('/admin/campaign-drafts'))
+            return ADMIN_MODULE_DRAFTS;
+        if (normalized.startsWith('/admin/trust') ||
+            normalized.startsWith('/admin/device-fingerprints')) {
+            return ADMIN_MODULE_RISK;
+        }
+        if (normalized.startsWith('/admin/wallet-withdrawals')) {
+            return ADMIN_MODULE_WITHDRAWALS;
+        }
+        if (normalized.startsWith('/admin/users'))
+            return ADMIN_MODULE_USERS;
+        if (normalized.startsWith('/admin/admins')) {
+            return ADMIN_MODULE_ADMIN_MANAGEMENT;
+        }
+        if (normalized.startsWith('/admin/campaigns'))
+            return ADMIN_MODULE_CAMPAIGNS;
+        if (normalized.startsWith('/admin/proofs'))
+            return ADMIN_MODULE_PROOFS;
+        if (normalized.startsWith('/admin/wallets'))
+            return ADMIN_MODULE_WALLETS;
+        if (normalized.startsWith('/admin/escrows'))
+            return ADMIN_MODULE_ESCROWS;
+        if (normalized.startsWith('/admin/payouts'))
+            return ADMIN_MODULE_MANAGER_PAYOUTS;
+        if (normalized.startsWith('/admin/payout-requests')) {
+            return ADMIN_MODULE_PAYOUT_REQUESTS;
+        }
+        if (normalized.startsWith('/admin/contracts'))
+            return ADMIN_MODULE_CONTRACTS;
+        if (normalized.startsWith('/admin/jobs'))
+            return ADMIN_MODULE_JOBS;
+        if (normalized.startsWith('/admin/yo-uganda') ||
+            normalized.startsWith('/admin/flutterwave')) {
+            return ADMIN_MODULE_GATEWAY;
+        }
+        return null;
+    };
     const app = Fastify({
         pluginTimeout: Number(process.env.FASTIFY_PLUGIN_TIMEOUT ?? 30000),
         logger: {
@@ -188,14 +238,20 @@ export function buildServer() {
                     });
                 }
             }
-            const role = request.user?.role;
-            const adminRole = normalizeAdminDashboardRole(request.user?.admin_role);
-            if (adminRole !== ADMIN_ROLE_SUPER_ADMIN &&
-                adminRole !== ADMIN_ROLE_COUNTRY_ADMIN &&
-                adminRole !== ADMIN_ROLE_DIVISION_ADMIN &&
-                role !== 'ADMIN') {
+            const access = await withTransaction(async (client) => loadDashboardAccessContext(client, userId));
+            if (!access || access.admin_role === 'USER') {
                 return reply.code(403).send({ error: 'forbidden' });
             }
+            if (access.admin_status !== 'ACTIVE') {
+                return reply.code(403).send({
+                    error: access.admin_status === 'SUSPENDED' ? 'admin_suspended' : 'forbidden',
+                });
+            }
+            const requiredModule = resolveAdminModuleForPath(request.url);
+            if (requiredModule && !hasAdminModuleAccess(access, requiredModule)) {
+                return reply.code(403).send({ error: 'forbidden' });
+            }
+            request.adminAccess = access;
         }
         catch {
             return reply.code(401).send({ error: 'unauthorized' });

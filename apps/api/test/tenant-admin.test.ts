@@ -13,6 +13,7 @@ async function resetDatabase() {
   if (!pool) return;
   await pool.query(`
     TRUNCATE TABLE
+      admin_audit_logs,
       payouts,
       earnings_ledger,
       division_admins,
@@ -237,6 +238,145 @@ describe('Tenant admin architecture', () => {
       },
     });
     expect(valid.json().token).toEqual(expect.any(String));
+  });
+
+  it('lets a super admin create, permission, and suspend an admin account with audit logs', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const superAdmin = await insertUser({
+      email: 'super-admin@prime.test',
+      phone: '+256700000001',
+      admin_role: 'SUPER_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const superToken = app.jwt.sign(
+      buildAuthClaims({
+        ...superAdmin,
+        country_id: ug.id,
+      })
+    );
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/admin/admins',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        full_name: 'Scoped Admin',
+        email: 'scoped-admin@prime.test',
+        phone: '+256700000002',
+        password: 'AdminPass123!',
+        role: 'ADMIN',
+        module_keys: [],
+        country_ids: [ug.id],
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const createdBody = created.json() as {
+      admin: { id: string; role: string; admin_status: string };
+    };
+    expect(createdBody.admin).toMatchObject({
+      role: 'ADMIN',
+      admin_status: 'ACTIVE',
+    });
+
+    const permissioned = await app.inject({
+      method: 'PUT',
+      url: `/admin/admins/${createdBody.admin.id}/permissions`,
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        module_keys: ['USERS'],
+      },
+    });
+    expect(permissioned.statusCode).toBe(200);
+    expect(permissioned.json()).toMatchObject({
+      admin: {
+        id: createdBody.admin.id,
+      },
+    });
+
+    const createdUserRes = await pool.query(
+      `
+      SELECT *
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [createdBody.admin.id]
+    );
+    const createdUser = createdUserRes.rows[0];
+    expect(createdUser).toBeTruthy();
+
+    const adminToken = app.jwt.sign(
+      buildAuthClaims({
+        ...createdUser,
+        admin_role: 'ADMIN',
+        country_id: ug.id,
+      })
+    );
+
+    const overview = await app.inject({
+      method: 'GET',
+      url: '/admin/overview',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(overview.statusCode).toBe(200);
+
+    const usersAllowed = await app.inject({
+      method: 'GET',
+      url: '/admin/users',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(usersAllowed.statusCode).toBe(200);
+
+    const contractsBlocked = await app.inject({
+      method: 'GET',
+      url: '/admin/contracts',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(contractsBlocked.statusCode).toBe(403);
+
+    const suspended = await app.inject({
+      method: 'PATCH',
+      url: `/admin/admins/${createdBody.admin.id}/status`,
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        status: 'SUSPENDED',
+      },
+    });
+    expect(suspended.statusCode).toBe(200);
+    expect(suspended.json()).toMatchObject({
+      admin: {
+        id: createdBody.admin.id,
+        admin_status: 'SUSPENDED',
+      },
+    });
+
+    const suspendedOverview = await app.inject({
+      method: 'GET',
+      url: '/admin/overview',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(suspendedOverview.statusCode).toBe(403);
+    expect(suspendedOverview.json()).toMatchObject({
+      error: 'admin_suspended',
+    });
+
+    const auditRows = await pool.query(
+      `
+      SELECT action
+      FROM admin_audit_logs
+      WHERE target_id = $1
+      ORDER BY created_at ASC
+      `,
+      [createdBody.admin.id]
+    );
+    expect(auditRows.rows.map((row) => row.action)).toEqual(
+      expect.arrayContaining([
+        'ADMIN_CREATED',
+        'ADMIN_PERMISSIONS_ASSIGNED',
+        'ADMIN_SUSPENDED',
+      ])
+    );
   });
 
   it('enforces RBAC boundaries for super, country, and division admins', async () => {
