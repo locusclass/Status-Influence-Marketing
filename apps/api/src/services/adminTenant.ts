@@ -605,6 +605,9 @@ export function requireRole(roles: AdminDashboardRole[]) {
     }
 
     const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
     const access = await withTransaction(async (client) =>
       loadDashboardAccessContext(client, userId)
     );

@@ -1770,6 +1770,9 @@ async function listThreadOffers(client, threadId) {
 }
 export async function chatRoutes(app) {
     app.addHook('onReady', async () => {
+        if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+            return;
+        }
         await withTransaction(async (client) => {
             await ensureChatSchema(client);
             await ensurePromoterReviewsSchema(client);

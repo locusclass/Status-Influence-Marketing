@@ -14,6 +14,8 @@ import { ensureUserSignalSchema, touchUserPresence, } from './services/userSigna
 import { hasAdminModuleAccess, loadDashboardAccessContext, } from './services/adminTenant.js';
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
+    const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
+    const adminTestRouteProfile = process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() === 'admin';
     const resolveAdminModuleForPath = (value) => {
         const path = value.split('?')[0] ?? value;
         const normalized = path.startsWith('/api/') ? path.slice(4) : path;
@@ -136,6 +138,9 @@ export function buildServer() {
     });
     app.register(multipart);
     app.addHook('onReady', async () => {
+        if (skipOptionalStartupWarmups) {
+            return;
+        }
         await withTransaction(async (client) => {
             await ensureUserSignalSchema(client);
             await ensurePolicyAcceptanceColumns(client);
@@ -197,76 +202,74 @@ export function buildServer() {
     app.decorate('authenticate', async (request, reply) => {
         try {
             await request.jwtVerify();
-            const userId = String(request.user?.sub ?? '').trim();
-            if (!userId) {
-                return reply.code(401).send({ error: 'unauthorized' });
-            }
-            if (userId) {
-                void touchUserPresence(userId).catch(() => { });
-            }
-            if (isPolicyAcceptanceBypassRoute(request)) {
-                return;
-            }
-            const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
-            if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
-                return reply.code(428).send({
-                    error: 'policy_acceptance_required',
-                    ...buildPolicyAcceptanceState(acceptance ?? {}),
-                });
-            }
         }
         catch {
             reply.code(401).send({ error: 'unauthorized' });
+            return;
+        }
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId) {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
+        void touchUserPresence(userId).catch(() => { });
+        if (isPolicyAcceptanceBypassRoute(request)) {
+            return;
+        }
+        const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
+        if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+            return reply.code(428).send({
+                error: 'policy_acceptance_required',
+                ...buildPolicyAcceptanceState(acceptance ?? {}),
+            });
         }
     });
     app.decorate('adminOnly', async (request, reply) => {
         try {
             await request.jwtVerify();
-            const userId = String(request.user?.sub ?? '').trim();
-            if (!userId) {
-                return reply.code(401).send({ error: 'unauthorized' });
-            }
-            if (userId) {
-                void touchUserPresence(userId).catch(() => { });
-            }
-            if (!isPolicyAcceptanceBypassRoute(request)) {
-                const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
-                if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
-                    return reply.code(428).send({
-                        error: 'policy_acceptance_required',
-                        ...buildPolicyAcceptanceState(acceptance ?? {}),
-                    });
-                }
-            }
-            const access = await withTransaction(async (client) => loadDashboardAccessContext(client, userId));
-            if (!access || access.admin_role === 'USER') {
-                return reply.code(403).send({ error: 'forbidden' });
-            }
-            if (access.admin_status !== 'ACTIVE') {
-                return reply.code(403).send({
-                    error: access.admin_status === 'SUSPENDED' ? 'admin_suspended' : 'forbidden',
-                });
-            }
-            const requiredModule = resolveAdminModuleForPath(request.url);
-            if (requiredModule && !hasAdminModuleAccess(access, requiredModule)) {
-                return reply.code(403).send({ error: 'forbidden' });
-            }
-            request.adminAccess = access;
         }
         catch {
             return reply.code(401).send({ error: 'unauthorized' });
         }
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId) {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
+        void touchUserPresence(userId).catch(() => { });
+        // Admin dashboard access is enforced by RBAC and admin-account status.
+        // End-user policy acceptance should not block internal dashboard access.
+        const access = await withTransaction(async (client) => loadDashboardAccessContext(client, userId));
+        if (!access || access.admin_role === 'USER') {
+            return reply.code(403).send({ error: 'forbidden' });
+        }
+        if (access.admin_status !== 'ACTIVE') {
+            return reply.code(403).send({
+                error: access.admin_status === 'SUSPENDED' ? 'admin_suspended' : 'forbidden',
+            });
+        }
+        const requiredModule = resolveAdminModuleForPath(request.url);
+        if (requiredModule && !hasAdminModuleAccess(access, requiredModule)) {
+            return reply.code(403).send({ error: 'forbidden' });
+        }
+        request.adminAccess = access;
     });
-    app.register(swagger, {
-        openapi: {
-            info: {
-                title: 'Prime API',
-                version: '0.1.0',
+    if (!skipOptionalStartupWarmups) {
+        app.register(swagger, {
+            openapi: {
+                info: {
+                    title: 'Prime API',
+                    version: '0.1.0',
+                },
             },
-        },
-    });
-    app.register(swaggerUi, { routePrefix: '/docs' });
+        });
+        app.register(swaggerUi, { routePrefix: '/docs' });
+    }
     const registerRoutes = (instance) => {
+        if (adminTestRouteProfile) {
+            instance.register(healthRoutes);
+            instance.register(adminRoutes);
+            instance.register(tenantAdminRoutes);
+            return;
+        }
         instance.register(healthRoutes);
         instance.register(authRoutes);
         instance.register(campaignRoutes);
@@ -281,9 +284,14 @@ export function buildServer() {
     };
     // Routes
     registerRoutes(app);
-    app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
+    if (!adminTestRouteProfile) {
+        app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
+    }
     // Final payment-provider configuration
     app.addHook('onReady', async () => {
+        if (skipOptionalStartupWarmups) {
+            return;
+        }
         await withTransaction(async (client) => {
             await ensureUserSignalSchema(client);
         });

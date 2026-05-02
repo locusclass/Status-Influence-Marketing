@@ -202,6 +202,8 @@ describe('Tenant admin architecture', () => {
   beforeAll(async () => {
     process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
     process.env.ADMIN_ACCESS_PHRASE ??= 'prime-status-emergency';
+    process.env.SKIP_OPTIONAL_STARTUP_WARMUPS = '1';
+    process.env.TEST_ROUTE_SCOPE = 'admin';
     const serverModule = await import('../src/server.js');
     app = serverModule.buildServer();
     await applySchema(pool);
@@ -215,6 +217,8 @@ describe('Tenant admin architecture', () => {
   afterAll(async () => {
     await app.close();
     await pool.end();
+    delete process.env.SKIP_OPTIONAL_STARTUP_WARMUPS;
+    delete process.env.TEST_ROUTE_SCOPE;
   });
 
   it('validates the emergency admin access phrase before issuing a token', async () => {
@@ -238,6 +242,43 @@ describe('Tenant admin architecture', () => {
       },
     });
     expect(valid.json().token).toEqual(expect.any(String));
+  });
+
+  it('lets the emergency super admin reach dashboard routes without a stored user record', async () => {
+    const accessResponse = await app.inject({
+      method: 'POST',
+      url: '/admin/access',
+      payload: { phrase: 'prime-status-emergency' },
+    });
+    expect(accessResponse.statusCode).toBe(200);
+
+    const token = accessResponse.json().token as string;
+
+    const dashboardAccess = await app.inject({
+      method: 'GET',
+      url: '/dashboard/access',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(dashboardAccess.statusCode).toBe(200);
+    expect(dashboardAccess.json()).toMatchObject({
+      access: {
+        user_id: 'ariaka-access',
+        admin_role: 'SUPER_ADMIN',
+        admin_status: 'ACTIVE',
+      },
+    });
+
+    const overview = await app.inject({
+      method: 'GET',
+      url: '/admin/overview',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(overview.statusCode).toBe(200);
+    expect(overview.json()).toMatchObject({
+      users: expect.any(Number),
+      campaigns: expect.any(Number),
+      proofs: expect.any(Number),
+    });
   });
 
   it('lets a super admin create, permission, and suspend an admin account with audit logs', async () => {

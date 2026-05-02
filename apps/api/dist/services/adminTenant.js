@@ -412,6 +412,9 @@ export function requireRole(roles) {
             return reply.code(401).send({ error: 'unauthorized' });
         }
         const userId = String(request.user?.sub ?? '').trim();
+        if (!userId) {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
         const access = await withTransaction(async (client) => loadDashboardAccessContext(client, userId));
         if (!access || access.admin_role === ADMIN_ROLE_USER) {
             return reply.code(403).send({ error: 'forbidden' });

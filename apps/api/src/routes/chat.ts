@@ -2264,6 +2264,9 @@ async function listThreadOffers(client: any, threadId: string) {
 
 export async function chatRoutes(app: FastifyInstance) {
   app.addHook('onReady', async () => {
+    if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+      return;
+    }
     await withTransaction(async (client) => {
       await ensureChatSchema(client);
       await ensurePromoterReviewsSchema(client);
