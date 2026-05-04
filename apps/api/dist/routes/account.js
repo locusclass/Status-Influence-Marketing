@@ -849,6 +849,42 @@ export async function accountRoutes(app) {
             };
         });
     });
+    // ── Promoter account verification recording ─────────────────────────────────
+    // Promoters submit a WhatsApp status screen recording for admin to review
+    // and set their verified 12h viewer count (max_status_viewers_12h).
+    app.post('/account/verification/recording', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.sub;
+        const body = z
+            .object({ video_url: z.string().url().max(2048) })
+            .safeParse(request.body);
+        if (!body.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: body.error.issues };
+        }
+        return withTransaction(async (client) => {
+            // One pending submission at a time per user
+            const existing = await client.query(`SELECT id FROM promoter_verification_recordings
+           WHERE user_id=$1 AND status='PENDING' LIMIT 1`, [userId]);
+            if (existing.rows[0]) {
+                reply.code(409);
+                return { error: 'verification_recording_pending' };
+            }
+            const res = await client.query(`INSERT INTO promoter_verification_recordings (user_id, video_url)
+           VALUES ($1, $2)
+           RETURNING id, status, created_at`, [userId, body.data.video_url]);
+            return { recording: res.rows[0] };
+        });
+    });
+    app.get('/account/verification/recording', { preHandler: [app.authenticate] }, async (request) => {
+        const userId = request.user.sub;
+        return withTransaction(async (client) => {
+            const res = await client.query(`SELECT id, status, approved_viewer_count, admin_note, reviewed_at, created_at
+           FROM promoter_verification_recordings
+           WHERE user_id=$1
+           ORDER BY created_at DESC LIMIT 5`, [userId]);
+            return { recordings: res.rows };
+        });
+    });
     app.delete('/account/me', { preHandler: [app.authenticate] }, async (request) => {
         const userSub = request.user.sub;
         const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;

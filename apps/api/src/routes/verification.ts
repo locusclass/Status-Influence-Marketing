@@ -98,6 +98,14 @@ function validateStrictClientMeta(clientMeta: any, script: any): string | null {
     return 'client_meta_recording_window_invalid';
   }
   const duration = Math.round((stoppedAt - startedAt) / 1000);
+
+  // Simplified recording mode: no scripted steps — accept any recording between 10s and 10 min.
+  const hasSteps = Array.isArray(clientMeta?.steps) && (clientMeta.steps as unknown[]).length > 0;
+  if (!hasSteps) {
+    if (duration < 10 || duration > 600) return 'client_meta_recording_duration_invalid';
+    return null;
+  }
+
   if (duration < MIN_RECORDING_SECONDS || duration > MAX_RECORDING_SECONDS) {
     return 'client_meta_recording_duration_invalid';
   }

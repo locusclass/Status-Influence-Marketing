@@ -29,7 +29,8 @@ const ResetPasswordSchema = z.object({
 });
 const UpdateProofSchema = z.object({
     status: z.enum(['PENDING', 'VERIFIED', 'REJECTED', 'MANUAL_REVIEW']).optional(),
-    decision: z.enum(['VERIFIED', 'REJECTED', 'MANUAL_REVIEW']).optional()
+    decision: z.enum(['VERIFIED', 'REJECTED', 'MANUAL_REVIEW']).optional(),
+    observed_views: z.number().int().nonnegative().optional(),
 });
 const UpdatePayoutSchema = z.object({
     status: z.enum(['REQUESTED', 'PROCESSING', 'PAID', 'FAILED'])
@@ -2556,7 +2557,7 @@ export async function adminRoutes(app) {
     app.patch('/admin/proofs/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         const body = UpdateProofSchema.parse(request.body);
-        if (!body.status && !body.decision) {
+        if (!body.status && !body.decision && body.observed_views === undefined) {
             reply.code(400);
             return { error: 'missing_fields' };
         }
@@ -2578,9 +2579,10 @@ export async function adminRoutes(app) {
             }
             const updated = await client.query(`UPDATE proofs
          SET status=COALESCE($2, status),
-             decision=COALESCE($3, decision)
+             decision=COALESCE($3, decision),
+             observed_views=COALESCE($4, observed_views)
          WHERE id=$1
-         RETURNING *`, [params.id, body.status ?? null, body.decision ?? null]);
+         RETURNING *`, [params.id, body.status ?? null, body.decision ?? null, body.observed_views ?? null]);
             if (updated.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_PROOF', 'proof', params.id, body);
                 const proof = updated.rows[0];
@@ -2596,6 +2598,126 @@ export async function adminRoutes(app) {
             return { error: 'proof_not_found' };
         }
         return { proof: res };
+    });
+    // ── Promoter account verification recordings (admin review) ─────────────────
+    app.get('/admin/user-verifications', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const limit = Math.min(Number(query?.limit ?? 50), 200);
+        const offset = Number(query?.offset ?? 0);
+        const status = typeof query?.status === 'string' ? query.status : 'PENDING';
+        return withTransaction(async (client) => {
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (status !== 'ALL') {
+                conditions.push(`pvr.status=$${idx}`);
+                params.push(status);
+                idx++;
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`SELECT
+           pvr.id,
+           pvr.user_id,
+           pvr.video_url,
+           pvr.status,
+           pvr.approved_viewer_count,
+           pvr.admin_note,
+           pvr.reviewed_at,
+           pvr.created_at,
+           u.full_name AS user_name,
+           u.email     AS user_email,
+           u.phone     AS user_phone,
+           u.max_status_viewers_12h AS current_verified_viewers
+         FROM promoter_verification_recordings pvr
+         JOIN users u ON u.id = pvr.user_id
+         ${where}
+         ORDER BY pvr.created_at DESC
+         LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
+            return { verifications: res.rows };
+        });
+    });
+    app.patch('/admin/user-verifications/:id/approve', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const body = z.object({
+            viewer_count: z.number().int().positive(),
+            admin_note: z.string().trim().max(500).optional(),
+        }).parse(request.body);
+        return withTransaction(async (client) => {
+            // Load the recording
+            const recRes = await client.query(`SELECT pvr.*, u.id AS resolved_user_id
+         FROM promoter_verification_recordings pvr
+         JOIN users u ON u.id = pvr.user_id
+         WHERE pvr.id=$1 LIMIT 1`, [params.id]);
+            const rec = recRes.rows[0];
+            if (!rec) {
+                reply.code(404);
+                return { error: 'verification_not_found' };
+            }
+            if (rec.status !== 'PENDING') {
+                reply.code(409);
+                return { error: 'already_reviewed' };
+            }
+            const adminUserId = request.user.sub;
+            // Mark recording as approved
+            await client.query(`UPDATE promoter_verification_recordings
+         SET status='APPROVED',
+             approved_viewer_count=$2,
+             admin_note=$3,
+             reviewed_by_user_id=$4,
+             reviewed_at=now(),
+             updated_at=now()
+         WHERE id=$1`, [params.id, body.viewer_count, body.admin_note ?? null, adminUserId]);
+            // Apply the verified viewer count to the user's account
+            await client.query(`UPDATE users SET max_status_viewers_12h=$2 WHERE id=$1`, [rec.resolved_user_id, body.viewer_count]);
+            // Notify the user
+            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'ACCOUNT_VERIFIED',
+                 'Viewer count verified',
+                 $2,
+                 now())
+         ON CONFLICT DO NOTHING`, [
+                rec.resolved_user_id,
+                `Your WhatsApp status viewer count has been set to ${body.viewer_count} views. You can now accept campaigns.`,
+            ]);
+            await logAudit(client, adminUserId, 'APPROVE_USER_VERIFICATION', 'promoter_verification_recording', params.id, { viewer_count: body.viewer_count });
+            return { ok: true, viewer_count: body.viewer_count };
+        });
+    });
+    app.patch('/admin/user-verifications/:id/reject', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const body = z.object({
+            admin_note: z.string().trim().min(1).max(500).optional(),
+        }).safeParse(request.body);
+        return withTransaction(async (client) => {
+            const recRes = await client.query(`SELECT pvr.user_id FROM promoter_verification_recordings pvr WHERE pvr.id=$1 LIMIT 1`, [params.id]);
+            const rec = recRes.rows[0];
+            if (!rec) {
+                reply.code(404);
+                return { error: 'verification_not_found' };
+            }
+            const adminUserId = request.user.sub;
+            const note = body.success ? (body.data.admin_note ?? null) : null;
+            await client.query(`UPDATE promoter_verification_recordings
+         SET status='REJECTED',
+             admin_note=$2,
+             reviewed_by_user_id=$3,
+             reviewed_at=now(),
+             updated_at=now()
+         WHERE id=$1`, [params.id, note, adminUserId]);
+            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'ACCOUNT_VERIFICATION_REJECTED',
+                 'Verification recording rejected',
+                 $2,
+                 now())
+         ON CONFLICT DO NOTHING`, [
+                rec.user_id,
+                note
+                    ? `Your verification recording was rejected: ${note}. Please re-submit a clearer recording.`
+                    : 'Your verification recording was rejected. Please re-submit a clearer recording showing your viewer list.',
+            ]);
+            await logAudit(client, adminUserId, 'REJECT_USER_VERIFICATION', 'promoter_verification_recording', params.id, { admin_note: note });
+            return { ok: true };
+        });
     });
     app.get('/admin/wallets', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
