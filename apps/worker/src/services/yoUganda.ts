@@ -71,7 +71,7 @@ async function postYoRequest(endpoint: string, fields: Record<string, string>) {
       'Content-Type': 'application/x-www-form-urlencoded',
       Accept: 'application/x-www-form-urlencoded, text/xml, */*',
     },
-    body: formBody,
+    body: formBody.toString(),
   });
 
   const text = await res.text();
@@ -114,8 +114,7 @@ export async function requestPayout(input: {
   receiverPhone: string;
   receiverNetwork?: string;
 }) {
-  const fields: Record<string, string> = {};
-  const raw: Record<string, string | number | null | undefined> = {
+  const xmlFields: Record<string, string | number | null | undefined> = {
     Authorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
@@ -128,11 +127,9 @@ export async function requestPayout(input: {
     ExternalReference: input.reference,
     ProviderReferenceText: input.reference,
   };
-  for (const [key, value] of Object.entries(raw)) {
-    if (value != null && String(value).trim()) {
-      fields[key] = String(value);
-    }
-  }
+  const fields: Record<string, string> = {
+    AutoCreate_request: buildRequestXml(xmlFields),
+  };
 
   try {
     return await postYoRequest(resolveYoBaseUrl(), fields);

@@ -178,7 +178,7 @@ async function postYoRequest(endpoint, fields) {
                 Accept: 'application/x-www-form-urlencoded, text/xml, */*',
                 'X-Trace-Id': buildTraceId(),
             },
-            body: formBody,
+            body: formBody.toString(),
         });
         text = await res.text();
     }
@@ -226,18 +226,16 @@ async function yoRequest(request) {
     if (!hasYoCredentials()) {
         throw new Error('YO Uganda API credentials are not configured');
     }
-    const fields = {};
-    const combined = {
+    const xmlFields = {
         Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
         ...request,
     };
-    for (const [key, value] of Object.entries(combined)) {
-        if (value != null && String(value).trim()) {
-            fields[key] = String(value);
-        }
-    }
+    // YO Uganda API 3.x: POST form field AutoCreate_request containing the XML body
+    const fields = {
+        AutoCreate_request: buildYoRequestXml(xmlFields),
+    };
     const endpoints = uniqueEndpoints();
     const failoverEndpoints = directFailoverEndpoints();
     let lastError = null;

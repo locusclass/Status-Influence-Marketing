@@ -50,7 +50,7 @@ async function postYoRequest(endpoint, fields) {
             'Content-Type': 'application/x-www-form-urlencoded',
             Accept: 'application/x-www-form-urlencoded, text/xml, */*',
         },
-        body: formBody,
+        body: formBody.toString(),
     });
     const text = await res.text();
     console.info(`[YO] ← status=${res.status} ok=${res.ok} snippet=${JSON.stringify(text.slice(0, 100))}`);
@@ -78,8 +78,7 @@ function isGatewayFailoverError(error, endpoint) {
         /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message));
 }
 export async function requestPayout(input) {
-    const fields = {};
-    const raw = {
+    const xmlFields = {
         Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
@@ -92,11 +91,9 @@ export async function requestPayout(input) {
         ExternalReference: input.reference,
         ProviderReferenceText: input.reference,
     };
-    for (const [key, value] of Object.entries(raw)) {
-        if (value != null && String(value).trim()) {
-            fields[key] = String(value);
-        }
-    }
+    const fields = {
+        AutoCreate_request: buildRequestXml(xmlFields),
+    };
     try {
         return await postYoRequest(resolveYoBaseUrl(), fields);
     }
