@@ -52,27 +52,16 @@ function buildRequestXml(request: Record<string, string | number | null | undefi
 async function postYoRequest(endpoint: string, fields: Record<string, string>) {
   const proxyMode = !isDirectYoTaskUrl(endpoint);
 
-  // Map PascalCase fields to lowercase fields expected by YO/proxy in form-encoded mode
   const formBody = new URLSearchParams();
   for (const [key, value] of Object.entries(fields)) {
-    let mappedKey = key.toLowerCase();
-    if (key === 'APIUsername') mappedKey = 'username';
-    if (key === 'APIPassword') mappedKey = 'password';
-    if (key === 'ExternalReference') mappedKey = 'external_reference';
-    if (key === 'InternalReference') mappedKey = 'internal_reference';
-    if (key === 'ProviderReferenceText') mappedKey = 'provider_reference_text';
-    if (key === 'AccountProviderCode') mappedKey = 'account_provider_code';
-    if (key === 'NonBlocking') mappedKey = 'non_blocking';
-
-    // Map Authorization to lowercase 'authorization'
-    if (key === 'Authorization') mappedKey = 'authorization';
-
-    formBody.append(mappedKey, value);
+    formBody.append(key, value);
   }
 
   const bodyKeys = Array.from(formBody.keys());
+  const hasAuthorization = bodyKeys.includes('Authorization');
+
   console.info(
-    `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}]`
+    `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasAuthorization=${hasAuthorization}`
   );
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
