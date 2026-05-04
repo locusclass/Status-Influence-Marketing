@@ -3413,6 +3413,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         `SELECT
            c.id, c.title, c.platform, c.execution_mode, c.delivery_model,
            c.budget_total, c.payout_amount, c.impression_target,
+           c.media_url, c.media_text, c.media_type,
+           c.terms_requirement, c.terms_keep_hours, c.terms_min_views,
+           c.start_date, c.end_date, c.visibility,
            c.approval_status, c.approval_deadline, c.approved_at,
            c.created_at,
            u.id AS advertiser_id,
@@ -3461,6 +3464,60 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       );
 
       await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN', 'campaign', params.id, {});
+      return { ok: true };
+    });
+  });
+
+  app.patch('/admin/campaigns/:id/reject', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = z.object({ reason: z.string().trim().min(1).max(500) }).safeParse(request.body);
+    if (!body.success) { reply.code(400); return { error: 'reason_required' }; }
+    const adminUserId = (request.user as any).sub as string;
+    return withTransaction(async (client) => {
+      const campRes = await client.query(
+        `SELECT c.id, c.advertiser_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`,
+        [params.id]
+      );
+      const camp = campRes.rows[0];
+      if (!camp) { reply.code(404); return { error: 'campaign_not_found' }; }
+      await client.query(
+        `UPDATE campaigns SET approval_status='REJECTED', approved_at=now(), approved_by_user_id=$2 WHERE id=$1`,
+        [params.id, adminUserId]
+      );
+      await client.query(
+        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_REJECTED', 'Campaign rejected', $2, now())
+         ON CONFLICT DO NOTHING`,
+        [camp.advertiser_id, `Your campaign "${camp.title}" was rejected: ${body.data.reason}`]
+      );
+      await logAudit(client, adminUserId, 'REJECT_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
+      return { ok: true };
+    });
+  });
+
+  app.patch('/admin/campaigns/:id/return-for-edit', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = z.object({ reason: z.string().trim().min(1).max(500) }).safeParse(request.body);
+    if (!body.success) { reply.code(400); return { error: 'reason_required' }; }
+    const adminUserId = (request.user as any).sub as string;
+    return withTransaction(async (client) => {
+      const campRes = await client.query(
+        `SELECT c.id, c.advertiser_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`,
+        [params.id]
+      );
+      const camp = campRes.rows[0];
+      if (!camp) { reply.code(404); return { error: 'campaign_not_found' }; }
+      await client.query(
+        `UPDATE campaigns SET approval_status='RETURNED', approved_by_user_id=$2 WHERE id=$1`,
+        [params.id, adminUserId]
+      );
+      await client.query(
+        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_RETURNED', 'Campaign returned for edit', $2, now())
+         ON CONFLICT DO NOTHING`,
+        [camp.advertiser_id, `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`]
+      );
+      await logAudit(client, adminUserId, 'RETURN_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
       return { ok: true };
     });
   });
