@@ -64,8 +64,8 @@ async function postYoRequest(endpoint: string, fields: Record<string, string>) {
     if (key === 'AccountProviderCode') mappedKey = 'account_provider_code';
     if (key === 'NonBlocking') mappedKey = 'non_blocking';
 
-    // Keep Authorization as is if it's already special, but most likely it should be lowercase too if it's a field
-    if (key === 'Authorization') mappedKey = 'Authorization';
+    // Map Authorization to lowercase 'authorization'
+    if (key === 'Authorization') mappedKey = 'authorization';
 
     formBody.append(mappedKey, value);
   }

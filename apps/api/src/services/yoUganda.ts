@@ -227,9 +227,8 @@ async function postYoRequest(
     if (key === 'AccountProviderCode') mappedKey = 'account_provider_code';
     if (key === 'NonBlocking') mappedKey = 'non_blocking';
 
-    // Keep Authorization as is if it's already special, but most likely it should be lowercase too if it's a field
-    // however, traditionally Authorization is often a header, but here it's being sent as a field.
-    if (key === 'Authorization') mappedKey = 'Authorization';
+    // Map Authorization to lowercase 'authorization'
+    if (key === 'Authorization') mappedKey = 'authorization';
 
     formBody.append(mappedKey, value);
   }

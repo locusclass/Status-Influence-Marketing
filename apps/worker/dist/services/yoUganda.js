@@ -54,9 +54,9 @@ async function postYoRequest(endpoint, fields) {
             mappedKey = 'account_provider_code';
         if (key === 'NonBlocking')
             mappedKey = 'non_blocking';
-        // Keep Authorization as is if it's already special, but most likely it should be lowercase too if it's a field
+        // Map Authorization to lowercase 'authorization'
         if (key === 'Authorization')
-            mappedKey = 'Authorization';
+            mappedKey = 'authorization';
         formBody.append(mappedKey, value);
     }
     const bodyKeys = Array.from(formBody.keys());
