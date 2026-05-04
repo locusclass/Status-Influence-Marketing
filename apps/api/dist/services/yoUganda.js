@@ -226,16 +226,18 @@ async function yoRequest(request) {
     if (!hasYoCredentials()) {
         throw new Error('YO Uganda API credentials are not configured');
     }
-    const xmlFields = {
+    const fields = {};
+    const combined = {
         Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
         ...request,
     };
-    // YO Uganda API 3.x: POST form field AutoCreate_request containing the XML body
-    const fields = {
-        AutoCreate_request: buildYoRequestXml(xmlFields),
-    };
+    for (const [key, value] of Object.entries(combined)) {
+        if (value != null && String(value).trim()) {
+            fields[key] = String(value);
+        }
+    }
     const endpoints = uniqueEndpoints();
     const failoverEndpoints = directFailoverEndpoints();
     let lastError = null;

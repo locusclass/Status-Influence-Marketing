@@ -78,7 +78,8 @@ function isGatewayFailoverError(error, endpoint) {
         /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message));
 }
 export async function requestPayout(input) {
-    const xmlFields = {
+    const fields = {};
+    const raw = {
         Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
@@ -91,9 +92,11 @@ export async function requestPayout(input) {
         ExternalReference: input.reference,
         ProviderReferenceText: input.reference,
     };
-    const fields = {
-        AutoCreate_request: buildRequestXml(xmlFields),
-    };
+    for (const [key, value] of Object.entries(raw)) {
+        if (value != null && String(value).trim()) {
+            fields[key] = String(value);
+        }
+    }
     try {
         return await postYoRequest(resolveYoBaseUrl(), fields);
     }

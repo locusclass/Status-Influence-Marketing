@@ -114,7 +114,8 @@ export async function requestPayout(input: {
   receiverPhone: string;
   receiverNetwork?: string;
 }) {
-  const xmlFields: Record<string, string | number | null | undefined> = {
+  const fields: Record<string, string> = {};
+  const raw: Record<string, string | number | null | undefined> = {
     Authorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
@@ -127,9 +128,11 @@ export async function requestPayout(input: {
     ExternalReference: input.reference,
     ProviderReferenceText: input.reference,
   };
-  const fields: Record<string, string> = {
-    AutoCreate_request: buildRequestXml(xmlFields),
-  };
+  for (const [key, value] of Object.entries(raw)) {
+    if (value != null && String(value).trim()) {
+      fields[key] = String(value);
+    }
+  }
 
   try {
     return await postYoRequest(resolveYoBaseUrl(), fields);
