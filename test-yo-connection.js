@@ -1,12 +1,19 @@
 const http = require('http');
 const crypto = require('crypto');
 
-const targetUrl = new URL('http://34.79.189.141:3000/yo/ybs/task.php');
-const authorization =
-  process.env.YO_PROXY_AUTHORIZATION || '<PROXY_AUTHORIZATION>';
-const apiUsername = process.env.YO_API_USERNAME || '<YO_API_USERNAME>';
-const apiPassword = process.env.YO_API_PASSWORD || '<YO_API_PASSWORD>';
-const missingAuthorizationMessage = 'Parameter <Authorization> is required';
+const targetUrl = new URL(
+  process.env.YO_PROXY_URL || 'http://34.79.189.141:3000/yo'
+);
+const requestUrl = new URL(
+  `${targetUrl.pathname.replace(/\/$/, '')}/ybs/task.php${targetUrl.search}`,
+  targetUrl.origin
+);
+const accountAuthorization =
+  process.env.YO_AUTHORIZATION || '<YO_AUTHORIZATION>';
+const apiUsername = process.env.YO_API_USERNAME || '';
+const apiPassword = process.env.YO_API_PASSWORD || '';
+const missingAuthorizationMessage =
+  'YO_AUTHORIZATION is not set. Required for YO Uganda AccountAuthorization.';
 
 function xmlEscape(value) {
   return String(value)
@@ -27,20 +34,23 @@ function buildRequestXml(fields) {
 }
 
 const requestBody = buildRequestXml({
-  Authorization: authorization,
+  AccountAuthorization: accountAuthorization,
   APIUsername: apiUsername,
   APIPassword: apiPassword,
   Method: 'acdepositfunds',
   Amount: '100',
-  Account: '2567XXXXXXXX',
+  Currency: 'UGX',
+  NonBlocking: 'TRUE',
+  PhoneNumber: '2567XXXXXXXX',
+  Provider: 'MTN',
   Narrative: 'TEST',
 });
 
 const options = {
   method: 'POST',
-  hostname: targetUrl.hostname,
-  port: Number(targetUrl.port || 80),
-  path: `${targetUrl.pathname}${targetUrl.search}`,
+  hostname: requestUrl.hostname,
+  port: Number(requestUrl.port || 80),
+  path: `${requestUrl.pathname}${requestUrl.search}`,
   headers: {
     Accept: 'application/xml, text/xml, */*',
     'Content-Type': 'text/xml',

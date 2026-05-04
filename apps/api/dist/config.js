@@ -34,14 +34,19 @@ function resolveUploadDir() {
     return './uploads';
 }
 const allowDirectApiBypass = allowDirectYoHostBypass(process.env.YO_ALLOW_DIRECT_API_BYPASS);
+export const YO_PROXY_URL_MISSING_MESSAGE = 'YO_PROXY_URL is missing';
+export const YO_AUTHORIZATION_MISSING_MESSAGE = 'YO_AUTHORIZATION is not set. Required for YO Uganda AccountAuthorization.';
+const configuredYoBaseUrl = stripWrappingQuotes(process.env.YO_PROXY_URL ??
+    process.env.YO_BASE_URL ??
+    process.env.YO_API_URL ??
+    process.env.FLUTTERWAVE_BASE_URL ??
+    '');
 const yoConfig = {
     allowDirectApiBypass,
-    baseUrl: normalizeYoTaskUrl(stripWrappingQuotes(process.env.YO_BASE_URL ??
-        process.env.YO_API_URL ??
-        process.env.FLUTTERWAVE_BASE_URL ??
-        ''), DEFAULT_YO_GATEWAY_TASK_URL, { allowDirectHostBypass: allowDirectApiBypass }),
+    baseUrl: normalizeYoTaskUrl(configuredYoBaseUrl, DEFAULT_YO_GATEWAY_TASK_URL, { allowDirectHostBypass: allowDirectApiBypass }),
     fallbackBaseUrl: normalizeYoTaskUrl(stripWrappingQuotes(process.env.YO_API_URL_FALLBACK ??
         process.env.YO_FALLBACK_BASE_URL ??
+        process.env.YO_PROXY_URL ??
         process.env.YO_BASE_URL ??
         process.env.YO_API_URL ??
         process.env.FLUTTERWAVE_BASE_URL ??
@@ -113,11 +118,21 @@ export function getStartupConfigIssues() {
     if (!config.jwtSecret.trim() || config.jwtSecret === 'dev-secret') {
         issues.push('JWT_SECRET is missing or using the development default');
     }
-    if (!config.yo.apiUsername.trim()) {
-        issues.push('YO_API_USERNAME is missing');
+    if (!configuredYoBaseUrl.trim()) {
+        issues.push(YO_PROXY_URL_MISSING_MESSAGE);
     }
-    if (!config.yo.apiPassword.trim()) {
-        issues.push('YO_API_PASSWORD is missing');
+    if (!config.yo.authorizationCode.trim()) {
+        issues.push(YO_AUTHORIZATION_MISSING_MESSAGE);
+    }
+    const hasYoApiUsername = config.yo.apiUsername.trim().length > 0;
+    const hasYoApiPassword = config.yo.apiPassword.trim().length > 0;
+    if (hasYoApiUsername !== hasYoApiPassword) {
+        if (!hasYoApiUsername) {
+            issues.push('YO_API_USERNAME is missing');
+        }
+        if (!hasYoApiPassword) {
+            issues.push('YO_API_PASSWORD is missing');
+        }
     }
     if (config.yo.allowDirectApiBypass) {
         issues.push('YO_ALLOW_DIRECT_API_BYPASS is enabled, so direct YO hosts can bypass the static-IP gateway');
@@ -145,20 +160,25 @@ export function isFatalStartupIssue(issue) {
     return (issue.includes('DATABASE_URL is missing') ||
         issue.includes('JWT_SECRET is missing') ||
         issue.includes('JWT_SECRET is missing or using the development default') ||
+        issue.includes(YO_PROXY_URL_MISSING_MESSAGE) ||
+        issue.includes(YO_AUTHORIZATION_MISSING_MESSAGE) ||
         issue.includes('FIREBASE_PROJECT_ID is missing') ||
         issue.includes('FIREBASE_CLIENT_EMAIL is missing') ||
         issue.includes('FIREBASE_PRIVATE_KEY is missing') ||
         issue.includes('FIREBASE_STORAGE_BUCKET is missing'));
 }
 export function hasYoCredentials() {
-    return (config.yo.apiUsername.trim().length > 0 &&
-        config.yo.apiPassword.trim().length > 0);
+    return config.yo.authorizationCode.trim().length > 0;
 }
 export function hasValidYoKeys() {
     return hasYoCredentials();
 }
 export function hasYoClientCredentials() {
     return hasYoCredentials();
+}
+export function hasYoLegacyApiCredentials() {
+    return (config.yo.apiUsername.trim().length > 0 &&
+        config.yo.apiPassword.trim().length > 0);
 }
 export function hasYoSecretKey() {
     return false;

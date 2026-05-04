@@ -35,13 +35,14 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
    - `pnpm --filter @prime/worker dev`
 
 ## YO Uganda payment configuration
-- Use live YO Uganda API credentials for production.
-- For production IP whitelisting, set `YO_BASE_URL` to `http://34.79.189.141:3000/yo`.
+- Use YO Uganda `AccountAuthorization` for production collections.
+- For production IP whitelisting, set `YO_PROXY_URL` to `http://34.79.189.141:3000/yo`.
 - The final YO task URL resolves to `http://34.79.189.141:3000/yo/ybs/task.php`.
-- `YO_API_URL` remains supported for backward compatibility, but `YO_BASE_URL` takes priority.
+- `YO_BASE_URL` and `YO_API_URL` remain supported for backward compatibility, but `YO_PROXY_URL` takes priority.
 - Direct YO hosts are rewritten back to the gateway unless `YO_ALLOW_DIRECT_API_BYPASS=true`.
 - Leave `YO_API_URL_FALLBACK` on the gateway unless you explicitly want a different fallback route.
-- Set `YO_API_USERNAME` and `YO_API_PASSWORD`.
+- Set `YO_AUTHORIZATION`.
+- `YO_API_USERNAME` and `YO_API_PASSWORD` are only needed when you intentionally use the legacy direct API credentials.
 - Collections in this codebase use status polling through `/api/payments/yo-uganda/verify`.
 
 ## Railway deployment
@@ -64,10 +65,12 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `GOOGLE_CLIENT_ID`
   - Google OAuth web client ID used by Firebase Auth. Comma-separate multiple IDs if needed.
 - `FINGERPRINT_PEPPER`
+- `YO_PROXY_URL`
 - `YO_BASE_URL`
 - `YO_API_URL`
 - `YO_API_URL_FALLBACK`
 - `YO_ALLOW_DIRECT_API_BYPASS`
+- `YO_AUTHORIZATION`
 - `YO_API_USERNAME`
 - `YO_API_PASSWORD`
 - `YO_WEBHOOK_SECRET_HASH`
@@ -81,9 +84,11 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `PYTHON_VERIFIER_SCRIPT` (defaults to `apps/worker/scripts/wa_status_verifier.py`)
 - `WA_VERIFIER_FPS`
 - `WA_VERIFIER_MAX_SECONDS`
+- `YO_PROXY_URL`
 - `YO_BASE_URL`
 - `YO_API_URL`
 - `YO_ALLOW_DIRECT_API_BYPASS`
+- `YO_AUTHORIZATION`
 - `YO_API_USERNAME`
 - `YO_API_PASSWORD`
 - `YO_WEBHOOK_SECRET_HASH`

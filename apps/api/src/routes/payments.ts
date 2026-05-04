@@ -7,7 +7,11 @@ import {
   initiateMobileMoneyCollection,
   type YoPaymentResponse,
 } from '../services/yoUganda.js';
-import { config, hasYoClientCredentials } from '../config.js';
+import {
+  config,
+  hasYoClientCredentials,
+  YO_AUTHORIZATION_MISSING_MESSAGE,
+} from '../config.js';
 import { isDirectYoTaskUrl } from '@prime/shared';
 
 const yoProviderReferenceInputKeys = [
@@ -522,7 +526,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         proxy_mode: proxyMode,
         allow_direct_bypass: allowDirectBypass,
         credentials_configured: false,
-        detail: 'YO_API_USERNAME and/or YO_API_PASSWORD are not set in the environment.',
+        detail: YO_AUTHORIZATION_MISSING_MESSAGE,
       };
     }
 

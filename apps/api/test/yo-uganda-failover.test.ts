@@ -7,10 +7,12 @@ vi.mock('undici', () => ({
 }));
 
 const YO_ENV_KEYS = [
+  'YO_PROXY_URL',
   'YO_BASE_URL',
   'YO_API_URL',
   'YO_API_URL_FALLBACK',
   'YO_FALLBACK_BASE_URL',
+  'YO_AUTHORIZATION',
   'YO_API_USERNAME',
   'YO_API_PASSWORD',
 ] as const;
@@ -66,8 +68,9 @@ describe('YO Uganda failover handling', () => {
       } as any);
 
     const { initiateMobileMoneyCollection } = await loadService({
-      YO_BASE_URL: 'http://34.79.189.141:3000/yo',
+      YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
       YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
+      YO_AUTHORIZATION: 'demo-authorization',
       YO_API_USERNAME: 'demo-user',
       YO_API_PASSWORD: 'demo-pass',
     });
@@ -97,8 +100,9 @@ describe('YO Uganda failover handling', () => {
     } as any);
 
     const { initiateMobileMoneyCollection } = await loadService({
-      YO_BASE_URL: 'http://34.79.189.141:3000/yo',
+      YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
       YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
+      YO_AUTHORIZATION: 'demo-authorization',
       YO_API_USERNAME: 'demo-user',
       YO_API_PASSWORD: 'demo-pass',
     });
@@ -114,5 +118,42 @@ describe('YO Uganda failover handling', () => {
       'YO Uganda request failed: 400 {"error":"invalid_request"}'
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('posts exact-case proxy field names for collection requests', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () =>
+        '<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Response><Status>OK</Status><StatusCode>0</StatusCode><TransactionReference>yo-ref-456</TransactionReference></Response></AutoCreate>',
+    } as any);
+
+    const { initiateMobileMoneyCollection } = await loadService({
+      YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
+      YO_AUTHORIZATION: 'demo-authorization',
+    });
+
+    await initiateMobileMoneyCollection({
+      amount: 1500,
+      phoneNumber: '0700000000',
+      narrative: 'Prime test payment',
+      reference: 'merchant-ref-456',
+      network: 'MTN',
+    });
+
+    const [, requestInit] = fetchMock.mock.calls[0] ?? [];
+    const body = String(requestInit?.body ?? '');
+
+    expect(body).toContain('Method=acdepositfunds');
+    expect(body).toContain('AccountAuthorization=demo-authorization');
+    expect(body).toContain('Amount=1500');
+    expect(body).toContain('Currency=UGX');
+    expect(body).toContain('NonBlocking=TRUE');
+    expect(body).toContain('PhoneNumber=256700000000');
+    expect(body).toContain('Provider=MTN');
+    expect(body).not.toContain('method=');
+    expect(/(?:^|&)Authorization=/.test(body)).toBe(false);
+    expect(body).not.toContain('Account=');
+    expect(body).not.toContain('AccountProviderCode=');
   });
 });

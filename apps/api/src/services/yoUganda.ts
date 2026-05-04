@@ -4,6 +4,7 @@ import { isDirectYoTaskUrl } from '@prime/shared';
 import {
   config,
   hasYoCredentials,
+  YO_AUTHORIZATION_MISSING_MESSAGE,
   resolveYoBaseUrl,
   resolveYoDirectFailoverBaseUrls,
   resolveYoFallbackBaseUrl,
@@ -67,13 +68,13 @@ function normalizePhoneNumber(phoneNumber: string) {
   return digits;
 }
 
-function resolveAccountProviderCode(network?: string) {
+function resolveProvider(network?: string) {
   const normalized = String(network ?? '').trim().toUpperCase();
   if (normalized === 'MTN') {
-    return 'MTN_UGANDA';
+    return 'MTN';
   }
   if (normalized === 'AIRTEL') {
-    return 'AIRTEL_UGANDA';
+    return 'AIRTEL';
   }
   return undefined;
 }
@@ -189,8 +190,14 @@ export function buildYoReferenceFields(input: {
 function sanitizeResponseSnippet(text: string) {
   return text
     .slice(0, 300)
-    .replace(/<(APIUsername|APIPassword|Authorization)>[\s\S]*?<\/\1>/gi, '<$1>[REDACTED]</$1>')
-    .replace(/(APIUsername|APIPassword|Authorization)=[^&\s]*/gi, '$1=[REDACTED]');
+    .replace(
+      /<(APIUsername|APIPassword|Authorization|AccountAuthorization)>[\s\S]*?<\/\1>/gi,
+      '<$1>[REDACTED]</$1>'
+    )
+    .replace(
+      /(APIUsername|APIPassword|Authorization|AccountAuthorization)=[^&\s]*/gi,
+      '$1=[REDACTED]'
+    );
 }
 
 function classifyYoNetworkError(message: string): string {
@@ -221,11 +228,25 @@ async function postYoRequest(
   }
 
   const bodyKeys = Array.from(formBody.keys());
-  const hasAuthorization = bodyKeys.includes('Authorization');
+  const hasAuthorization = bodyKeys.includes('AccountAuthorization');
 
   console.info(
     `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasAuthorization=${hasAuthorization}`
   );
+
+  const requestBody = proxyMode
+    ? formBody.toString()
+    : buildYoRequestXml(fields);
+  const headers: Record<string, string> = proxyMode
+    ? {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/x-www-form-urlencoded, text/xml, */*',
+      }
+    : {
+        'Content-Type': 'text/xml',
+        'Content-transfer-encoding': 'text',
+        Accept: 'application/xml, text/xml, */*',
+      };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let res: any;
@@ -235,11 +256,10 @@ async function postYoRequest(
     res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/x-www-form-urlencoded, text/xml, */*',
+        ...headers,
         'X-Trace-Id': buildTraceId(),
       },
-      body: formBody.toString(),
+      body: requestBody,
     });
     text = await res.text();
   } catch (fetchError) {
@@ -291,13 +311,16 @@ function isGatewayFailoverError(error: unknown, endpoint: string) {
 async function yoRequest(
   request: Record<string, string | number | boolean | null | undefined>
 ) {
+  if (!config.yo.authorizationCode.trim()) {
+    throw new Error(YO_AUTHORIZATION_MISSING_MESSAGE);
+  }
   if (!hasYoCredentials()) {
     throw new Error('YO Uganda API credentials are not configured');
   }
 
   const fields: Record<string, string> = {};
   const combined: Record<string, string | number | boolean | null | undefined> = {
-    Authorization: config.yo.authorizationCode,
+    AccountAuthorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
     ...request,
@@ -307,6 +330,17 @@ async function yoRequest(
       fields[key] = String(value);
     }
   }
+
+  console.log('YO Uganda outgoing payload', {
+    keys: Object.keys(fields),
+    hasMethod: Boolean(fields.Method),
+    method: fields.Method,
+    hasAuthorization: Boolean(fields.AccountAuthorization),
+    amount: fields.Amount,
+    phoneNumber: fields.PhoneNumber
+      ? `***${String(fields.PhoneNumber).slice(-4)}`
+      : null,
+  });
 
   const endpoints = uniqueEndpoints();
   const failoverEndpoints = directFailoverEndpoints();
@@ -353,10 +387,11 @@ export async function initiateMobileMoneyCollection(input: {
 }) {
   return yoRequest({
     Method: 'acdepositfunds',
+    Currency: 'UGX',
     NonBlocking: input.nonBlocking === false ? 'FALSE' : 'TRUE',
     Amount: input.amount,
-    Account: normalizePhoneNumber(input.phoneNumber),
-    AccountProviderCode: resolveAccountProviderCode(input.network),
+    PhoneNumber: normalizePhoneNumber(input.phoneNumber),
+    Provider: resolveProvider(input.network),
     Narrative: input.narrative,
     ...buildYoReferenceFields({
       reference: input.reference,
@@ -394,10 +429,11 @@ export async function requestPayout(input: {
 }) {
   return yoRequest({
     Method: 'acwithdrawfunds',
+    Currency: input.currency,
     NonBlocking: input.nonBlocking === true ? 'TRUE' : 'FALSE',
     Amount: input.amount,
-    Account: normalizePhoneNumber(input.receiverPhone),
-    AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
+    PhoneNumber: normalizePhoneNumber(input.receiverPhone),
+    Provider: resolveProvider(input.receiverNetwork),
     Narrative: input.narration,
     ...buildYoReferenceFields({
       reference: input.reference,
