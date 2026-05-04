@@ -101,6 +101,34 @@ export function parseYoResponseXml(xml) {
         raw,
     };
 }
+function parseYoFormResponse(text) {
+    const params = new URLSearchParams(text);
+    const raw = {};
+    for (const [key, value] of params.entries()) {
+        raw[key] = value;
+    }
+    const status = params.get('ybs_autocreate_status') ?? '';
+    const returnCode = params.get('ybs_autocreate_returncode');
+    const message = params.get('ybs_autocreate_message') ?? null;
+    const txRef = params.get('ybs_autocreate_transactionreference') ?? null;
+    const txStatus = params.get('ybs_autocreate_transactionstatus') ?? null;
+    const parsedCode = returnCode != null ? Number.parseInt(returnCode, 10) : null;
+    return {
+        status,
+        statusCode: parsedCode != null && Number.isFinite(parsedCode) ? parsedCode : null,
+        statusMessage: status === 'ERROR' ? null : message,
+        errorMessage: status === 'ERROR' ? message : null,
+        transactionStatus: txStatus,
+        transactionReference: txRef,
+        raw,
+    };
+}
+export function parseYoResponse(text) {
+    if (/ybs_autocreate_status/i.test(text)) {
+        return parseYoFormResponse(text);
+    }
+    return parseYoResponseXml(text);
+}
 export function buildYoReferenceFields(input) {
     return {
         // YO only accepts InternalReference when linking to an existing YO transaction.
@@ -109,10 +137,11 @@ export function buildYoReferenceFields(input) {
         ProviderReferenceText: input.providerReferenceText,
     };
 }
-function sanitizeXmlSnippet(text) {
+function sanitizeResponseSnippet(text) {
     return text
         .slice(0, 300)
-        .replace(/<(APIUsername|APIPassword|Authorization)>[\s\S]*?<\/\1>/gi, '<$1>[REDACTED]</$1>');
+        .replace(/<(APIUsername|APIPassword|Authorization)>[\s\S]*?<\/\1>/gi, '<$1>[REDACTED]</$1>')
+        .replace(/(APIUsername|APIPassword|Authorization)=[^&\s]*/gi, '$1=[REDACTED]');
 }
 function classifyYoNetworkError(message) {
     if (/ECONNREFUSED/i.test(message)) {
@@ -129,12 +158,14 @@ function classifyYoNetworkError(message) {
     }
     return message;
 }
-async function postXml(endpoint, body) {
+async function postYoRequest(endpoint, fields) {
     const proxyMode = !isDirectYoTaskUrl(endpoint);
-    const requestFields = Array.from(body.matchAll(/<([A-Za-z0-9_]+)>/g))
-        .map((m) => m[1] ?? '')
-        .filter((k) => k && !['APIUsername', 'APIPassword', 'Authorization'].includes(k));
-    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} fields=[${requestFields.join(',')}]`);
+    const loggedFields = Object.keys(fields).filter((k) => !['APIUsername', 'APIPassword', 'Authorization'].includes(k));
+    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} fields=[${loggedFields.join(',')}]`);
+    const formBody = new URLSearchParams();
+    for (const [key, value] of Object.entries(fields)) {
+        formBody.append(key, value);
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let res;
     let text;
@@ -142,12 +173,11 @@ async function postXml(endpoint, body) {
         res = await fetch(endpoint, {
             method: 'POST',
             headers: {
-                Accept: 'application/xml, text/xml, */*',
-                'Content-Type': 'text/xml',
-                'Content-transfer-encoding': 'text',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                Accept: 'application/x-www-form-urlencoded, text/xml, */*',
                 'X-Trace-Id': buildTraceId(),
             },
-            body,
+            body: formBody.toString(),
         });
         text = await res.text();
     }
@@ -156,10 +186,24 @@ async function postXml(endpoint, body) {
         console.error(`[YO] ✗ fetch error endpoint=${endpoint} error=${msg}`);
         throw new Error(classifyYoNetworkError(msg));
     }
-    const snippet = sanitizeXmlSnippet(text);
+    const snippet = sanitizeResponseSnippet(text);
     console.info(`[YO] ← status=${res.status} ok=${res.ok} snippet=${JSON.stringify(snippet)}`);
-    if (!res.ok && !/<(?:AutoCreate|Response)>/i.test(text)) {
-        throw new Error(`YO Uganda request failed: ${res.status} ${sanitizeXmlSnippet(text)}`.trim());
+    if (!res.ok) {
+        // For 5xx proxy errors extract the details field for failover classification.
+        // For other errors keep the full status+body so callers see the real cause.
+        if (res.status >= 500) {
+            try {
+                const parsed = JSON.parse(text);
+                const detail = String(parsed.details ?? parsed.error ?? '');
+                if (detail)
+                    throw new Error(classifyYoNetworkError(detail));
+            }
+            catch (inner) {
+                if (inner instanceof Error && !/JSON|SyntaxError/i.test(inner.message))
+                    throw inner;
+            }
+        }
+        throw new Error(`YO Uganda request failed: ${res.status} ${text.slice(0, 200)}`.trim());
     }
     if (!text.trim()) {
         throw new Error(`YO Uganda request failed: ${res.status} empty response`);
@@ -171,7 +215,8 @@ function isGatewayFailoverError(error, endpoint) {
         return false;
     }
     const message = error instanceof Error ? error.message : String(error ?? '');
-    return (/YO proxy request failed/i.test(message) ||
+    return (/YO proxy (request failed|error)/i.test(message) ||
+        /YO payment proxy/i.test(message) ||
         /timeout of \d+ms exceeded/i.test(message) ||
         /fetch failed/i.test(message) ||
         /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message));
@@ -180,20 +225,26 @@ async function yoRequest(request) {
     if (!hasYoCredentials()) {
         throw new Error('YO Uganda API credentials are not configured');
     }
-    const body = buildYoRequestXml({
+    const fields = {};
+    const combined = {
         Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
         ...request,
-    });
+    };
+    for (const [key, value] of Object.entries(combined)) {
+        if (value != null && String(value).trim()) {
+            fields[key] = String(value);
+        }
+    }
     const endpoints = uniqueEndpoints();
     const failoverEndpoints = directFailoverEndpoints();
     let lastError = null;
     let shouldTryDirectFailover = false;
     for (const endpoint of endpoints) {
         try {
-            const responseText = await postXml(endpoint, body);
-            return parseYoResponseXml(responseText);
+            const responseText = await postYoRequest(endpoint, fields);
+            return parseYoResponse(responseText);
         }
         catch (error) {
             if (isGatewayFailoverError(error, endpoint)) {
@@ -205,8 +256,8 @@ async function yoRequest(request) {
     if (shouldTryDirectFailover) {
         for (const endpoint of failoverEndpoints) {
             try {
-                const responseText = await postXml(endpoint, body);
-                return parseYoResponseXml(responseText);
+                const responseText = await postYoRequest(endpoint, fields);
+                return parseYoResponse(responseText);
             }
             catch (error) {
                 lastError = error;

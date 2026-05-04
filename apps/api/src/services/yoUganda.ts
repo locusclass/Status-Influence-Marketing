@@ -142,6 +142,37 @@ export function parseYoResponseXml(xml: string): YoPaymentResponse {
   };
 }
 
+function parseYoFormResponse(text: string): YoPaymentResponse {
+  const params = new URLSearchParams(text);
+  const raw: Record<string, string> = {};
+  for (const [key, value] of params.entries()) {
+    raw[key] = value;
+  }
+  const status = params.get('ybs_autocreate_status') ?? '';
+  const returnCode = params.get('ybs_autocreate_returncode');
+  const message = params.get('ybs_autocreate_message') ?? null;
+  const txRef = params.get('ybs_autocreate_transactionreference') ?? null;
+  const txStatus = params.get('ybs_autocreate_transactionstatus') ?? null;
+  const parsedCode = returnCode != null ? Number.parseInt(returnCode, 10) : null;
+
+  return {
+    status,
+    statusCode: parsedCode != null && Number.isFinite(parsedCode) ? parsedCode : null,
+    statusMessage: status === 'ERROR' ? null : message,
+    errorMessage: status === 'ERROR' ? message : null,
+    transactionStatus: txStatus,
+    transactionReference: txRef,
+    raw,
+  };
+}
+
+export function parseYoResponse(text: string): YoPaymentResponse {
+  if (/ybs_autocreate_status/i.test(text)) {
+    return parseYoFormResponse(text);
+  }
+  return parseYoResponseXml(text);
+}
+
 export function buildYoReferenceFields(input: {
   reference?: string;
   providerReferenceText?: string;
@@ -155,10 +186,11 @@ export function buildYoReferenceFields(input: {
   };
 }
 
-function sanitizeXmlSnippet(text: string) {
+function sanitizeResponseSnippet(text: string) {
   return text
     .slice(0, 300)
-    .replace(/<(APIUsername|APIPassword|Authorization)>[\s\S]*?<\/\1>/gi, '<$1>[REDACTED]</$1>');
+    .replace(/<(APIUsername|APIPassword|Authorization)>[\s\S]*?<\/\1>/gi, '<$1>[REDACTED]</$1>')
+    .replace(/(APIUsername|APIPassword|Authorization)=[^&\s]*/gi, '$1=[REDACTED]');
 }
 
 function classifyYoNetworkError(message: string): string {
@@ -177,15 +209,23 @@ function classifyYoNetworkError(message: string): string {
   return message;
 }
 
-async function postXml(endpoint: string, body: string) {
+async function postYoRequest(
+  endpoint: string,
+  fields: Record<string, string>
+) {
   const proxyMode = !isDirectYoTaskUrl(endpoint);
-  const requestFields = Array.from(body.matchAll(/<([A-Za-z0-9_]+)>/g))
-    .map((m) => m[1] ?? '')
-    .filter((k) => k && !['APIUsername', 'APIPassword', 'Authorization'].includes(k));
+  const loggedFields = Object.keys(fields).filter(
+    (k) => !['APIUsername', 'APIPassword', 'Authorization'].includes(k)
+  );
 
   console.info(
-    `[YO] → POST ${endpoint} proxyMode=${proxyMode} fields=[${requestFields.join(',')}]`
+    `[YO] → POST ${endpoint} proxyMode=${proxyMode} fields=[${loggedFields.join(',')}]`
   );
+
+  const formBody = new URLSearchParams();
+  for (const [key, value] of Object.entries(fields)) {
+    formBody.append(key, value);
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let res: any;
@@ -195,12 +235,11 @@ async function postXml(endpoint: string, body: string) {
     res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        Accept: 'application/xml, text/xml, */*',
-        'Content-Type': 'text/xml',
-        'Content-transfer-encoding': 'text',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/x-www-form-urlencoded, text/xml, */*',
         'X-Trace-Id': buildTraceId(),
       },
-      body,
+      body: formBody.toString(),
     });
     text = await res.text();
   } catch (fetchError) {
@@ -209,11 +248,22 @@ async function postXml(endpoint: string, body: string) {
     throw new Error(classifyYoNetworkError(msg));
   }
 
-  const snippet = sanitizeXmlSnippet(text);
+  const snippet = sanitizeResponseSnippet(text);
   console.info(`[YO] ← status=${res.status} ok=${res.ok} snippet=${JSON.stringify(snippet)}`);
 
-  if (!res.ok && !/<(?:AutoCreate|Response)>/i.test(text)) {
-    throw new Error(`YO Uganda request failed: ${res.status} ${sanitizeXmlSnippet(text)}`.trim());
+  if (!res.ok) {
+    // For 5xx proxy errors extract the details field for failover classification.
+    // For other errors keep the full status+body so callers see the real cause.
+    if (res.status >= 500) {
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        const detail = String(parsed.details ?? parsed.error ?? '');
+        if (detail) throw new Error(classifyYoNetworkError(detail));
+      } catch (inner) {
+        if (inner instanceof Error && !/JSON|SyntaxError/i.test(inner.message)) throw inner;
+      }
+    }
+    throw new Error(`YO Uganda request failed: ${res.status} ${text.slice(0, 200)}`.trim());
   }
 
   if (!text.trim()) {
@@ -230,12 +280,11 @@ function isGatewayFailoverError(error: unknown, endpoint: string) {
 
   const message = error instanceof Error ? error.message : String(error ?? '');
   return (
-    /YO proxy request failed/i.test(message) ||
+    /YO proxy (request failed|error)/i.test(message) ||
+    /YO payment proxy/i.test(message) ||
     /timeout of \d+ms exceeded/i.test(message) ||
     /fetch failed/i.test(message) ||
-    /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(
-      message
-    )
+    /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message)
   );
 }
 
@@ -246,12 +295,18 @@ async function yoRequest(
     throw new Error('YO Uganda API credentials are not configured');
   }
 
-  const body = buildYoRequestXml({
+  const fields: Record<string, string> = {};
+  const combined: Record<string, string | number | boolean | null | undefined> = {
     Authorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
     ...request,
-  });
+  };
+  for (const [key, value] of Object.entries(combined)) {
+    if (value != null && String(value).trim()) {
+      fields[key] = String(value);
+    }
+  }
 
   const endpoints = uniqueEndpoints();
   const failoverEndpoints = directFailoverEndpoints();
@@ -260,8 +315,8 @@ async function yoRequest(
 
   for (const endpoint of endpoints) {
     try {
-      const responseText = await postXml(endpoint, body);
-      return parseYoResponseXml(responseText);
+      const responseText = await postYoRequest(endpoint, fields);
+      return parseYoResponse(responseText);
     } catch (error) {
       if (isGatewayFailoverError(error, endpoint)) {
         shouldTryDirectFailover = true;
@@ -273,8 +328,8 @@ async function yoRequest(
   if (shouldTryDirectFailover) {
     for (const endpoint of failoverEndpoints) {
       try {
-        const responseText = await postXml(endpoint, body);
-        return parseYoResponseXml(responseText);
+        const responseText = await postYoRequest(endpoint, fields);
+        return parseYoResponse(responseText);
       } catch (error) {
         lastError = error;
       }

@@ -49,20 +49,32 @@ function buildRequestXml(request: Record<string, string | number | null | undefi
   return `<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Request>${body}</Request></AutoCreate>`;
 }
 
-async function postXml(endpoint: string, body: string) {
-  const res = await fetch(endpoint, {
+async function postYoRequest(endpoint: string, fields: Record<string, string>) {
+  const formBody = new URLSearchParams();
+  for (const [key, value] of Object.entries(fields)) {
+    formBody.append(key, value);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res: any = await fetch(endpoint, {
     method: 'POST',
     headers: {
-      Accept: 'application/xml, text/xml, */*',
-      'Content-Type': 'text/xml',
-      'Content-transfer-encoding': 'text',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/x-www-form-urlencoded, text/xml, */*',
     },
-    body,
+    body: formBody.toString(),
   });
 
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`YO Uganda payout failed: ${res.status} ${text}`.trim());
+    let detail = text.slice(0, 300);
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      detail = String(parsed.details ?? parsed.error ?? detail);
+    } catch {
+      // not JSON
+    }
+    throw new Error(`YO Uganda payout failed: ${detail}`.trim());
   }
 
   return text;
@@ -75,12 +87,10 @@ function isGatewayFailoverError(error: unknown, endpoint: string) {
 
   const message = error instanceof Error ? error.message : String(error ?? '');
   return (
-    /YO proxy request failed/i.test(message) ||
+    /YO proxy (request failed|error)/i.test(message) ||
     /timeout of \d+ms exceeded/i.test(message) ||
     /fetch failed/i.test(message) ||
-    /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(
-      message
-    )
+    /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message)
   );
 }
 
@@ -93,7 +103,8 @@ export async function requestPayout(input: {
   receiverPhone: string;
   receiverNetwork?: string;
 }) {
-  const body = buildRequestXml({
+  const fields: Record<string, string> = {};
+  const raw: Record<string, string | number | null | undefined> = {
     Authorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
@@ -105,10 +116,15 @@ export async function requestPayout(input: {
     Narrative: input.narration,
     ExternalReference: input.reference,
     ProviderReferenceText: input.reference,
-  });
+  };
+  for (const [key, value] of Object.entries(raw)) {
+    if (value != null && String(value).trim()) {
+      fields[key] = String(value);
+    }
+  }
 
   try {
-    return await postXml(resolveYoBaseUrl(), body);
+    return await postYoRequest(resolveYoBaseUrl(), fields);
   } catch (error) {
     if (!isGatewayFailoverError(error, resolveYoBaseUrl())) {
       throw error;
@@ -117,7 +133,7 @@ export async function requestPayout(input: {
     let lastError: unknown = error;
     for (const endpoint of failoverEndpoints()) {
       try {
-        return await postXml(endpoint, body);
+        return await postYoRequest(endpoint, fields);
       } catch (failoverError) {
         lastError = failoverError;
       }
