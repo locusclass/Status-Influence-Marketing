@@ -4,7 +4,6 @@ const YO_ENV_KEYS = [
   'YO_PROXY_URL',
   'YO_BASE_URL',
   'YO_API_URL',
-  'YO_AUTHORIZATION',
   'YO_API_USERNAME',
   'YO_API_PASSWORD',
 ] as const;
@@ -43,27 +42,39 @@ afterEach(() => {
 });
 
 describe('YO Uganda startup config validation', () => {
-  it('fails clearly when YO_AUTHORIZATION is missing', async () => {
+  it('fails clearly when YO_API_USERNAME is missing', async () => {
     const configModule = await loadConfig({
       YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
+      YO_API_PASSWORD: 'demo-api-key',
     });
 
     const issues = configModule.getStartupConfigIssues();
 
-    expect(issues).toContain(
-      'YO_AUTHORIZATION is not set. Required for YO Uganda AccountAuthorization.'
-    );
+    expect(issues).toContain('YO_API_USERNAME is missing');
     expect(
-      configModule.isFatalStartupIssue(
-        'YO_AUTHORIZATION is not set. Required for YO Uganda AccountAuthorization.'
-      )
+      configModule.isFatalStartupIssue('YO_API_USERNAME is missing')
     ).toBe(true);
   });
 
-  it('accepts proxy-mode YO config without legacy API credentials', async () => {
+  it('fails clearly when YO_API_PASSWORD is missing', async () => {
     const configModule = await loadConfig({
       YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
-      YO_AUTHORIZATION: 'demo-authorization',
+      YO_API_USERNAME: 'demo-user',
+    });
+
+    const issues = configModule.getStartupConfigIssues();
+
+    expect(issues).toContain('YO_API_PASSWORD is missing');
+    expect(
+      configModule.isFatalStartupIssue('YO_API_PASSWORD is missing')
+    ).toBe(true);
+  });
+
+  it('accepts proxy-mode YO config with username plus api key', async () => {
+    const configModule = await loadConfig({
+      YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
+      YO_API_USERNAME: 'demo-user',
+      YO_API_PASSWORD: 'demo-api-key',
     });
 
     const issues = configModule.getStartupConfigIssues();

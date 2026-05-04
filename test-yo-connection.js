@@ -8,12 +8,10 @@ const requestUrl = new URL(
   `${targetUrl.pathname.replace(/\/$/, '')}/ybs/task.php${targetUrl.search}`,
   targetUrl.origin
 );
-const accountAuthorization =
-  process.env.YO_AUTHORIZATION || '<YO_AUTHORIZATION>';
-const apiUsername = process.env.YO_API_USERNAME || '';
-const apiPassword = process.env.YO_API_PASSWORD || '';
-const missingAuthorizationMessage =
-  'YO_AUTHORIZATION is not set. Required for YO Uganda AccountAuthorization.';
+const apiUsername = process.env.YO_API_USERNAME || '<YO_API_USERNAME>';
+const apiPassword = process.env.YO_API_PASSWORD || '<YO_API_KEY>';
+const missingCredentialsMessage =
+  'YO_API_USERNAME and/or YO_API_PASSWORD are not set.';
 
 function xmlEscape(value) {
   return String(value)
@@ -34,15 +32,13 @@ function buildRequestXml(fields) {
 }
 
 const requestBody = buildRequestXml({
-  AccountAuthorization: accountAuthorization,
   APIUsername: apiUsername,
   APIPassword: apiPassword,
   Method: 'acdepositfunds',
   Amount: '100',
-  Currency: 'UGX',
   NonBlocking: 'TRUE',
-  PhoneNumber: '2567XXXXXXXX',
-  Provider: 'MTN',
+  Account: '2567XXXXXXXX',
+  AccountProviderCode: 'MTN_UGANDA',
   Narrative: 'TEST',
 });
 
@@ -71,8 +67,8 @@ const req = http.request(options, (res) => {
 
   res.on('end', () => {
     const responseBody = Buffer.concat(chunks).toString('utf8');
-    const authorizationSatisfied = !responseBody.includes(
-      missingAuthorizationMessage
+    const credentialsSatisfied = !responseBody.includes(
+      missingCredentialsMessage
     );
 
     console.log('HTTP Status Code:', res.statusCode ?? 'Unknown');
@@ -80,8 +76,8 @@ const req = http.request(options, (res) => {
     console.log(responseBody || '(empty)');
     console.log('Proxy Reachable:', proxyReachable ? 'YES' : 'NO');
     console.log(
-      'Authorization Requirement Satisfied:',
-      authorizationSatisfied ? 'YES' : 'NO'
+      'Credentials Requirement Satisfied:',
+      credentialsSatisfied ? 'YES' : 'NO'
     );
     console.log('PROXY OK');
   });
@@ -102,7 +98,7 @@ req.on('error', (error) => {
   console.error('Response Body:');
   console.error(error.message);
   console.error('Proxy Reachable:', proxyReachable ? 'YES' : 'NO');
-  console.error('Authorization Requirement Satisfied: UNKNOWN');
+  console.error('Credentials Requirement Satisfied: UNKNOWN');
   console.error('PROXY FAIL');
   process.exitCode = 1;
 });

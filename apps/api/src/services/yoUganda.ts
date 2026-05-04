@@ -4,7 +4,6 @@ import { isDirectYoTaskUrl } from '@prime/shared';
 import {
   config,
   hasYoCredentials,
-  YO_AUTHORIZATION_MISSING_MESSAGE,
   resolveYoBaseUrl,
   resolveYoDirectFailoverBaseUrls,
   resolveYoFallbackBaseUrl,
@@ -68,13 +67,13 @@ function normalizePhoneNumber(phoneNumber: string) {
   return digits;
 }
 
-function resolveProvider(network?: string) {
+function resolveAccountProviderCode(network?: string) {
   const normalized = String(network ?? '').trim().toUpperCase();
   if (normalized === 'MTN') {
-    return 'MTN';
+    return 'MTN_UGANDA';
   }
   if (normalized === 'AIRTEL') {
-    return 'AIRTEL';
+    return 'AIRTEL_UGANDA';
   }
   return undefined;
 }
@@ -228,10 +227,11 @@ async function postYoRequest(
   }
 
   const bodyKeys = Array.from(formBody.keys());
-  const hasAuthorization = bodyKeys.includes('AccountAuthorization');
+  const hasApiCredentials =
+    bodyKeys.includes('APIUsername') && bodyKeys.includes('APIPassword');
 
   console.info(
-    `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasAuthorization=${hasAuthorization}`
+    `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasApiCredentials=${hasApiCredentials}`
   );
 
   const requestBody = proxyMode
@@ -311,16 +311,12 @@ function isGatewayFailoverError(error: unknown, endpoint: string) {
 async function yoRequest(
   request: Record<string, string | number | boolean | null | undefined>
 ) {
-  if (!config.yo.authorizationCode.trim()) {
-    throw new Error(YO_AUTHORIZATION_MISSING_MESSAGE);
-  }
   if (!hasYoCredentials()) {
     throw new Error('YO Uganda API credentials are not configured');
   }
 
   const fields: Record<string, string> = {};
   const combined: Record<string, string | number | boolean | null | undefined> = {
-    AccountAuthorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
     ...request,
@@ -335,11 +331,13 @@ async function yoRequest(
     keys: Object.keys(fields),
     hasMethod: Boolean(fields.Method),
     method: fields.Method,
-    hasAuthorization: Boolean(fields.AccountAuthorization),
+    hasApiUsername: Boolean(fields.APIUsername),
+    hasApiPassword: Boolean(fields.APIPassword),
     amount: fields.Amount,
-    phoneNumber: fields.PhoneNumber
-      ? `***${String(fields.PhoneNumber).slice(-4)}`
+    account: fields.Account
+      ? `***${String(fields.Account).slice(-4)}`
       : null,
+    accountProviderCode: fields.AccountProviderCode ?? null,
   });
 
   const endpoints = uniqueEndpoints();
@@ -387,11 +385,10 @@ export async function initiateMobileMoneyCollection(input: {
 }) {
   return yoRequest({
     Method: 'acdepositfunds',
-    Currency: 'UGX',
     NonBlocking: input.nonBlocking === false ? 'FALSE' : 'TRUE',
     Amount: input.amount,
-    PhoneNumber: normalizePhoneNumber(input.phoneNumber),
-    Provider: resolveProvider(input.network),
+    Account: normalizePhoneNumber(input.phoneNumber),
+    AccountProviderCode: resolveAccountProviderCode(input.network),
     Narrative: input.narrative,
     ...buildYoReferenceFields({
       reference: input.reference,
@@ -429,11 +426,10 @@ export async function requestPayout(input: {
 }) {
   return yoRequest({
     Method: 'acwithdrawfunds',
-    Currency: input.currency,
     NonBlocking: input.nonBlocking === true ? 'TRUE' : 'FALSE',
     Amount: input.amount,
-    PhoneNumber: normalizePhoneNumber(input.receiverPhone),
-    Provider: resolveProvider(input.receiverNetwork),
+    Account: normalizePhoneNumber(input.receiverPhone),
+    AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
     Narrative: input.narration,
     ...buildYoReferenceFields({
       reference: input.reference,

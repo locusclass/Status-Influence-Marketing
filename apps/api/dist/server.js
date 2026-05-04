@@ -7,7 +7,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_CONTRACTS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_JOBS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WALLETS, ADMIN_MODULE_WITHDRAWALS, } from '@prime/shared';
-import { config, hasValidYoKeys, hasYoClientCredentials, hasYoLegacyApiCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
+import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
@@ -297,15 +297,13 @@ export function buildServer() {
         });
         const hasSecret = hasYoSecretKey();
         const hasClientCreds = hasYoClientCredentials();
-        const hasLegacyApiCreds = hasYoLegacyApiCredentials();
         app.log.info({
             provider: 'YO_UGANDA',
             base_url: resolveYoBaseUrl(),
             fallback_base_url: resolveYoFallbackBaseUrl(),
-            auth_mode: hasClientCreds ? 'account_authorization' : 'none',
+            auth_mode: hasClientCreds ? 'api_credentials' : 'none',
             has_secret: hasSecret,
             has_client_creds: hasClientCreds,
-            has_legacy_api_creds: hasLegacyApiCreds,
             allow_direct_api_bypass: config.yo.allowDirectApiBypass,
         }, 'yo_uganda_config');
         if (!hasValidYoKeys()) {

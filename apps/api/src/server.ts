@@ -31,7 +31,6 @@ import {
   config,
   hasValidYoKeys,
   hasYoClientCredentials,
-  hasYoLegacyApiCredentials,
   hasYoSecretKey,
   resolveYoBaseUrl,
   resolveYoFallbackBaseUrl,
@@ -388,17 +387,15 @@ export function buildServer() {
 
     const hasSecret = hasYoSecretKey();
     const hasClientCreds = hasYoClientCredentials();
-    const hasLegacyApiCreds = hasYoLegacyApiCredentials();
 
     app.log.info(
       {
         provider: 'YO_UGANDA',
         base_url: resolveYoBaseUrl(),
         fallback_base_url: resolveYoFallbackBaseUrl(),
-        auth_mode: hasClientCreds ? 'account_authorization' : 'none',
+        auth_mode: hasClientCreds ? 'api_credentials' : 'none',
         has_secret: hasSecret,
         has_client_creds: hasClientCreds,
-        has_legacy_api_creds: hasLegacyApiCreds,
         allow_direct_api_bypass: config.yo.allowDirectApiBypass,
       },
       'yo_uganda_config'

@@ -35,14 +35,14 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
    - `pnpm --filter @prime/worker dev`
 
 ## YO Uganda payment configuration
-- Use YO Uganda `AccountAuthorization` for production collections.
+- Use the Yo merchant portal username and API key for production collections.
 - For production IP whitelisting, set `YO_PROXY_URL` to `http://34.79.189.141:3000/yo`.
 - The final YO task URL resolves to `http://34.79.189.141:3000/yo/ybs/task.php`.
 - `YO_BASE_URL` and `YO_API_URL` remain supported for backward compatibility, but `YO_PROXY_URL` takes priority.
 - Direct YO hosts are rewritten back to the gateway unless `YO_ALLOW_DIRECT_API_BYPASS=true`.
 - Leave `YO_API_URL_FALLBACK` on the gateway unless you explicitly want a different fallback route.
-- Set `YO_AUTHORIZATION`.
-- `YO_API_USERNAME` and `YO_API_PASSWORD` are only needed when you intentionally use the legacy direct API credentials.
+- Set `YO_API_USERNAME` to the merchant portal username.
+- Set `YO_API_PASSWORD` to the merchant portal API key.
 - Collections in this codebase use status polling through `/api/payments/yo-uganda/verify`.
 
 ## Railway deployment
@@ -70,7 +70,6 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `YO_API_URL`
 - `YO_API_URL_FALLBACK`
 - `YO_ALLOW_DIRECT_API_BYPASS`
-- `YO_AUTHORIZATION`
 - `YO_API_USERNAME`
 - `YO_API_PASSWORD`
 - `YO_WEBHOOK_SECRET_HASH`
@@ -88,7 +87,6 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `YO_BASE_URL`
 - `YO_API_URL`
 - `YO_ALLOW_DIRECT_API_BYPASS`
-- `YO_AUTHORIZATION`
 - `YO_API_USERNAME`
 - `YO_API_PASSWORD`
 - `YO_WEBHOOK_SECRET_HASH`

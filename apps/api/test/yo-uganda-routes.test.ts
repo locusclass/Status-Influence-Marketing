@@ -201,8 +201,6 @@ describe('YO Uganda payment routes', () => {
   beforeAll(async () => {
     process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
     process.env.YO_PROXY_URL = process.env.YO_PROXY_URL || 'http://34.79.189.141:3000/yo';
-    process.env.YO_AUTHORIZATION =
-      process.env.YO_AUTHORIZATION || 'yo-test-authorization';
     process.env.YO_API_USERNAME = process.env.YO_API_USERNAME || 'yo-test-user';
     process.env.YO_API_PASSWORD = process.env.YO_API_PASSWORD || 'yo-test-pass';
     const serverModule = await import('../src/server.js');

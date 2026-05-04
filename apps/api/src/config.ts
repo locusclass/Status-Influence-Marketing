@@ -50,8 +50,8 @@ const allowDirectApiBypass = allowDirectYoHostBypass(
 );
 
 export const YO_PROXY_URL_MISSING_MESSAGE = 'YO_PROXY_URL is missing';
-export const YO_AUTHORIZATION_MISSING_MESSAGE =
-  'YO_AUTHORIZATION is not set. Required for YO Uganda AccountAuthorization.';
+export const YO_API_USERNAME_MISSING_MESSAGE = 'YO_API_USERNAME is missing';
+export const YO_API_PASSWORD_MISSING_MESSAGE = 'YO_API_PASSWORD is missing';
 
 const configuredYoBaseUrl = stripWrappingQuotes(
   process.env.YO_PROXY_URL ??
@@ -171,19 +171,14 @@ export function getStartupConfigIssues() {
   if (!configuredYoBaseUrl.trim()) {
     issues.push(YO_PROXY_URL_MISSING_MESSAGE);
   }
-  if (!config.yo.authorizationCode.trim()) {
-    issues.push(YO_AUTHORIZATION_MISSING_MESSAGE);
-  }
 
   const hasYoApiUsername = config.yo.apiUsername.trim().length > 0;
   const hasYoApiPassword = config.yo.apiPassword.trim().length > 0;
-  if (hasYoApiUsername !== hasYoApiPassword) {
-    if (!hasYoApiUsername) {
-      issues.push('YO_API_USERNAME is missing');
-    }
-    if (!hasYoApiPassword) {
-      issues.push('YO_API_PASSWORD is missing');
-    }
+  if (!hasYoApiUsername) {
+    issues.push(YO_API_USERNAME_MISSING_MESSAGE);
+  }
+  if (!hasYoApiPassword) {
+    issues.push(YO_API_PASSWORD_MISSING_MESSAGE);
   }
   if (config.yo.allowDirectApiBypass) {
     issues.push(
@@ -220,7 +215,8 @@ export function isFatalStartupIssue(issue: string) {
     issue.includes('JWT_SECRET is missing') ||
     issue.includes('JWT_SECRET is missing or using the development default') ||
     issue.includes(YO_PROXY_URL_MISSING_MESSAGE) ||
-    issue.includes(YO_AUTHORIZATION_MISSING_MESSAGE) ||
+    issue.includes(YO_API_USERNAME_MISSING_MESSAGE) ||
+    issue.includes(YO_API_PASSWORD_MISSING_MESSAGE) ||
     issue.includes('FIREBASE_PROJECT_ID is missing') ||
     issue.includes('FIREBASE_CLIENT_EMAIL is missing') ||
     issue.includes('FIREBASE_PRIVATE_KEY is missing') ||
@@ -229,7 +225,10 @@ export function isFatalStartupIssue(issue: string) {
 }
 
 export function hasYoCredentials() {
-  return config.yo.authorizationCode.trim().length > 0;
+  return (
+    config.yo.apiUsername.trim().length > 0 &&
+    config.yo.apiPassword.trim().length > 0
+  );
 }
 
 export function hasValidYoKeys() {
@@ -241,10 +240,7 @@ export function hasYoClientCredentials() {
 }
 
 export function hasYoLegacyApiCredentials() {
-  return (
-    config.yo.apiUsername.trim().length > 0 &&
-    config.yo.apiPassword.trim().length > 0
-  );
+  return hasYoCredentials();
 }
 
 export function hasYoSecretKey() {

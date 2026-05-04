@@ -1,7 +1,7 @@
 import { fetch } from 'undici';
 import crypto from 'crypto';
 import { isDirectYoTaskUrl } from '@prime/shared';
-import { config, hasYoCredentials, YO_AUTHORIZATION_MISSING_MESSAGE, resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls, resolveYoFallbackBaseUrl, } from '../config.js';
+import { config, hasYoCredentials, resolveYoBaseUrl, resolveYoDirectFailoverBaseUrls, resolveYoFallbackBaseUrl, } from '../config.js';
 function xmlEscape(value) {
     return value
         .replace(/&/g, '&amp;')
@@ -37,13 +37,13 @@ function normalizePhoneNumber(phoneNumber) {
     }
     return digits;
 }
-function resolveProvider(network) {
+function resolveAccountProviderCode(network) {
     const normalized = String(network ?? '').trim().toUpperCase();
     if (normalized === 'MTN') {
-        return 'MTN';
+        return 'MTN_UGANDA';
     }
     if (normalized === 'AIRTEL') {
-        return 'AIRTEL';
+        return 'AIRTEL_UGANDA';
     }
     return undefined;
 }
@@ -165,8 +165,8 @@ async function postYoRequest(endpoint, fields) {
         formBody.append(key, value);
     }
     const bodyKeys = Array.from(formBody.keys());
-    const hasAuthorization = bodyKeys.includes('AccountAuthorization');
-    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasAuthorization=${hasAuthorization}`);
+    const hasApiCredentials = bodyKeys.includes('APIUsername') && bodyKeys.includes('APIPassword');
+    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasApiCredentials=${hasApiCredentials}`);
     const requestBody = proxyMode
         ? formBody.toString()
         : buildYoRequestXml(fields);
@@ -235,15 +235,11 @@ function isGatewayFailoverError(error, endpoint) {
         /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|UND_ERR_)\b/i.test(message));
 }
 async function yoRequest(request) {
-    if (!config.yo.authorizationCode.trim()) {
-        throw new Error(YO_AUTHORIZATION_MISSING_MESSAGE);
-    }
     if (!hasYoCredentials()) {
         throw new Error('YO Uganda API credentials are not configured');
     }
     const fields = {};
     const combined = {
-        AccountAuthorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
         ...request,
@@ -257,11 +253,13 @@ async function yoRequest(request) {
         keys: Object.keys(fields),
         hasMethod: Boolean(fields.Method),
         method: fields.Method,
-        hasAuthorization: Boolean(fields.AccountAuthorization),
+        hasApiUsername: Boolean(fields.APIUsername),
+        hasApiPassword: Boolean(fields.APIPassword),
         amount: fields.Amount,
-        phoneNumber: fields.PhoneNumber
-            ? `***${String(fields.PhoneNumber).slice(-4)}`
+        account: fields.Account
+            ? `***${String(fields.Account).slice(-4)}`
             : null,
+        accountProviderCode: fields.AccountProviderCode ?? null,
     });
     const endpoints = uniqueEndpoints();
     const failoverEndpoints = directFailoverEndpoints();
@@ -297,11 +295,10 @@ async function yoRequest(request) {
 export async function initiateMobileMoneyCollection(input) {
     return yoRequest({
         Method: 'acdepositfunds',
-        Currency: 'UGX',
         NonBlocking: input.nonBlocking === false ? 'FALSE' : 'TRUE',
         Amount: input.amount,
-        PhoneNumber: normalizePhoneNumber(input.phoneNumber),
-        Provider: resolveProvider(input.network),
+        Account: normalizePhoneNumber(input.phoneNumber),
+        AccountProviderCode: resolveAccountProviderCode(input.network),
         Narrative: input.narrative,
         ...buildYoReferenceFields({
             reference: input.reference,
@@ -322,11 +319,10 @@ export async function verifyTransaction(transactionId) {
 export async function requestPayout(input) {
     return yoRequest({
         Method: 'acwithdrawfunds',
-        Currency: input.currency,
         NonBlocking: input.nonBlocking === true ? 'TRUE' : 'FALSE',
         Amount: input.amount,
-        PhoneNumber: normalizePhoneNumber(input.receiverPhone),
-        Provider: resolveProvider(input.receiverNetwork),
+        Account: normalizePhoneNumber(input.receiverPhone),
+        AccountProviderCode: resolveAccountProviderCode(input.receiverNetwork),
         Narrative: input.narration,
         ...buildYoReferenceFields({
             reference: input.reference,

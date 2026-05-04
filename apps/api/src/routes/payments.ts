@@ -10,7 +10,8 @@ import {
 import {
   config,
   hasYoClientCredentials,
-  YO_AUTHORIZATION_MISSING_MESSAGE,
+  YO_API_PASSWORD_MISSING_MESSAGE,
+  YO_API_USERNAME_MISSING_MESSAGE,
 } from '../config.js';
 import { isDirectYoTaskUrl } from '@prime/shared';
 
@@ -526,7 +527,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         proxy_mode: proxyMode,
         allow_direct_bypass: allowDirectBypass,
         credentials_configured: false,
-        detail: YO_AUTHORIZATION_MISSING_MESSAGE,
+        detail: `${YO_API_USERNAME_MISSING_MESSAGE} and/or ${YO_API_PASSWORD_MISSING_MESSAGE}`,
       };
     }
 
@@ -536,7 +537,8 @@ export async function paymentRoutes(app: FastifyInstance) {
       proxy_mode: proxyMode,
       allow_direct_bypass: allowDirectBypass,
       credentials_configured: true,
-      authorization_configured: Boolean(config.yo.authorizationCode),
+      api_username_configured: Boolean(config.yo.apiUsername),
+      api_password_configured: Boolean(config.yo.apiPassword),
     };
   };
 
