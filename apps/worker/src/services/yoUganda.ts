@@ -94,6 +94,7 @@ export async function requestPayout(input: {
   receiverNetwork?: string;
 }) {
   const body = buildRequestXml({
+    Authorization: config.yo.authorizationCode,
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
     Method: 'acwithdrawfunds',

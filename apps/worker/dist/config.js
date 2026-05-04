@@ -27,6 +27,10 @@ const yoConfig = {
         process.env.YO_PASSWORD ??
         process.env.FLUTTERWAVE_CLIENT_SECRET ??
         ''),
+    authorizationCode: stripWrappingQuotes(process.env.YO_AUTHORIZATION ??
+        process.env.YO_ACCOUNT_AUTHORIZATION ??
+        process.env.YO_PROXY_AUTHORIZATION ??
+        ''),
     webhookSecretHash: stripWrappingQuotes(process.env.YO_WEBHOOK_SECRET_HASH ??
         process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ??
         ''),

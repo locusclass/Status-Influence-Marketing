@@ -109,20 +109,57 @@ export function buildYoReferenceFields(input) {
         ProviderReferenceText: input.providerReferenceText,
     };
 }
+function sanitizeXmlSnippet(text) {
+    return text
+        .slice(0, 300)
+        .replace(/<(APIUsername|APIPassword|Authorization)>[\s\S]*?<\/\1>/gi, '<$1>[REDACTED]</$1>');
+}
+function classifyYoNetworkError(message) {
+    if (/ECONNREFUSED/i.test(message)) {
+        return 'YO payment proxy refused the connection — check proxy is running on port 3000.';
+    }
+    if (/EHOSTUNREACH/i.test(message)) {
+        return 'YO payment proxy host is unreachable — check proxy IP and firewall rules.';
+    }
+    if (/ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT/i.test(message)) {
+        return 'YO payment proxy connection timed out — proxy may be down or overloaded.';
+    }
+    if (/fetch failed|UND_ERR_/i.test(message)) {
+        return 'YO payment proxy connection failed — verify proxy is reachable from Railway.';
+    }
+    return message;
+}
 async function postXml(endpoint, body) {
-    const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-            Accept: 'application/xml, text/xml, */*',
-            'Content-Type': 'text/xml',
-            'Content-transfer-encoding': 'text',
-            'X-Trace-Id': buildTraceId(),
-        },
-        body,
-    });
-    const text = await res.text();
+    const proxyMode = !isDirectYoTaskUrl(endpoint);
+    const requestFields = Array.from(body.matchAll(/<([A-Za-z0-9_]+)>/g))
+        .map((m) => m[1] ?? '')
+        .filter((k) => k && !['APIUsername', 'APIPassword', 'Authorization'].includes(k));
+    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} fields=[${requestFields.join(',')}]`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let res;
+    let text;
+    try {
+        res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                Accept: 'application/xml, text/xml, */*',
+                'Content-Type': 'text/xml',
+                'Content-transfer-encoding': 'text',
+                'X-Trace-Id': buildTraceId(),
+            },
+            body,
+        });
+        text = await res.text();
+    }
+    catch (fetchError) {
+        const msg = fetchError instanceof Error ? fetchError.message : String(fetchError ?? '');
+        console.error(`[YO] ✗ fetch error endpoint=${endpoint} error=${msg}`);
+        throw new Error(classifyYoNetworkError(msg));
+    }
+    const snippet = sanitizeXmlSnippet(text);
+    console.info(`[YO] ← status=${res.status} ok=${res.ok} snippet=${JSON.stringify(snippet)}`);
     if (!res.ok && !/<(?:AutoCreate|Response)>/i.test(text)) {
-        throw new Error(`YO Uganda request failed: ${res.status} ${text}`.trim());
+        throw new Error(`YO Uganda request failed: ${res.status} ${sanitizeXmlSnippet(text)}`.trim());
     }
     if (!text.trim()) {
         throw new Error(`YO Uganda request failed: ${res.status} empty response`);
@@ -144,6 +181,7 @@ async function yoRequest(request) {
         throw new Error('YO Uganda API credentials are not configured');
     }
     const body = buildYoRequestXml({
+        Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
         ...request,

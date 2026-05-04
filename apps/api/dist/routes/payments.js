@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { getTransactionStatus, initiateMobileMoneyCollection, } from '../services/yoUganda.js';
-import { hasYoClientCredentials } from '../config.js';
+import { config, hasYoClientCredentials } from '../config.js';
+import { isDirectYoTaskUrl } from '@prime/shared';
 const yoProviderReferenceInputKeys = [
     'transaction_id',
     'transactionId',
@@ -373,6 +374,32 @@ export async function paymentRoutes(app) {
         }
         return null;
     };
+    const yoHealthCheck = async (_request, reply) => {
+        const credentialsConfigured = hasYoClientCredentials();
+        const endpoint = config.yo.baseUrl;
+        const proxyMode = !isDirectYoTaskUrl(endpoint);
+        const allowDirectBypass = config.yo.allowDirectApiBypass;
+        if (!credentialsConfigured) {
+            reply.code(503);
+            return {
+                ok: false,
+                error: 'yo_uganda_not_configured',
+                endpoint,
+                proxy_mode: proxyMode,
+                allow_direct_bypass: allowDirectBypass,
+                credentials_configured: false,
+                detail: 'YO_API_USERNAME and/or YO_API_PASSWORD are not set in the environment.',
+            };
+        }
+        return {
+            ok: true,
+            endpoint,
+            proxy_mode: proxyMode,
+            allow_direct_bypass: allowDirectBypass,
+            credentials_configured: true,
+            authorization_configured: Boolean(config.yo.authorizationCode),
+        };
+    };
     const webhookInfo = async () => ({
         ok: true,
         method: 'POST',
@@ -385,6 +412,7 @@ export async function paymentRoutes(app) {
         });
     };
     for (const routeBase of [yoRouteBase, legacyFlutterwaveRouteBase]) {
+        app.get(`${routeBase}/health`, yoHealthCheck);
         app.get(`${routeBase}/webhook`, webhookInfo);
         app.post(`${routeBase}/webhook`, handleWebhook);
     }

@@ -62,6 +62,7 @@ function isGatewayFailoverError(error, endpoint) {
 }
 export async function requestPayout(input) {
     const body = buildRequestXml({
+        Authorization: config.yo.authorizationCode,
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
         Method: 'acwithdrawfunds',
