@@ -160,12 +160,32 @@ function classifyYoNetworkError(message) {
 }
 async function postYoRequest(endpoint, fields) {
     const proxyMode = !isDirectYoTaskUrl(endpoint);
-    const loggedFields = Object.keys(fields).filter((k) => !['APIUsername', 'APIPassword', 'Authorization'].includes(k));
-    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} fields=[${loggedFields.join(',')}]`);
+    // Map PascalCase fields to lowercase fields expected by YO/proxy in form-encoded mode
     const formBody = new URLSearchParams();
     for (const [key, value] of Object.entries(fields)) {
-        formBody.append(key, value);
+        let mappedKey = key.toLowerCase();
+        if (key === 'APIUsername')
+            mappedKey = 'username';
+        if (key === 'APIPassword')
+            mappedKey = 'password';
+        if (key === 'ExternalReference')
+            mappedKey = 'external_reference';
+        if (key === 'InternalReference')
+            mappedKey = 'internal_reference';
+        if (key === 'ProviderReferenceText')
+            mappedKey = 'provider_reference_text';
+        if (key === 'AccountProviderCode')
+            mappedKey = 'account_provider_code';
+        if (key === 'NonBlocking')
+            mappedKey = 'non_blocking';
+        // Keep Authorization as is if it's already special, but most likely it should be lowercase too if it's a field
+        // however, traditionally Authorization is often a header, but here it's being sent as a field.
+        if (key === 'Authorization')
+            mappedKey = 'Authorization';
+        formBody.append(mappedKey, value);
     }
+    const bodyKeys = Array.from(formBody.keys());
+    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}]`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let res;
     let text;
@@ -177,7 +197,7 @@ async function postYoRequest(endpoint, fields) {
                 Accept: 'application/x-www-form-urlencoded, text/xml, */*',
                 'X-Trace-Id': buildTraceId(),
             },
-            body: formBody.toString(),
+            body: formBody,
         });
         text = await res.text();
     }

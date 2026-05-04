@@ -35,10 +35,32 @@ function buildRequestXml(request) {
     return `<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Request>${body}</Request></AutoCreate>`;
 }
 async function postYoRequest(endpoint, fields) {
+    const proxyMode = !isDirectYoTaskUrl(endpoint);
+    // Map PascalCase fields to lowercase fields expected by YO/proxy in form-encoded mode
     const formBody = new URLSearchParams();
     for (const [key, value] of Object.entries(fields)) {
-        formBody.append(key, value);
+        let mappedKey = key.toLowerCase();
+        if (key === 'APIUsername')
+            mappedKey = 'username';
+        if (key === 'APIPassword')
+            mappedKey = 'password';
+        if (key === 'ExternalReference')
+            mappedKey = 'external_reference';
+        if (key === 'InternalReference')
+            mappedKey = 'internal_reference';
+        if (key === 'ProviderReferenceText')
+            mappedKey = 'provider_reference_text';
+        if (key === 'AccountProviderCode')
+            mappedKey = 'account_provider_code';
+        if (key === 'NonBlocking')
+            mappedKey = 'non_blocking';
+        // Keep Authorization as is if it's already special, but most likely it should be lowercase too if it's a field
+        if (key === 'Authorization')
+            mappedKey = 'Authorization';
+        formBody.append(mappedKey, value);
     }
+    const bodyKeys = Array.from(formBody.keys());
+    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}]`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const res = await fetch(endpoint, {
         method: 'POST',
@@ -46,9 +68,10 @@ async function postYoRequest(endpoint, fields) {
             'Content-Type': 'application/x-www-form-urlencoded',
             Accept: 'application/x-www-form-urlencoded, text/xml, */*',
         },
-        body: formBody.toString(),
+        body: formBody,
     });
     const text = await res.text();
+    console.info(`[YO] ← status=${res.status} ok=${res.ok} snippet=${JSON.stringify(text.slice(0, 100))}`);
     if (!res.ok) {
         let detail = text.slice(0, 300);
         try {
