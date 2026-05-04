@@ -2719,6 +2719,183 @@ export async function adminRoutes(app) {
             return { ok: true };
         });
     });
+    // ── Admin settings ──────────────────────────────────────────────────────────
+    app.get('/admin/settings', { preHandler: [app.adminOnly] }, async () => {
+        return withTransaction(async (client) => {
+            const res = await client.query('SELECT key, value FROM admin_settings');
+            const settings = {};
+            for (const row of res.rows)
+                settings[row.key] = row.value;
+            return { settings };
+        });
+    });
+    app.patch('/admin/settings', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const body = z.object({
+            campaign_approval_mode: z.enum(['AUTO', 'MANUAL']).optional(),
+        }).safeParse(request.body);
+        if (!body.success) {
+            reply.code(400);
+            return { error: 'invalid_body' };
+        }
+        return withTransaction(async (client) => {
+            if (body.data.campaign_approval_mode !== undefined) {
+                await client.query(`INSERT INTO admin_settings (key, value, updated_at)
+           VALUES ('campaign_approval_mode', $1, now())
+           ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, [body.data.campaign_approval_mode]);
+            }
+            const res = await client.query('SELECT key, value FROM admin_settings');
+            const settings = {};
+            for (const row of res.rows)
+                settings[row.key] = row.value;
+            return { settings };
+        });
+    });
+    // ── Campaign approval workflow ───────────────────────────────────────────────
+    app.get('/admin/campaigns/pending-approval', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const limit = Math.min(Number(query?.limit ?? 50), 200);
+        const offset = Number(query?.offset ?? 0);
+        return withTransaction(async (client) => {
+            // Auto-approve any that have passed their 2-minute deadline
+            await client.query(`UPDATE campaigns
+         SET approval_status='AUTO_APPROVED', approved_at=now()
+         WHERE approval_status='PENDING_APPROVAL'
+           AND approval_deadline IS NOT NULL
+           AND approval_deadline < now()`);
+            const res = await client.query(`SELECT
+           c.id, c.title, c.platform, c.execution_mode, c.delivery_model,
+           c.budget_total, c.payout_amount, c.impression_target,
+           c.approval_status, c.approval_deadline, c.approved_at,
+           c.created_at,
+           u.id AS advertiser_id,
+           u.full_name AS advertiser_name,
+           u.email AS advertiser_email
+         FROM campaigns c
+         JOIN users u ON u.id = c.advertiser_id
+         WHERE c.approval_status = 'PENDING_APPROVAL'
+         ORDER BY c.approval_deadline ASC NULLS LAST
+         LIMIT $1 OFFSET $2`, [limit, offset]);
+            return { campaigns: res.rows };
+        });
+    });
+    app.patch('/admin/campaigns/:id/approve', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const adminUserId = request.user.sub;
+        return withTransaction(async (client) => {
+            const campRes = await client.query(`SELECT c.id, c.advertiser_id, c.title, c.approval_status
+         FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
+            const camp = campRes.rows[0];
+            if (!camp) {
+                reply.code(404);
+                return { error: 'campaign_not_found' };
+            }
+            await client.query(`UPDATE campaigns
+         SET approval_status='APPROVED', approved_at=now(), approved_by_user_id=$2
+         WHERE id=$1`, [params.id, adminUserId]);
+            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_APPROVED',
+                 'Campaign approved',
+                 $2, now())
+         ON CONFLICT DO NOTHING`, [
+                camp.advertiser_id,
+                `Your campaign "${camp.title}" has been approved. You can now fund and launch it.`,
+            ]);
+            await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN', 'campaign', params.id, {});
+            return { ok: true };
+        });
+    });
+    // ── Campaign completion / proof administration ───────────────────────────────
+    app.get('/admin/campaign-completions', { preHandler: [app.adminOnly] }, async (request) => {
+        const query = request.query;
+        const limit = Math.min(Number(query?.limit ?? 50), 200);
+        const offset = Number(query?.offset ?? 0);
+        const statusFilter = typeof query?.status === 'string' ? query.status : 'SUBMITTED';
+        return withTransaction(async (client) => {
+            const conditions = [];
+            const params = [];
+            let idx = 1;
+            if (statusFilter !== 'ALL') {
+                conditions.push(`p.status=$${idx}`);
+                params.push(statusFilter);
+                idx++;
+            }
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`SELECT
+           p.id AS proof_id,
+           p.status AS proof_status,
+           p.decision,
+           p.video_url,
+           p.observed_views,
+           p.created_at AS submitted_at,
+           p.updated_at,
+           c.id AS campaign_id,
+           c.title AS campaign_title,
+           c.platform,
+           c.payout_amount,
+           c.budget_total,
+           c.execution_mode,
+           c.delivery_model,
+           promoter.id AS promoter_id,
+           promoter.full_name AS promoter_name,
+           promoter.email AS promoter_email,
+           advertiser.id AS advertiser_id,
+           advertiser.full_name AS advertiser_name,
+           advertiser.email AS advertiser_email
+         FROM proofs p
+         JOIN verification_sessions vs ON vs.id = p.session_id
+         JOIN campaigns c ON c.id = vs.campaign_id
+         JOIN users promoter ON promoter.id = p.user_id
+         JOIN users advertiser ON advertiser.id = c.advertiser_id
+         ${where}
+         ORDER BY p.created_at DESC
+         LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
+            return { completions: res.rows };
+        });
+    });
+    app.patch('/admin/campaign-completions/:proofId/approve', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const adminUserId = request.user.sub;
+        return withTransaction(async (client) => {
+            // Fetch proof with campaign + users
+            const res = await client.query(`SELECT
+           p.id, p.user_id AS promoter_id, p.status, p.decision,
+           c.id AS campaign_id, c.title AS campaign_title, c.advertiser_id,
+           c.payout_amount
+         FROM proofs p
+         JOIN verification_sessions vs ON vs.id = p.session_id
+         JOIN campaigns c ON c.id = vs.campaign_id
+         WHERE p.id=$1 LIMIT 1`, [params.proofId]);
+            const proof = res.rows[0];
+            if (!proof) {
+                reply.code(404);
+                return { error: 'proof_not_found' };
+            }
+            // Mark proof VERIFIED + VERIFIED decision
+            await client.query(`UPDATE proofs SET status='VERIFIED', decision='VERIFIED', updated_at=now() WHERE id=$1`, [params.proofId]);
+            await markContractCompletedForVerifiedProof(client, params.proofId);
+            await jobRepo.enqueue(client, 'PAYOUT_PROOF', { proof_id: params.proofId });
+            // Notify promoter
+            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'PROOF_VERIFIED',
+                 'Campaign proof approved',
+                 $2, now())
+         ON CONFLICT DO NOTHING`, [
+                proof.promoter_id,
+                `Your proof for "${proof.campaign_title}" has been approved. Your payout of UGX ${proof.payout_amount} is being processed.`,
+            ]);
+            // Notify advertiser
+            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_PROOF_VERIFIED',
+                 'Campaign delivery confirmed',
+                 $2, now())
+         ON CONFLICT DO NOTHING`, [
+                proof.advertiser_id,
+                `A proof for your campaign "${proof.campaign_title}" has been verified and the promoter has been paid.`,
+            ]);
+            await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN_COMPLETION', 'proof', params.proofId, {});
+            return { ok: true };
+        });
+    });
     app.get('/admin/wallets', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);

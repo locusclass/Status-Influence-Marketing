@@ -3020,6 +3020,31 @@ export async function campaignRoutes(app: FastifyInstance) {
           bundleId ? totalEscrowAmount : Number(createdRootCampaigns[0]?.budget_total ?? 0)
         );
 
+        // Set approval status based on admin_settings
+        const settingRes = await client.query(
+          `SELECT value FROM admin_settings WHERE key='campaign_approval_mode' LIMIT 1`
+        );
+        const approvalMode = settingRes.rows[0]?.value ?? 'MANUAL';
+        const isAutoApproval = approvalMode === 'AUTO';
+        const approvalRoot = bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? '');
+        if (isAutoApproval) {
+          await client.query(
+            `UPDATE campaigns SET approval_status='APPROVED', approved_at=now()
+             WHERE bundle_root_campaign_id=$1 OR id=$1`,
+            [approvalRoot]
+          );
+          for (const c of createdRootCampaigns) { c.approval_status = 'APPROVED'; }
+        } else {
+          await client.query(
+            `UPDATE campaigns
+             SET approval_status='PENDING_APPROVAL',
+                 approval_deadline=now() + INTERVAL '2 minutes'
+             WHERE bundle_root_campaign_id=$1 OR id=$1`,
+            [approvalRoot]
+          );
+          for (const c of createdRootCampaigns) { c.approval_status = 'PENDING_APPROVAL'; }
+        }
+
         if (bundleId && bundleRootCampaignId) {
           await client.query(
             `
@@ -3585,6 +3610,38 @@ export async function campaignRoutes(app: FastifyInstance) {
     return result;
   });
 
+  // Campaign approval status polling endpoint
+  app.get('/campaigns/:id/approval', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    return withTransaction(async (client) => {
+      const res = await client.query(
+        `SELECT id, approval_status, approval_deadline, approved_at FROM campaigns WHERE id=$1 LIMIT 1`,
+        [params.id]
+      );
+      const campaign = res.rows[0];
+      if (!campaign) { reply.code(404); return { error: 'campaign_not_found' }; }
+      // Auto-approve if deadline has passed
+      if (campaign.approval_status === 'PENDING_APPROVAL') {
+        const deadline = campaign.approval_deadline ? new Date(campaign.approval_deadline) : null;
+        if (deadline && deadline < new Date()) {
+          await client.query(
+            `UPDATE campaigns SET approval_status='AUTO_APPROVED', approved_at=now() WHERE id=$1`,
+            [params.id]
+          );
+          campaign.approval_status = 'AUTO_APPROVED';
+          campaign.approved_at = new Date().toISOString();
+        }
+      }
+      return {
+        campaign_id: campaign.id,
+        approval_status: campaign.approval_status,
+        approval_deadline: campaign.approval_deadline,
+        approved_at: campaign.approved_at,
+        is_approved: ['APPROVED', 'AUTO_APPROVED'].includes(campaign.approval_status),
+      };
+    });
+  });
+
   app.post('/campaign-bundles/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const body = FundBundleSchema.parse(request.body) as z.infer<typeof FundBundleSchema>;
@@ -3864,6 +3921,20 @@ export async function campaignRoutes(app: FastifyInstance) {
       if (campaign.advertiser_id !== authUser && role !== 'ADMIN') {
         reply.code(403);
         return { error: 'not_campaign_advertiser' } as any;
+      }
+      // Auto-approve if deadline passed; block if still pending
+      if (campaign.approval_status === 'PENDING_APPROVAL') {
+        const deadline = campaign.approval_deadline ? new Date(campaign.approval_deadline) : null;
+        if (deadline && deadline < new Date()) {
+          await client.query(
+            `UPDATE campaigns SET approval_status='AUTO_APPROVED', approved_at=now() WHERE id=$1`,
+            [params.id]
+          );
+          campaign.approval_status = 'AUTO_APPROVED';
+        } else {
+          reply.code(400);
+          return { error: 'campaign_pending_approval' } as any;
+        }
       }
       const bundleId = getCampaignBundleId(campaign);
       const escrowOwnerId = getEscrowCampaignId(campaign);
