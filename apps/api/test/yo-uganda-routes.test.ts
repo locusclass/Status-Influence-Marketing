@@ -256,6 +256,11 @@ describe('YO Uganda payment routes', () => {
       transaction_id: 'yo-init-123',
       provider_reference: 'yo-init-123',
       provider_status: 'PENDING',
+      recommended_poll_interval_ms: 10000,
+      next_action: {
+        type: 'payment_instruction',
+        next_check_in_ms: 10000,
+      },
     });
     expect(yoMocks.initiateMobileMoneyCollection).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -282,6 +287,18 @@ describe('YO Uganda payment routes', () => {
     expect(stored.rows[0].raw_payload).toMatchObject({
       yo_transaction_reference: 'yo-init-123',
       yo_last_provider_status: 'PENDING',
+    });
+    expect(stored.rows[0].raw_payload.yo_last_status_check_at).toEqual(
+      expect.any(String)
+    );
+    expect(stored.rows[0].raw_payload.yo_last_provider_snapshot).toMatchObject({
+      status: 'OK',
+      transaction_status: 'PENDING',
+      transaction_reference: 'yo-init-123',
+    });
+    expect(stored.rows[0].raw_payload.yo_next_action).toMatchObject({
+      type: 'payment_instruction',
+      next_check_in_ms: 10000,
     });
   });
 
@@ -367,7 +384,65 @@ describe('YO Uganda payment routes', () => {
       tx_ref: txn.merchant_reference,
       transaction_id: 'yo-alias-123',
       status: 'PENDING',
+      recommended_poll_interval_ms: 10000,
+      next_action: {
+        type: 'payment_instruction',
+        next_check_in_ms: 10000,
+      },
     });
+  });
+
+  it('returns a cached pending verification result instead of polling YO repeatedly within the throttle window', async () => {
+    const checkedAt = new Date().toISOString();
+    const { advertiser, txn } = await createCampaignFundingTransaction({
+      transactionReference: 'yo-cached-123',
+      rawPayload: {
+        yo_transaction_reference: 'yo-cached-123',
+        yo_last_provider_status: 'PENDING',
+        yo_last_status_check_at: checkedAt,
+        yo_last_provider_snapshot: {
+          status: 'OK',
+          transaction_status: 'PENDING',
+          transaction_reference: 'yo-cached-123',
+        },
+        yo_next_action: {
+          type: 'payment_instruction',
+          note: 'Approve the payment prompt on the mobile money phone to continue.',
+        },
+      },
+    });
+    const token = app.jwt.sign(buildAuthClaims(advertiser));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/payments/yo-uganda/verify',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        tx_ref: txn.merchant_reference,
+        transaction_id: 'yo-cached-123',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      cached: true,
+      tx_ref: txn.merchant_reference,
+      transaction_id: 'yo-cached-123',
+      status: 'PENDING',
+      recommended_poll_interval_ms: 10000,
+      next_action: {
+        type: 'payment_instruction',
+        next_check_in_ms: expect.any(Number),
+      },
+      result: {
+        ok: true,
+        pending: true,
+        cached: true,
+        next_check_in_ms: expect.any(Number),
+      },
+    });
+    expect(yoMocks.getTransactionStatus).not.toHaveBeenCalled();
   });
 
   it('blocks verification attempts from users who do not own the transaction', async () => {

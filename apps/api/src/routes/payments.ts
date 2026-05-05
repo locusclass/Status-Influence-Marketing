@@ -230,6 +230,8 @@ export async function paymentRoutes(app: FastifyInstance) {
   const deepLinkCancel = 'bakule://payment/cancel';
   const yoRouteBase = '/payments/yo-uganda';
   const legacyFlutterwaveRouteBase = '/payments/flutterwave';
+  const yoRecommendedPollIntervalMs = 10_000;
+  const yoVerifyPendingCacheWindowMs = yoRecommendedPollIntervalMs;
 
   const verifySchema = z
     .object({
@@ -288,6 +290,71 @@ export async function paymentRoutes(app: FastifyInstance) {
     'REQUIRES_ACTION',
     'INDETERMINATE',
   ]);
+
+  const buildPendingNextAction = (
+    payload: YoPaymentResponse | Record<string, unknown>,
+    nextCheckInMs = yoRecommendedPollIntervalMs
+  ) => {
+    const providerStatus = normalizeTransactionStatus(payload);
+    if (!statusPending.has(providerStatus)) {
+      return null;
+    }
+    return {
+      type: 'payment_instruction',
+      note:
+        buildProviderMessage(payload) ??
+        'Approve the payment prompt on the mobile money phone to continue.',
+      next_check_in_ms: nextCheckInMs,
+    };
+  };
+
+  const parseRecentPendingVerificationCache = (input: {
+    txRef: string;
+    transactionId: string;
+    rawPayload: Record<string, unknown>;
+  }) => {
+    const providerStatus = readTextValue(input.rawPayload.yo_last_provider_status)?.toUpperCase();
+    if (!providerStatus || !statusPending.has(providerStatus)) {
+      return null;
+    }
+
+    const checkedAt = readTextValue(input.rawPayload.yo_last_status_check_at);
+    const checkedAtMs = checkedAt ? Date.parse(checkedAt) : Number.NaN;
+    if (!Number.isFinite(checkedAtMs)) {
+      return null;
+    }
+
+    const ageMs = Date.now() - checkedAtMs;
+    if (ageMs < 0 || ageMs >= yoVerifyPendingCacheWindowMs) {
+      return null;
+    }
+
+    const nextCheckInMs = yoVerifyPendingCacheWindowMs - ageMs;
+    const storedNextAction = asRecord(input.rawPayload.yo_next_action);
+
+    return {
+      ok: true,
+      cached: true,
+      status: providerStatus,
+      tx_ref: input.txRef,
+      transaction_id: input.transactionId,
+      next_action: {
+        type: readTextValue(storedNextAction.type) ?? 'payment_instruction',
+        note:
+          readTextValue(storedNextAction.note) ??
+          'Approve the payment prompt on the mobile money phone to continue.',
+        next_check_in_ms: nextCheckInMs,
+      },
+      recommended_poll_interval_ms: yoRecommendedPollIntervalMs,
+      provider: asRecord(input.rawPayload.yo_last_provider_snapshot),
+      result: {
+        ok: true,
+        pending: true,
+        cached: true,
+        next_check_in_ms: nextCheckInMs,
+      },
+    };
+  };
 
   const applyVerifiedCharge = async (
     client: any,
@@ -462,13 +529,27 @@ export async function paymentRoutes(app: FastifyInstance) {
       String(paymentEvent.transactionId),
       paymentEvent.reference
     );
-    const result = await withTransaction(async (client) =>
-      applyVerifiedCharge(
-        client,
-        paymentEvent,
-        verified
-      )
-    );
+    const verifiedStatus = normalizeTransactionStatus(verified);
+    const verifiedSnapshot = compactProviderSnapshot(verified);
+    const nextAction = buildPendingNextAction(verified);
+    const result = await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE pesapal_transactions
+         SET raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $2::jsonb
+         WHERE merchant_reference=$1`,
+        [
+          paymentEvent.reference,
+          JSON.stringify({
+            yo_last_provider_status: verifiedStatus,
+            yo_last_status_check_at: new Date().toISOString(),
+            yo_last_provider_snapshot: verifiedSnapshot,
+            yo_next_action: nextAction,
+          }),
+        ]
+      );
+
+      return applyVerifiedCharge(client, paymentEvent, verified);
+    });
 
     return { result, verified };
   };
@@ -633,11 +714,8 @@ export async function paymentRoutes(app: FastifyInstance) {
   ) => {
     const chargeId = readTransactionReference(chargePayload);
     const providerStatus = normalizeTransactionStatus(chargePayload);
-    const instruction =
-      buildProviderMessage(chargePayload) ??
-      (statusPending.has(providerStatus)
-        ? 'Approve the payment prompt on the mobile money phone to continue.'
-        : null);
+    const pendingNextAction = buildPendingNextAction(chargePayload);
+    const instruction = pendingNextAction?.note ?? buildProviderMessage(chargePayload) ?? null;
 
     return {
       ok: true,
@@ -651,12 +729,8 @@ export async function paymentRoutes(app: FastifyInstance) {
       provider_status: providerStatus,
       redirect_url: null,
       instruction,
-      next_action: statusPending.has(providerStatus)
-        ? {
-            type: 'payment_instruction',
-            note: instruction,
-          }
-        : null,
+      next_action: pendingNextAction,
+      recommended_poll_interval_ms: pendingNextAction ? yoRecommendedPollIntervalMs : null,
       provider: compactProviderSnapshot(chargePayload),
     };
   };
@@ -757,14 +831,9 @@ export async function paymentRoutes(app: FastifyInstance) {
               network,
               yo_transaction_reference: chargeId,
               yo_last_provider_status: providerStatus,
-              yo_next_action: statusPending.has(providerStatus)
-                ? {
-                    type: 'payment_instruction',
-                    note:
-                      buildProviderMessage(chargeResponse) ??
-                      'Approve the payment prompt on the mobile money phone to continue.',
-                  }
-                : null,
+              yo_last_status_check_at: new Date().toISOString(),
+              yo_last_provider_snapshot: compactProviderSnapshot(chargeResponse),
+              yo_next_action: buildPendingNextAction(chargeResponse),
             }),
           ]
         );
@@ -891,7 +960,11 @@ export async function paymentRoutes(app: FastifyInstance) {
         if (!settlementReference) {
           return { error: 'missing_transaction_reference' } as const;
         }
-        return settlementReference;
+        return {
+          ...settlementReference,
+          txn: context.txn,
+          rawPayload: context.rawPayload,
+        };
       });
 
       if (!('transactionId' in verificationContext)) {
@@ -903,6 +976,24 @@ export async function paymentRoutes(app: FastifyInstance) {
               : 400
         );
         return verificationContext;
+      }
+
+      const cachedPendingResult = parseRecentPendingVerificationCache({
+        txRef,
+        transactionId: verificationContext.transactionId,
+        rawPayload: verificationContext.rawPayload,
+      });
+      if (cachedPendingResult) {
+        app.log.info(
+          {
+            tx_ref: txRef,
+            transaction_id: verificationContext.transactionId,
+            cached: true,
+            next_check_in_ms: cachedPendingResult.result.next_check_in_ms,
+          },
+          'yo_verify_result_cached'
+        );
+        return cachedPendingResult;
       }
 
       const { result, verified } = await settleCharge({
@@ -931,6 +1022,10 @@ export async function paymentRoutes(app: FastifyInstance) {
         status: verifiedStatus,
         tx_ref: txRef,
         transaction_id: verificationContext.transactionId,
+        next_action: buildPendingNextAction(verified),
+        recommended_poll_interval_ms: statusPending.has(verifiedStatus)
+          ? yoRecommendedPollIntervalMs
+          : null,
         result,
       };
     } catch (error) {
