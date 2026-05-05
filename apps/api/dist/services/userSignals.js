@@ -59,15 +59,22 @@ export async function touchUserPresence(userId, options = {}) {
     const normalizedUserId = String(userId ?? '').trim();
     if (!normalizedUserId)
         return;
-    await pool.query(`
-    UPDATE users
-    SET last_seen_at = NOW(),
-        last_login_at = CASE
-          WHEN $2::boolean THEN NOW()
-          ELSE last_login_at
-        END
-    WHERE id = $1
-    `, [normalizedUserId, options.markLogin === true]);
+    const client = await pool.connect();
+    try {
+        await ensureUserSignalSchema(client);
+        await client.query(`
+      UPDATE users
+      SET last_seen_at = NOW(),
+          last_login_at = CASE
+            WHEN $2::boolean THEN NOW()
+            ELSE last_login_at
+          END
+      WHERE id = $1
+      `, [normalizedUserId, options.markLogin === true]);
+    }
+    finally {
+        client.release();
+    }
 }
 export async function createUserNotifications(client, userIds, input) {
     await ensureUserSignalSchema(client);

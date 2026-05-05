@@ -412,9 +412,32 @@ async function refundWalletWithdrawal(client, withdrawal, reason) {
     return updated.rows[0] ?? withdrawal;
 }
 export async function accountRoutes(app) {
-    await withTransaction(async (client) => {
-        await ensureAccountSchema(client);
-        await ensurePolicyAcceptanceColumns(client);
+    let schemaReadyPromise = null;
+    const ensureAccountRoutesSchema = () => {
+        if (!schemaReadyPromise) {
+            schemaReadyPromise = withTransaction(async (client) => {
+                await ensureAccountSchema(client);
+                await ensurePolicyAcceptanceColumns(client);
+            }).catch((error) => {
+                schemaReadyPromise = null;
+                throw error;
+            });
+        }
+        return schemaReadyPromise;
+    };
+    app.addHook('onListen', async () => {
+        if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+            return;
+        }
+        try {
+            await ensureAccountRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'startup warmup failed for account schema');
+        }
+    });
+    app.addHook('preHandler', async () => {
+        await ensureAccountRoutesSchema();
     });
     const parsePaging = (query) => {
         const limitRaw = Number(query?.limit ?? 50);
@@ -878,7 +901,6 @@ export async function accountRoutes(app) {
             };
         });
     };
-    app.patch('/account/ambassador-capacity', { preHandler: [app.authenticate] }, handleAmbassadorCapacityUpdate);
     app.patch('/account/ambassador-capacity', { preHandler: [app.authenticate] }, handleAmbassadorCapacityUpdate);
     // ── Ambassador account verification recording ─────────────────────────────────
     // Ambassadors submit a WhatsApp status screen recording for admin to review

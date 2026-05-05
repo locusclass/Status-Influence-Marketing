@@ -180,8 +180,31 @@ async function ensureVerificationSessionColumns(client) {
   `);
 }
 export async function verificationRoutes(app) {
-    await withTransaction(async (client) => {
-        await ensureVerificationSessionColumns(client);
+    let schemaReadyPromise = null;
+    const ensureVerificationRoutesSchema = () => {
+        if (!schemaReadyPromise) {
+            schemaReadyPromise = withTransaction(async (client) => {
+                await ensureVerificationSessionColumns(client);
+            }).catch((error) => {
+                schemaReadyPromise = null;
+                throw error;
+            });
+        }
+        return schemaReadyPromise;
+    };
+    app.addHook('onListen', async () => {
+        if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+            return;
+        }
+        try {
+            await ensureVerificationRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'startup warmup failed for verification schema');
+        }
+    });
+    app.addHook('preHandler', async () => {
+        await ensureVerificationRoutesSchema();
     });
     const verificationRepo = new VerificationRepo();
     const jobRepo = new JobRepo();

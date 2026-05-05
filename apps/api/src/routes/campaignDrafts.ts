@@ -89,8 +89,17 @@ function toDraftResponse(payload: unknown, updatedAt: unknown) {
 }
 
 export async function campaignDraftRoutes(app: FastifyInstance) {
-  await withTransaction(async (client) => {
-    await ensureCampaignDraftsTable(client);
+  app.addHook('onListen', async () => {
+    if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+      return;
+    }
+    try {
+      await withTransaction(async (client) => {
+        await ensureCampaignDraftsTable(client);
+      });
+    } catch (error) {
+      app.log.error({ err: error }, 'startup warmup failed for campaign draft schema');
+    }
   });
 
   app.get('/campaign-drafts/active', { preHandler: [app.authenticate] }, async (request, reply) => {

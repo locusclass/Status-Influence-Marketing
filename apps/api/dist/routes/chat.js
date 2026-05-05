@@ -1769,14 +1769,19 @@ async function listThreadOffers(client, threadId) {
     return offers;
 }
 export async function chatRoutes(app) {
-    app.addHook('onReady', async () => {
+    app.addHook('onListen', async () => {
         if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
             return;
         }
-        await withTransaction(async (client) => {
-            await ensureChatSchema(client);
-            await ensureAmbassadorReviewsSchema(client);
-        });
+        try {
+            await withTransaction(async (client) => {
+                await ensureChatSchema(client);
+                await ensureAmbassadorReviewsSchema(client);
+            });
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'startup warmup failed for chat and ambassador review schema');
+        }
     });
     app.get('/chat/contacts', { preHandler: [app.authenticate] }, async (request, reply) => {
         const userId = authUserId(request);

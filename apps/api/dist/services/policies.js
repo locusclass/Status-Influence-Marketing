@@ -160,6 +160,7 @@ export async function ensurePolicyAcceptanceColumns(client) {
   `);
 }
 export async function loadUserPolicyAcceptance(client, userId) {
+    await ensurePolicyAcceptanceColumns(client);
     const result = await client.query(`
     SELECT
       id,

@@ -121,6 +121,24 @@ export function buildServer() {
     }
   });
 
+  const runStartupWarmups = async (source: string) => {
+    if (skipOptionalStartupWarmups) {
+      return;
+    }
+
+    try {
+      await withTransaction(async (client) => {
+        await ensureUserSignalSchema(client);
+        await ensurePolicyAcceptanceColumns(client);
+      });
+    } catch (error) {
+      app.log.error(
+        { err: error, source },
+        'startup warmup failed for user signal and policy schema'
+      );
+    }
+  };
+
   const defaultAllowedOrigins = [
     'https://primestatus.site',
     'https://*.primestatus.site',
@@ -190,14 +208,8 @@ export function buildServer() {
 
   app.register(multipart);
 
-  app.addHook('onReady', async () => {
-    if (skipOptionalStartupWarmups) {
-      return;
-    }
-    await withTransaction(async (client) => {
-      await ensureUserSignalSchema(client);
-      await ensurePolicyAcceptanceColumns(client);
-    });
+  app.addHook('onListen', async () => {
+    await runStartupWarmups('server:onListen:core');
   });
 
   app.addContentTypeParser(
@@ -350,7 +362,12 @@ export function buildServer() {
     app.register(swaggerUi, { routePrefix: '/docs' });
   }
 
-  const registerRoutes = (instance: FastifyInstance) => {
+  const registerRootRoutes = (instance: FastifyInstance) => {
+    instance.register(healthRoutes);
+    instance.register(uploadRoutes);
+  };
+
+  const registerApiRoutes = (instance: FastifyInstance) => {
     if (adminTestRouteProfile) {
       instance.register(healthRoutes);
       instance.register(adminRoutes);
@@ -371,19 +388,16 @@ export function buildServer() {
   };
 
   // Routes
-  registerRoutes(app);
+  registerRootRoutes(app);
   if (!adminTestRouteProfile) {
-    app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
+    app.register(async (instance) => registerApiRoutes(instance), { prefix: '/api' });
+  } else {
+    registerApiRoutes(app);
   }
 
   // Final payment-provider configuration
-  app.addHook('onReady', async () => {
-    if (skipOptionalStartupWarmups) {
-      return;
-    }
-    await withTransaction(async (client) => {
-      await ensureUserSignalSchema(client);
-    });
+  app.addHook('onListen', async () => {
+    await runStartupWarmups('server:onListen:payments');
 
     const hasSecret = hasYoSecretKey();
     const hasClientCreds = hasYoClientCredentials();

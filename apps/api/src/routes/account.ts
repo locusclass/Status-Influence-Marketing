@@ -535,9 +535,33 @@ async function refundWalletWithdrawal(
 }
 
 export async function accountRoutes(app: FastifyInstance) {
-  await withTransaction(async (client) => {
-    await ensureAccountSchema(client);
-    await ensurePolicyAcceptanceColumns(client);
+  let schemaReadyPromise: Promise<void> | null = null;
+  const ensureAccountRoutesSchema = () => {
+    if (!schemaReadyPromise) {
+      schemaReadyPromise = withTransaction(async (client) => {
+        await ensureAccountSchema(client);
+        await ensurePolicyAcceptanceColumns(client);
+      }).catch((error) => {
+        schemaReadyPromise = null;
+        throw error;
+      });
+    }
+    return schemaReadyPromise;
+  };
+
+  app.addHook('onListen', async () => {
+    if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+      return;
+    }
+    try {
+      await ensureAccountRoutesSchema();
+    } catch (error) {
+      app.log.error({ err: error }, 'startup warmup failed for account schema');
+    }
+  });
+
+  app.addHook('preHandler', async () => {
+    await ensureAccountRoutesSchema();
   });
 
   const parsePaging = (query: any) => {
@@ -1130,12 +1154,6 @@ export async function accountRoutes(app: FastifyInstance) {
         };
       });
     };
-
-  app.patch(
-    '/account/ambassador-capacity',
-    { preHandler: [app.authenticate] },
-    handleAmbassadorCapacityUpdate
-  );
 
   app.patch(
     '/account/ambassador-capacity',

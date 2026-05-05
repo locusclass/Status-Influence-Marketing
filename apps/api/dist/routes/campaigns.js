@@ -1381,9 +1381,32 @@ async function getContractForBusinessAction(client, contractId, businessId, role
     return { contract };
 }
 export async function campaignRoutes(app) {
-    await withTransaction(async (client) => {
-        await ensureCampaignColumns(client);
-        await ensureChatSchema(client);
+    let schemaReadyPromise = null;
+    const ensureCampaignRoutesSchema = () => {
+        if (!schemaReadyPromise) {
+            schemaReadyPromise = withTransaction(async (client) => {
+                await ensureCampaignColumns(client);
+                await ensureChatSchema(client);
+            }).catch((error) => {
+                schemaReadyPromise = null;
+                throw error;
+            });
+        }
+        return schemaReadyPromise;
+    };
+    app.addHook('onListen', async () => {
+        if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+            return;
+        }
+        try {
+            await ensureCampaignRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'startup warmup failed for campaign schema');
+        }
+    });
+    app.addHook('preHandler', async () => {
+        await ensureCampaignRoutesSchema();
     });
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();

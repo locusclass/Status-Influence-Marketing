@@ -217,14 +217,7 @@ export function isFatalStartupIssue(issue: string) {
   return (
     issue.includes('DATABASE_URL is missing') ||
     issue.includes('JWT_SECRET is missing') ||
-    issue.includes('JWT_SECRET is missing or using the development default') ||
-    issue.includes(YO_PROXY_URL_MISSING_MESSAGE) ||
-    issue.includes(YO_API_USERNAME_MISSING_MESSAGE) ||
-    issue.includes(YO_API_PASSWORD_MISSING_MESSAGE) ||
-    issue.includes('FIREBASE_PROJECT_ID is missing') ||
-    issue.includes('FIREBASE_CLIENT_EMAIL is missing') ||
-    issue.includes('FIREBASE_PRIVATE_KEY is missing') ||
-    issue.includes('FIREBASE_STORAGE_BUCKET is missing')
+    issue.includes('JWT_SECRET is missing or using the development default')
   );
 }
 
