@@ -658,9 +658,13 @@ async function ensureCampaignColumns(client: any) {
   await client.query(`
     DO $$ BEGIN
       IF to_regclass('public.campaigns') IS NOT NULL THEN
-        ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
-        ALTER TABLE campaigns
-          ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+        BEGIN
+          ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
+          ALTER TABLE campaigns
+            ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
       END IF;
     END $$;
   `);
@@ -1869,7 +1873,7 @@ export async function buildCampaignStatusSummaries(
           campaignStatus === 'ACTIVE' &&
           fundingConfirmed &&
           isConfirmedEscrowFundingStatus(escrowStatus) &&
-          latestContractStatus === 'UNCLAIMED',
+          (latestContractStatus === 'UNCLAIMED' || latestContractStatus === 'CANCELLED'),
       } satisfies CampaignStatusSummary
     );
   }
@@ -1996,7 +2000,11 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
 
   app.addHook('preHandler', async () => {
-    await ensureCampaignRoutesSchema();
+    try {
+      await ensureCampaignRoutesSchema();
+    } catch (error) {
+      app.log.error({ err: error }, 'campaign routes schema check failed — proceeding');
+    }
   });
 
   const campaignRepo = new CampaignRepo();
@@ -2342,7 +2350,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         authUser ?? null
       );
       const campaignsWithStatus = res.rows.map((row: any) => ({
-        ...row,
+        ...withCampaignMediaUrls(row),
         status_summary: statusSummaries.get(String(row.id)) ?? {
           campaign_status: String(row.status ?? 'ACTIVE'),
           escrow_status: 'PENDING',
@@ -2442,6 +2450,7 @@ export async function campaignRoutes(app: FastifyInstance) {
                   c.id AS campaign_id,
                   c.public_id AS campaign_public_id,
                   c.title AS campaign_title,
+                  c.platform,
                   c.assigned_phone,
                   c.assigned_ambassador_id,
                   ctr.id AS contract_id,
