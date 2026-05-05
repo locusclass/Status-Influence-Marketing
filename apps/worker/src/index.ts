@@ -8,7 +8,7 @@ import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
 import {
-  calculateambassadorPayoutBreakdown,
+  calculateAmbassadorPayoutBreakdown,
   generateMonthlyPayouts,
   deriveEngagementRate,
   doesSubmissionExist,
@@ -554,7 +554,7 @@ async function allocateCreatorCampaignShares(client: any, rootCampaign: any) {
           rootCampaign.id,
           creator.user_id,
           creator.phone || null,
-          `${rootCampaign.title} · Creator ${uuid().slice(0, 8)}`,
+          `${rootCampaign.title} - Creator ${uuid().slice(0, 8)}`,
           rootCampaign.platform,
           rootCampaign.delivery_model ?? 'DETERMINISTIC',
           unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
@@ -705,7 +705,7 @@ async function allocateOpenCampaignShares(client: any, rootCampaign: any) {
           rootCampaign.id,
           ambassador.id,
           ambassador.phone,
-          `${rootCampaign.title} · Allocation ${uuid().slice(0, 8)}`,
+          `${rootCampaign.title} - Allocation ${uuid().slice(0, 8)}`,
           rootCampaign.platform,
           rootCampaign.delivery_model ?? 'DETERMINISTIC',
           budgetTotal,
@@ -1209,7 +1209,7 @@ async function markContractCompletedForVerifiedProof(client: any, proofId: strin
 async function preparePayoutRequest(client: any, proof: any, campaign: any) {
   await ensureambassadorPayoutColumns(client);
   const escrowCampaignId = getEscrowCampaignId(campaign);
-  const payoutBreakdown = calculateambassadorPayoutBreakdown(
+  const payoutBreakdown = calculateAmbassadorPayoutBreakdown(
     Number(campaign?.payout_amount ?? campaign?.budget_total ?? 0)
   );
   const escrowDebitAmount = Math.max(
@@ -1927,9 +1927,9 @@ async function processVerificationJob(job: any) {
         platformValidation
       );
 
-      const isAdvertiserProof = proof.user_id === campaign.business_id;
+      const isBusinessProof = proof.user_id === campaign.business_id;
 
-      if (!isAdvertiserProof) {
+      if (!isBusinessProof) {
         // Trust-based payout gating is disabled for now; autonomous verification drives settlement.
       }
 
@@ -1994,8 +1994,8 @@ async function processPayoutJob(job: any) {
     if (!campaign) throw new Error('campaign_not_found');
 
     const payoutRequest = await withTransaction(async (client) => {
-      const isAdvertiserProof = proof.user_id === campaign.business_id;
-      if (!isAdvertiserProof) {
+      const isBusinessProof = proof.user_id === campaign.business_id;
+      if (!isBusinessProof) {
         return preparePayoutRequest(client, proof, campaign);
       }
       return null;

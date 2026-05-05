@@ -10,12 +10,28 @@ import { JobRepo } from '../repositories/jobRepo.js';
 import { verifyTransaction } from '../services/yoUganda.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
-import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, normalizeActiveRole, } from '../services/roles.js';
+import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, getRequestDashboardAccess, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, } from '../services/adminTenant.js';
 import { collectCampaignNotificationUserIds, createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 const UpdateUserRoleSchema = z.object({
-    role: z.enum(['ADMIN', 'ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER'])
+    role: z
+        .string()
+        .trim()
+        .transform((value, ctx) => {
+        const role = normalizeAccountRole(value);
+        if (role === ACCOUNT_ROLE_ADMIN ||
+            role === ACCOUNT_ROLE_BUSINESS ||
+            role === ACCOUNT_ROLE_AMBASSADOR ||
+            role === ACCOUNT_ROLE_DUAL_USER) {
+            return role;
+        }
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Invalid role.',
+        });
+        return z.NEVER;
+    }),
 });
 const UpdateUserStatusSchema = z.object({
     status: z.enum(['ACTIVE', 'SUSPENDED', 'BANNED']),
@@ -55,7 +71,7 @@ const UpdateCampaignSchema = z.object({
 });
 const UpdateContractSchema = z.object({
     status: z.enum(['ACTIVE', 'COMPLETED', 'CANCELLED']).optional(),
-    distributor_id: z.string().uuid().optional()
+    ambassador_id: z.string().uuid().optional()
 });
 const AdjustWalletSchema = z.object({
     amount: z.number().int().positive(),
@@ -251,7 +267,7 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     SET status='COMPLETED',
         completed_at=COALESCE(completed_at, now())
     WHERE campaign_id=$1
-      AND distributor_id=$2
+      AND ambassador_id=$2
       AND status='ACTIVE'
     `, [proofContext.campaign_id, proofContext.user_id]);
     await client.query(`
@@ -546,7 +562,7 @@ async function ensureCampaignDraftsTable(client) {
     await client.query(`
     CREATE TABLE IF NOT EXISTS campaign_creation_drafts (
       id UUID PRIMARY KEY,
-      advertiser_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      business_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
       payload JSONB NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1527,7 +1543,7 @@ export async function adminRoutes(app) {
             });
             const campaignDrafts = await countScoped({
                 module: ADMIN_MODULE_DRAFTS,
-                from: 'campaign_creation_drafts d JOIN users u ON u.id = d.advertiser_id',
+                from: 'campaign_creation_drafts d JOIN users u ON u.id = d.business_id',
                 country: 'u.country_id',
                 division: 'u.division_id',
             });
@@ -1686,11 +1702,11 @@ export async function adminRoutes(app) {
             const res = await client.query(`
         SELECT
           d.*,
-          u.email AS advertiser_email,
-          u.phone AS advertiser_phone,
-          u.public_id AS advertiser_public_id
+          u.email AS business_email,
+          u.phone AS business_phone,
+          u.public_id AS business_public_id
         FROM campaign_creation_drafts d
-        JOIN users u ON u.id = d.advertiser_id
+        JOIN users u ON u.id = d.business_id
         ${where}
         ORDER BY d.updated_at DESC
         LIMIT $${idx} OFFSET $${idx + 1}
@@ -2070,17 +2086,17 @@ export async function adminRoutes(app) {
           c.title AS campaign_title,
           c.public_id AS campaign_public_id,
           c.status AS campaign_status,
-          u.email AS distributor_email,
-          u.public_id AS distributor_public_id,
-          adv.email AS advertiser_email,
-          adv.public_id AS advertiser_public_id
+          u.email AS ambassador_email,
+          u.public_id AS ambassador_public_id,
+          adv.email AS business_email,
+          adv.public_id AS business_public_id
         FROM contracts ctr
         JOIN campaigns c ON c.id = ctr.campaign_id
-        JOIN users u ON u.id = ctr.distributor_id
-        JOIN users adv ON adv.id = c.advertiser_id
+        JOIN users u ON u.id = ctr.ambassador_id
+        JOIN users adv ON adv.id = c.business_id
         WHERE (
-          c.advertiser_id = $1
-          OR ctr.distributor_id = $1
+          c.business_id = $1
+          OR ctr.ambassador_id = $1
         )
           ${contractsScopeClause}
         ORDER BY ctr.created_at DESC
@@ -2101,32 +2117,32 @@ export async function adminRoutes(app) {
             const campaignsRes = await client.query(`
         SELECT
           c.*,
-          adv.email AS advertiser_email,
-          adv.public_id AS advertiser_public_id,
-          dist.email AS assigned_distributor_email,
-          dist.public_id AS assigned_distributor_public_id,
+          adv.email AS business_email,
+          adv.public_id AS business_public_id,
+          dist.email AS assigned_ambassador_email,
+          dist.public_id AS assigned_ambassador_public_id,
           CASE
-            WHEN c.advertiser_id = $1 THEN 'CREATED'
+            WHEN c.business_id = $1 THEN 'CREATED'
             WHEN EXISTS (
               SELECT 1
               FROM contracts ctr
               WHERE ctr.campaign_id = c.id
-                AND ctr.distributor_id = $1
+                AND ctr.ambassador_id = $1
             ) THEN 'TOOK_ON'
-            WHEN c.assigned_distributor_id = $1 THEN 'TAGGED'
+            WHEN c.assigned_ambassador_id = $1 THEN 'TAGGED'
             ELSE 'RELATED'
           END AS user_relation
         FROM campaigns c
-        LEFT JOIN users adv ON adv.id = c.advertiser_id
-        LEFT JOIN users dist ON dist.id = c.assigned_distributor_id
+        LEFT JOIN users adv ON adv.id = c.business_id
+        LEFT JOIN users dist ON dist.id = c.assigned_ambassador_id
         WHERE (
-          c.advertiser_id = $1
-          OR c.assigned_distributor_id = $1
+          c.business_id = $1
+          OR c.assigned_ambassador_id = $1
           OR EXISTS (
             SELECT 1
             FROM contracts ctr
             WHERE ctr.campaign_id = c.id
-              AND ctr.distributor_id = $1
+              AND ctr.ambassador_id = $1
           )
         )
           ${campaignsScopeClause}
@@ -2183,10 +2199,10 @@ export async function adminRoutes(app) {
                 body.role,
                 body.role === ACCOUNT_ROLE_ADMIN
                     ? ACCOUNT_ROLE_ADMIN
-                    : body.role === ACCOUNT_ROLE_ADVERTISER
-                        ? ACCOUNT_ROLE_ADVERTISER
-                        : body.role === ACCOUNT_ROLE_DISTRIBUTOR
-                            ? ACCOUNT_ROLE_DISTRIBUTOR
+                    : body.role === ACCOUNT_ROLE_BUSINESS
+                        ? ACCOUNT_ROLE_BUSINESS
+                        : body.role === ACCOUNT_ROLE_AMBASSADOR
+                            ? ACCOUNT_ROLE_AMBASSADOR
                             : normalizeActiveRole(null, ACCOUNT_ROLE_DUAL_USER),
             ]);
             if (res.rows[0]) {
@@ -2375,7 +2391,7 @@ export async function adminRoutes(app) {
             const params = [];
             let idx = 1;
             if (query?.q) {
-                conditions.push(`(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR adv.email ILIKE $${idx} OR adv.public_id ILIKE $${idx} OR c.advertiser_id::text ILIKE $${idx} OR dist.email ILIKE $${idx} OR dist.public_id ILIKE $${idx} OR COALESCE(c.assigned_distributor_id::text, '') ILIKE $${idx})`);
+                conditions.push(`(c.title ILIKE $${idx} OR c.id::text ILIKE $${idx} OR c.public_id ILIKE $${idx} OR adv.email ILIKE $${idx} OR adv.public_id ILIKE $${idx} OR c.business_id::text ILIKE $${idx} OR dist.email ILIKE $${idx} OR dist.public_id ILIKE $${idx} OR COALESCE(c.assigned_ambassador_id::text, '') ILIKE $${idx})`);
                 params.push(`%${query.q}%`);
                 idx++;
             }
@@ -2416,7 +2432,7 @@ export async function adminRoutes(app) {
             });
             idx = state.idx;
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT c.*, adv.email AS advertiser_email, adv.public_id AS advertiser_public_id, dist.email AS assigned_distributor_email, dist.public_id AS assigned_distributor_public_id FROM campaigns c LEFT JOIN users adv ON adv.id = c.advertiser_id LEFT JOIN users dist ON dist.id = c.assigned_distributor_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
+            const res = await client.query(`SELECT c.*, adv.email AS business_email, adv.public_id AS business_public_id, dist.email AS assigned_ambassador_email, dist.public_id AS assigned_ambassador_public_id FROM campaigns c LEFT JOIN users adv ON adv.id = c.business_id LEFT JOIN users dist ON dist.id = c.assigned_ambassador_id ${where} ORDER BY c.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
             const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), null);
             return {
                 campaigns: res.rows.map((row) => ({
@@ -2599,7 +2615,7 @@ export async function adminRoutes(app) {
         }
         return { proof: res };
     });
-    // ── Promoter account verification recordings (admin review) ─────────────────
+    // ── Ambassador account verification recordings (admin review) ─────────────────
     app.get('/admin/user-verifications', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
         const limit = Math.min(Number(query?.limit ?? 50), 200);
@@ -2628,7 +2644,7 @@ export async function adminRoutes(app) {
            u.email     AS user_email,
            u.phone     AS user_phone,
            u.max_status_viewers_12h AS current_verified_viewers
-         FROM promoter_verification_recordings pvr
+         FROM ambassador_verification_recordings pvr
          JOIN users u ON u.id = pvr.user_id
          ${where}
          ORDER BY pvr.created_at DESC
@@ -2645,7 +2661,7 @@ export async function adminRoutes(app) {
         return withTransaction(async (client) => {
             // Load the recording
             const recRes = await client.query(`SELECT pvr.*, u.id AS resolved_user_id
-         FROM promoter_verification_recordings pvr
+         FROM ambassador_verification_recordings pvr
          JOIN users u ON u.id = pvr.user_id
          WHERE pvr.id=$1 LIMIT 1`, [params.id]);
             const rec = recRes.rows[0];
@@ -2658,13 +2674,14 @@ export async function adminRoutes(app) {
                 return { error: 'already_reviewed' };
             }
             const adminUserId = request.user.sub;
-            // Mark recording as approved
-            await client.query(`UPDATE promoter_verification_recordings
+            // Mark recording as approved with 30-day expiry
+            await client.query(`UPDATE ambassador_verification_recordings
          SET status='APPROVED',
              approved_viewer_count=$2,
              admin_note=$3,
              reviewed_by_user_id=$4,
              reviewed_at=now(),
+             expires_at=now() + INTERVAL '30 days',
              updated_at=now()
          WHERE id=$1`, [params.id, body.viewer_count, body.admin_note ?? null, adminUserId]);
             // Apply the verified viewer count to the user's account
@@ -2679,8 +2696,9 @@ export async function adminRoutes(app) {
                 rec.resolved_user_id,
                 `Your WhatsApp status viewer count has been set to ${body.viewer_count} views. You can now accept campaigns.`,
             ]);
-            await logAudit(client, adminUserId, 'APPROVE_USER_VERIFICATION', 'promoter_verification_recording', params.id, { viewer_count: body.viewer_count });
-            return { ok: true, viewer_count: body.viewer_count };
+            await logAudit(client, adminUserId, 'APPROVE_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { viewer_count: body.viewer_count });
+            const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+            return { ok: true, viewer_count: body.viewer_count, expires_at: expiresAt };
         });
     });
     app.patch('/admin/user-verifications/:id/reject', { preHandler: [app.adminOnly] }, async (request, reply) => {
@@ -2689,7 +2707,7 @@ export async function adminRoutes(app) {
             admin_note: z.string().trim().min(1).max(500).optional(),
         }).safeParse(request.body);
         return withTransaction(async (client) => {
-            const recRes = await client.query(`SELECT pvr.user_id FROM promoter_verification_recordings pvr WHERE pvr.id=$1 LIMIT 1`, [params.id]);
+            const recRes = await client.query(`SELECT pvr.user_id FROM ambassador_verification_recordings pvr WHERE pvr.id=$1 LIMIT 1`, [params.id]);
             const rec = recRes.rows[0];
             if (!rec) {
                 reply.code(404);
@@ -2697,7 +2715,7 @@ export async function adminRoutes(app) {
             }
             const adminUserId = request.user.sub;
             const note = body.success ? (body.data.admin_note ?? null) : null;
-            await client.query(`UPDATE promoter_verification_recordings
+            await client.query(`UPDATE ambassador_verification_recordings
          SET status='REJECTED',
              admin_note=$2,
              reviewed_by_user_id=$3,
@@ -2715,7 +2733,7 @@ export async function adminRoutes(app) {
                     ? `Your verification recording was rejected: ${note}. Please re-submit a clearer recording.`
                     : 'Your verification recording was rejected. Please re-submit a clearer recording showing your viewer list.',
             ]);
-            await logAudit(client, adminUserId, 'REJECT_USER_VERIFICATION', 'promoter_verification_recording', params.id, { admin_note: note });
+            await logAudit(client, adminUserId, 'REJECT_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { admin_note: note });
             return { ok: true };
         });
     });
@@ -2770,11 +2788,11 @@ export async function adminRoutes(app) {
            c.start_date, c.end_date, c.visibility,
            c.approval_status, c.approval_deadline, c.approved_at,
            c.created_at,
-           u.id AS advertiser_id,
-           u.full_name AS advertiser_name,
-           u.email AS advertiser_email
+           u.id AS business_id,
+           u.full_name AS business_name,
+           u.email AS business_email
          FROM campaigns c
-         JOIN users u ON u.id = c.advertiser_id
+         JOIN users u ON u.id = c.business_id
          WHERE c.approval_status = 'PENDING_APPROVAL'
          ORDER BY c.approval_deadline ASC NULLS LAST
          LIMIT $1 OFFSET $2`, [limit, offset]);
@@ -2785,7 +2803,7 @@ export async function adminRoutes(app) {
         const params = request.params;
         const adminUserId = request.user.sub;
         return withTransaction(async (client) => {
-            const campRes = await client.query(`SELECT c.id, c.advertiser_id, c.title, c.approval_status
+            const campRes = await client.query(`SELECT c.id, c.business_id, c.title, c.approval_status
          FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
             const camp = campRes.rows[0];
             if (!camp) {
@@ -2800,7 +2818,7 @@ export async function adminRoutes(app) {
                  'Campaign approved',
                  $2, now())
          ON CONFLICT DO NOTHING`, [
-                camp.advertiser_id,
+                camp.business_id,
                 `Your campaign "${camp.title}" has been approved. You can now fund and launch it.`,
             ]);
             await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN', 'campaign', params.id, {});
@@ -2816,7 +2834,7 @@ export async function adminRoutes(app) {
         }
         const adminUserId = request.user.sub;
         return withTransaction(async (client) => {
-            const campRes = await client.query(`SELECT c.id, c.advertiser_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
+            const campRes = await client.query(`SELECT c.id, c.business_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
             const camp = campRes.rows[0];
             if (!camp) {
                 reply.code(404);
@@ -2825,7 +2843,7 @@ export async function adminRoutes(app) {
             await client.query(`UPDATE campaigns SET approval_status='REJECTED', approved_at=now(), approved_by_user_id=$2 WHERE id=$1`, [params.id, adminUserId]);
             await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
          VALUES (gen_random_uuid(), $1, 'CAMPAIGN_REJECTED', 'Campaign rejected', $2, now())
-         ON CONFLICT DO NOTHING`, [camp.advertiser_id, `Your campaign "${camp.title}" was rejected: ${body.data.reason}`]);
+         ON CONFLICT DO NOTHING`, [camp.business_id, `Your campaign "${camp.title}" was rejected: ${body.data.reason}`]);
             await logAudit(client, adminUserId, 'REJECT_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
             return { ok: true };
         });
@@ -2839,7 +2857,7 @@ export async function adminRoutes(app) {
         }
         const adminUserId = request.user.sub;
         return withTransaction(async (client) => {
-            const campRes = await client.query(`SELECT c.id, c.advertiser_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
+            const campRes = await client.query(`SELECT c.id, c.business_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
             const camp = campRes.rows[0];
             if (!camp) {
                 reply.code(404);
@@ -2848,7 +2866,7 @@ export async function adminRoutes(app) {
             await client.query(`UPDATE campaigns SET approval_status='RETURNED', approved_by_user_id=$2 WHERE id=$1`, [params.id, adminUserId]);
             await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
          VALUES (gen_random_uuid(), $1, 'CAMPAIGN_RETURNED', 'Campaign returned for edit', $2, now())
-         ON CONFLICT DO NOTHING`, [camp.advertiser_id, `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`]);
+         ON CONFLICT DO NOTHING`, [camp.business_id, `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`]);
             await logAudit(client, adminUserId, 'RETURN_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
             return { ok: true };
         });
@@ -2884,17 +2902,17 @@ export async function adminRoutes(app) {
            c.budget_total,
            c.execution_mode,
            c.delivery_model,
-           promoter.id AS promoter_id,
-           promoter.full_name AS promoter_name,
-           promoter.email AS promoter_email,
-           advertiser.id AS advertiser_id,
-           advertiser.full_name AS advertiser_name,
-           advertiser.email AS advertiser_email
+           ambassador.id AS ambassador_id,
+           ambassador.full_name AS ambassador_name,
+           ambassador.email AS ambassador_email,
+           business.id AS business_id,
+           business.full_name AS business_name,
+           business.email AS business_email
          FROM proofs p
          JOIN verification_sessions vs ON vs.id = p.session_id
          JOIN campaigns c ON c.id = vs.campaign_id
-         JOIN users promoter ON promoter.id = p.user_id
-         JOIN users advertiser ON advertiser.id = c.advertiser_id
+         JOIN users ambassador ON ambassador.id = p.user_id
+         JOIN users business ON business.id = c.business_id
          ${where}
          ORDER BY p.created_at DESC
          LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
@@ -2907,8 +2925,8 @@ export async function adminRoutes(app) {
         return withTransaction(async (client) => {
             // Fetch proof with campaign + users
             const res = await client.query(`SELECT
-           p.id, p.user_id AS promoter_id, p.status, p.decision,
-           c.id AS campaign_id, c.title AS campaign_title, c.advertiser_id,
+           p.id, p.user_id AS ambassador_id, p.status, p.decision,
+           c.id AS campaign_id, c.title AS campaign_title, c.business_id,
            c.payout_amount
          FROM proofs p
          JOIN verification_sessions vs ON vs.id = p.session_id
@@ -2923,23 +2941,23 @@ export async function adminRoutes(app) {
             await client.query(`UPDATE proofs SET status='VERIFIED', decision='VERIFIED', updated_at=now() WHERE id=$1`, [params.proofId]);
             await markContractCompletedForVerifiedProof(client, params.proofId);
             await jobRepo.enqueue(client, 'PAYOUT_PROOF', { proof_id: params.proofId });
-            // Notify promoter
+            // Notify ambassador
             await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
          VALUES (gen_random_uuid(), $1, 'PROOF_VERIFIED',
                  'Campaign proof approved',
                  $2, now())
          ON CONFLICT DO NOTHING`, [
-                proof.promoter_id,
+                proof.ambassador_id,
                 `Your proof for "${proof.campaign_title}" has been approved. Your payout of UGX ${proof.payout_amount} is being processed.`,
             ]);
-            // Notify advertiser
+            // Notify business
             await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
          VALUES (gen_random_uuid(), $1, 'CAMPAIGN_PROOF_VERIFIED',
                  'Campaign delivery confirmed',
                  $2, now())
          ON CONFLICT DO NOTHING`, [
-                proof.advertiser_id,
-                `A proof for your campaign "${proof.campaign_title}" has been verified and the promoter has been paid.`,
+                proof.business_id,
+                `A proof for your campaign "${proof.campaign_title}" has been verified and the ambassador has been paid.`,
             ]);
             await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN_COMPLETION', 'proof', params.proofId, {});
             return { ok: true };
@@ -3241,7 +3259,7 @@ export async function adminRoutes(app) {
             });
             idx = state.idx;
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-            const res = await client.query(`SELECT ctr.*, c.title AS campaign_title, u.email AS distributor_email, adv.email AS advertiser_email FROM contracts ctr JOIN campaigns c ON c.id = ctr.campaign_id JOIN users u ON u.id = ctr.distributor_id JOIN users adv ON adv.id = c.advertiser_id
+            const res = await client.query(`SELECT ctr.*, c.title AS campaign_title, u.email AS ambassador_email, adv.email AS business_email FROM contracts ctr JOIN campaigns c ON c.id = ctr.campaign_id JOIN users u ON u.id = ctr.ambassador_id JOIN users adv ON adv.id = c.business_id
          ${where}
          ORDER BY ctr.created_at DESC
          LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]);
@@ -3251,7 +3269,7 @@ export async function adminRoutes(app) {
     app.patch('/admin/contracts/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         const body = UpdateContractSchema.parse(request.body);
-        if (!body.status && !body.distributor_id) {
+        if (!body.status && !body.ambassador_id) {
             reply.code(400);
             return { error: 'missing_fields' };
         }
@@ -3271,40 +3289,40 @@ export async function adminRoutes(app) {
             if (!matchesTenantScope(access, scopedContract)) {
                 return null;
             }
-            if (body.distributor_id) {
-                const distributorRes = await client.query(`
+            if (body.ambassador_id) {
+                const ambassadorRes = await client.query(`
           SELECT id, country_id, division_id
           FROM users
           WHERE id = $1
           LIMIT 1
-          `, [body.distributor_id]);
-                const distributor = distributorRes.rows[0] ?? null;
-                if (!distributor) {
+          `, [body.ambassador_id]);
+                const ambassador = ambassadorRes.rows[0] ?? null;
+                if (!ambassador) {
                     reply.code(404);
-                    return { error: 'distributor_not_found' };
+                    return { error: 'ambassador_not_found' };
                 }
-                const sameTenant = String(distributor.country_id ?? '') ===
+                const sameTenant = String(ambassador.country_id ?? '') ===
                     String(scopedContract.country_id ?? '') &&
                     (!scopedContract.division_id ||
-                        String(distributor.division_id ?? '') ===
+                        String(ambassador.division_id ?? '') ===
                             String(scopedContract.division_id ?? ''));
-                if (!sameTenant || !matchesTenantScope(access, distributor)) {
+                if (!sameTenant || !matchesTenantScope(access, ambassador)) {
                     reply.code(409);
-                    return { error: 'distributor_scope_mismatch' };
+                    return { error: 'ambassador_scope_mismatch' };
                 }
             }
             const updated = await client.query(`UPDATE contracts
          SET status=COALESCE($2, status),
-             distributor_id=COALESCE($3, distributor_id)
+             ambassador_id=COALESCE($3, ambassador_id)
          WHERE id=$1
-         RETURNING *`, [params.id, body.status ?? null, body.distributor_id ?? null]);
+         RETURNING *`, [params.id, body.status ?? null, body.ambassador_id ?? null]);
             if (updated.rows[0]) {
                 await logAudit(client, request.user.sub, 'UPDATE_CONTRACT', 'contract', params.id, body);
             }
             return updated.rows[0];
         });
-        if (res?.error === 'distributor_not_found' ||
-            res?.error === 'distributor_scope_mismatch') {
+        if (res?.error === 'ambassador_not_found' ||
+            res?.error === 'ambassador_scope_mismatch') {
             return res;
         }
         if (!res) {

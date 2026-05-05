@@ -64,7 +64,7 @@ const accountProfileSchema = z
   .object({
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
-    current_business_viewers: z.number().int().min(0).optional(),
+    current_advertiser_viewers: z.number().int().min(0).optional(),
     current_business_viewers: z.number().int().min(0).optional(),
     private_contract_rate_ugx: z.number().int().min(0).optional(),
     price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),

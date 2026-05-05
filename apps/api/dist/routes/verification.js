@@ -6,7 +6,7 @@ import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from 
 import { randomInt } from 'crypto';
 import { config } from '../config.js';
 import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
-import { canAccessDistributorFeatures } from '../services/roles.js';
+import { canAccessAmbassadorFeatures } from '../services/roles.js';
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
 const MIN_RECORDING_SECONDS = 58;
@@ -130,11 +130,11 @@ function validateStrictClientMeta(clientMeta, script) {
     }
     return null;
 }
-async function getActiveDistributorContract(client, campaignId, userId) {
+async function getActiveAmbassadorContract(client, campaignId, userId) {
     const contractRes = await client.query(`SELECT id, post_deadline_at, contract_deadline_at
      FROM contracts
      WHERE campaign_id=$1
-       AND distributor_id=$2
+       AND ambassador_id=$2
        AND status='ACTIVE'
      LIMIT 1`, [campaignId, userId]);
     return contractRes.rows[0] ?? null;
@@ -193,7 +193,7 @@ export async function verificationRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessDistributorFeatures(role)) {
+        if (!canAccessAmbassadorFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -225,7 +225,7 @@ export async function verificationRoutes(app) {
             if (script.error) {
                 return script;
             }
-            const contract = await getActiveDistributorContract(client, body.campaign_id, authUser);
+            const contract = await getActiveAmbassadorContract(client, body.campaign_id, authUser);
             if (!contract && role !== 'ADMIN')
                 return { error: 'contract_required' };
             if (contract && hasDeadlinePassed(contract.contract_deadline_at)) {
@@ -305,7 +305,7 @@ export async function verificationRoutes(app) {
             const existingForSession = await client.query('SELECT id FROM proofs WHERE session_id=$1 LIMIT 1', [body.session_id]);
             if (existingForSession.rows[0])
                 return { error: 'proof_already_submitted' };
-            const contract = await getActiveDistributorContract(client, session.campaign_id, authUser);
+            const contract = await getActiveAmbassadorContract(client, session.campaign_id, authUser);
             if (!contract)
                 return { error: 'contract_not_active' };
             if (hasDeadlinePassed(contract.contract_deadline_at)) {

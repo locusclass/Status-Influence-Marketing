@@ -2,9 +2,9 @@ import { z } from 'zod';
 import { getPublicContractUnitRate, MediaTypeSchema } from '@prime/shared';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
-import { ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER, canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
+import { ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER, canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_GROUP_ROOM, CHAT_OFFER_RESPONSE_ACCEPT, CHAT_OFFER_RESPONSE_COUNTER, CHAT_OFFER_RESPONSE_REJECT, CHAT_OFFER_STATUS_ACCEPTED, CHAT_OFFER_STATUS_COUNTERED, CHAT_OFFER_STATUS_PENDING, CHAT_OFFER_STATUS_REJECTED, ensureChatSchema, } from '../services/chat.js';
-import { ensurePromoterReviewsSchema, listPromoterReviews, loadLatestCompletedContractForReview, loadPromoterReviewSummaryMap, } from '../services/promoterReviews.js';
+import { ensureAmbassadorReviewsSchema, listAmbassadorReviews, loadLatestCompletedContractForReview, loadAmbassadorReviewSummaryMap, } from '../services/ambassadorReviews.js';
 import { buildPhoneLookupVariants, splitSearchTerms, } from '../services/contactLookup.js';
 import { createUserNotifications } from '../services/userSignals.js';
 const groupDealThreadSchema = z.object({
@@ -69,7 +69,7 @@ const respondInviteSchema = z.object({
     action: z.enum(['ACCEPT', 'DECLINE']),
 });
 const setGroupPriceSchema = z.object({
-    advertiser_id: z.string().uuid(),
+    business_id: z.string().uuid(),
     override_price_ugx: z.number().int().min(0),
 });
 const offerContextSchema = z.object({
@@ -136,14 +136,14 @@ const voteGroupOfferSchema = z
         });
     }
 });
-function isPromoterChatBizRole(role) {
+function isAmbassadorChatBizRole(role) {
     const normalizedRole = normalizeAccountRole(role);
-    return (normalizedRole === ACCOUNT_ROLE_DISTRIBUTOR ||
+    return (normalizedRole === ACCOUNT_ROLE_AMBASSADOR ||
         normalizedRole === ACCOUNT_ROLE_DUAL_USER);
 }
-function isAdvertiserChatBizRole(role) {
+function isBusinessChatBizRole(role) {
     const normalizedRole = normalizeAccountRole(role);
-    return (normalizedRole === ACCOUNT_ROLE_ADVERTISER ||
+    return (normalizedRole === ACCOUNT_ROLE_BUSINESS ||
         normalizedRole === ACCOUNT_ROLE_DUAL_USER);
 }
 function authUserId(request) {
@@ -248,14 +248,14 @@ function serializeUserSummary(row) {
         id: String(row?.id ?? ''),
         public_id: String(row?.public_id ?? ''),
         display_name: displayNameFromRow(row),
-        role: String(row?.role ?? 'DISTRIBUTOR'),
-        active_role: String(row?.active_role ?? row?.role ?? 'DISTRIBUTOR'),
+        role: String(row?.role ?? 'AMBASSADOR'),
+        active_role: String(row?.active_role ?? row?.role ?? 'AMBASSADOR'),
         is_online: row?.is_online === true,
         last_seen_at: timestampText(row?.last_seen_at),
         profile_type: 'USER',
         verified_views_24h: toInt(row?.verified_views_24h),
         max_status_viewers_12h: toInt(row?.max_status_viewers_12h),
-        current_advertiser_viewers: toInt(row?.current_advertiser_viewers),
+        current_business_viewers: toInt(row?.current_business_viewers),
         private_contract_rate_ugx: toInt(row?.private_contract_rate_ugx),
         official_price_ugx: officialPriceUgx,
         price_privacy_mode: pricePrivacyMode,
@@ -294,12 +294,12 @@ async function loadUserSummary(client, userId) {
       u.id,
       u.public_id,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'AMBASSADOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
-      COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+      COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
@@ -318,10 +318,10 @@ async function loadUserSummary(client, userId) {
     LIMIT 1
     `, [userId]);
     return res.rows[0]
-        ? applyPromoterReviewSummary(client, serializeUserSummary(res.rows[0]))
+        ? applyAmbassadorReviewSummary(client, serializeUserSummary(res.rows[0]))
         : null;
 }
-async function resolvePromoterProfileUser(client, reference) {
+async function resolveAmbassadorProfileUser(client, reference) {
     const normalizedReference = String(reference ?? '').trim();
     if (!normalizedReference)
         return null;
@@ -333,21 +333,21 @@ async function resolvePromoterProfileUser(client, reference) {
     LIMIT 1
     `, [normalizedReference]);
     const row = res.rows[0];
-    if (!row || !isPromoterChatBizRole(row.role)) {
+    if (!row || !isAmbassadorChatBizRole(row.role)) {
         return null;
     }
     return row;
 }
 function usersCanChatDirectly(currentActiveRole, participantAccountRole) {
     const normalizedActiveRole = normalizeActiveRole(currentActiveRole, currentActiveRole);
-    if (normalizedActiveRole === ACCOUNT_ROLE_ADVERTISER) {
-        return isPromoterChatBizRole(participantAccountRole);
+    if (normalizedActiveRole === ACCOUNT_ROLE_BUSINESS) {
+        return isAmbassadorChatBizRole(participantAccountRole);
     }
-    if (normalizedActiveRole === ACCOUNT_ROLE_DISTRIBUTOR) {
-        return isAdvertiserChatBizRole(participantAccountRole);
+    if (normalizedActiveRole === ACCOUNT_ROLE_AMBASSADOR) {
+        return isBusinessChatBizRole(participantAccountRole);
     }
-    return (isAdvertiserChatBizRole(participantAccountRole) ||
-        isPromoterChatBizRole(participantAccountRole));
+    return (isBusinessChatBizRole(participantAccountRole) ||
+        isAmbassadorChatBizRole(participantAccountRole));
 }
 async function ensureDirectThread(client, userId, participantId, mediaUrl, mediaType) {
     const directKey = [userId, participantId].sort().join(':');
@@ -406,10 +406,10 @@ function normalizeMediaUrls(value) {
 function primaryMediaUrl(value) {
     return normalizeMediaUrls(value)[0] ?? null;
 }
-async function applyPromoterReviewSummary(client, summary) {
+async function applyAmbassadorReviewSummary(client, summary) {
     if (!summary)
         return null;
-    const summaryMap = await loadPromoterReviewSummaryMap(client, [summary.id]);
+    const summaryMap = await loadAmbassadorReviewSummaryMap(client, [summary.id]);
     const review = summaryMap.get(summary.id);
     return {
         ...summary,
@@ -418,10 +418,10 @@ async function applyPromoterReviewSummary(client, summary) {
         latest_review_comment: review?.latest_comment ?? null,
     };
 }
-async function applyPromoterReviewSummaries(client, summaries) {
+async function applyAmbassadorReviewSummaries(client, summaries) {
     if (summaries.length === 0)
         return summaries;
-    const summaryMap = await loadPromoterReviewSummaryMap(client, summaries.map((entry) => entry.id));
+    const summaryMap = await loadAmbassadorReviewSummaryMap(client, summaries.map((entry) => entry.id));
     return summaries.map((entry) => {
         const review = summaryMap.get(entry.id);
         return {
@@ -432,7 +432,7 @@ async function applyPromoterReviewSummaries(client, summaries) {
         };
     });
 }
-const createPromoterReviewSchema = z.object({
+const createAmbassadorReviewSchema = z.object({
     rating: z.number().int().min(1).max(5),
     comment: z.string().trim().max(400).optional(),
 });
@@ -515,12 +515,12 @@ async function loadDirectCounterpart(client, threadId, userId) {
       u.id,
       u.public_id,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'AMBASSADOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
-      COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+      COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
@@ -542,7 +542,7 @@ async function loadDirectCounterpart(client, threadId, userId) {
     LIMIT 1
     `, [threadId, userId]);
     return res.rows[0]
-        ? applyPromoterReviewSummary(client, serializeUserSummary(res.rows[0]))
+        ? applyAmbassadorReviewSummary(client, serializeUserSummary(res.rows[0]))
         : null;
 }
 async function listThreadMessages(client, threadId, options = {}) {
@@ -654,8 +654,8 @@ async function listGroupMemberViewerRows(client, groupId) {
       membership.joined_at,
       u.public_id,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'AMBASSADOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
@@ -682,18 +682,18 @@ async function listGroupMemberViewerRows(client, groupId) {
     `, [groupId]);
     return res.rows;
 }
-async function loadGroupPriceOverride(client, groupId, advertiserId) {
-    const normalizedAdvertiserId = String(advertiserId ?? '').trim();
-    if (!normalizedAdvertiserId) {
+async function loadGroupPriceOverride(client, groupId, businessId) {
+    const normalizedBusinessId = String(businessId ?? '').trim();
+    if (!normalizedBusinessId) {
         return null;
     }
     const res = await client.query(`
     SELECT override_price_ugx
     FROM chat_group_price_overrides
     WHERE group_id = $1
-      AND advertiser_id = $2
+      AND business_id = $2
     LIMIT 1
-    `, [groupId, normalizedAdvertiserId]);
+    `, [groupId, normalizedBusinessId]);
     return res.rows[0] ? toInt(res.rows[0].override_price_ugx) : null;
 }
 async function buildGroupSnapshot(client, groupId, options = {}) {
@@ -711,8 +711,8 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
       creator.id AS creator_id,
       creator.public_id AS creator_public_id,
       COALESCE(NULLIF(creator.full_name, ''), NULLIF(creator.email, ''), NULLIF(creator.phone, ''), 'Participant') AS creator_display_name,
-      COALESCE(NULLIF(creator.role, ''), 'DISTRIBUTOR') AS creator_role,
-      COALESCE(NULLIF(creator.active_role, ''), COALESCE(NULLIF(creator.role, ''), 'DISTRIBUTOR')) AS creator_active_role,
+      COALESCE(NULLIF(creator.role, ''), 'AMBASSADOR') AS creator_role,
+      COALESCE(NULLIF(creator.active_role, ''), COALESCE(NULLIF(creator.role, ''), 'AMBASSADOR')) AS creator_active_role,
       creator.last_seen_at AS creator_last_seen_at,
       (creator.last_seen_at >= NOW() - interval '2 minutes') AS creator_is_online,
       membership.role AS current_membership_role,
@@ -732,7 +732,7 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
     const capacity24h = memberRows.reduce((sum, row) => sum + toInt(row.viewers_24h), 0);
     const memberCount = memberRows.length;
     const aggregatedOfficialPrice = memberRows.reduce((sum, row) => sum + resolveOfficialPriceUgx(row), 0);
-    const effectivePriceOverride = await loadGroupPriceOverride(client, groupId, options.pricingAdvertiserId);
+    const effectivePriceOverride = await loadGroupPriceOverride(client, groupId, options.pricingBusinessId);
     const publicPriceUgx = toInt(groupRow.public_price_ugx);
     const officialPriceUgx = publicPriceUgx > 0 ? publicPriceUgx : aggregatedOfficialPrice;
     const groupPricePrivacyMode = resolveGroupPricePrivacyMode(memberRows.map((row) => row.price_privacy_mode));
@@ -760,10 +760,10 @@ async function buildGroupSnapshot(client, groupId, options = {}) {
             joined_at: timestampText(row.joined_at),
         };
     });
-    const members = await applyPromoterReviewSummaries(client, rawMembers);
+    const members = await applyAmbassadorReviewSummaries(client, rawMembers);
     const creatorSummary = groupRow.creator_id == null
         ? null
-        : await applyPromoterReviewSummary(client, serializeUserSummary({
+        : await applyAmbassadorReviewSummary(client, serializeUserSummary({
             id: groupRow.creator_id,
             public_id: groupRow.creator_public_id,
             display_name: groupRow.creator_display_name,
@@ -811,46 +811,46 @@ async function listChatContacts(client, userId) {
       u.id,
       u.public_id,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'AMBASSADOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
     FROM (
-      SELECT c.advertiser_id AS counterpart_id
+      SELECT c.business_id AS counterpart_id
       FROM campaigns c
-      WHERE c.assigned_distributor_id = $1
+      WHERE c.assigned_ambassador_id = $1
       UNION
-      SELECT c.assigned_distributor_id AS counterpart_id
+      SELECT c.assigned_ambassador_id AS counterpart_id
       FROM campaigns c
-      WHERE c.advertiser_id = $1
-        AND c.assigned_distributor_id IS NOT NULL
+      WHERE c.business_id = $1
+        AND c.assigned_ambassador_id IS NOT NULL
       UNION
-      SELECT c.advertiser_id AS counterpart_id
+      SELECT c.business_id AS counterpart_id
       FROM contracts ctr
       JOIN campaigns c ON c.id = ctr.campaign_id
-      WHERE ctr.distributor_id = $1
+      WHERE ctr.ambassador_id = $1
       UNION
-      SELECT ctr.distributor_id AS counterpart_id
+      SELECT ctr.ambassador_id AS counterpart_id
       FROM contracts ctr
       JOIN campaigns c ON c.id = ctr.campaign_id
-      WHERE c.advertiser_id = $1
+      WHERE c.business_id = $1
     ) counterparts
     JOIN users u ON u.id = counterparts.counterpart_id
     WHERE counterparts.counterpart_id IS NOT NULL
       AND counterparts.counterpart_id <> $1
     ORDER BY is_online DESC, display_name ASC
     `, [userId]);
-    return applyPromoterReviewSummaries(client, res.rows.map(serializeUserSummary));
+    return applyAmbassadorReviewSummaries(client, res.rows.map(serializeUserSummary));
 }
 async function listDiscoverableChatContacts(client, userId, activeRole, searchText) {
     const normalizedActiveRole = normalizeActiveRole(activeRole, activeRole);
-    const targetRoles = normalizedActiveRole === ACCOUNT_ROLE_ADVERTISER
-        ? [ACCOUNT_ROLE_DISTRIBUTOR, ACCOUNT_ROLE_DUAL_USER]
-        : normalizedActiveRole === ACCOUNT_ROLE_DISTRIBUTOR
-            ? [ACCOUNT_ROLE_ADVERTISER, ACCOUNT_ROLE_DUAL_USER]
+    const targetRoles = normalizedActiveRole === ACCOUNT_ROLE_BUSINESS
+        ? [ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER]
+        : normalizedActiveRole === ACCOUNT_ROLE_AMBASSADOR
+            ? [ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_DUAL_USER]
             : [
-                ACCOUNT_ROLE_ADVERTISER,
-                ACCOUNT_ROLE_DISTRIBUTOR,
+                ACCOUNT_ROLE_BUSINESS,
+                ACCOUNT_ROLE_AMBASSADOR,
                 ACCOUNT_ROLE_DUAL_USER,
             ];
     const params = [userId, targetRoles, CHAT_THREAD_KIND_DIRECT];
@@ -867,20 +867,20 @@ async function listDiscoverableChatContacts(client, userId, activeRole, searchTe
       )
     `;
     }
-    const rankingMetric = normalizedActiveRole === ACCOUNT_ROLE_DISTRIBUTOR
-        ? 'current_advertiser_viewers'
+    const rankingMetric = normalizedActiveRole === ACCOUNT_ROLE_AMBASSADOR
+        ? 'current_business_viewers'
         : 'verified_views_24h';
     const res = await client.query(`
     SELECT
       u.id,
       u.public_id,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'AMBASSADOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
-      COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+      COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h,
@@ -911,7 +911,7 @@ async function listDiscoverableChatContacts(client, userId, activeRole, searchTe
     ) direct_thread ON TRUE
     WHERE u.id <> $1
       AND COALESCE(NULLIF(u.status, ''), 'ACTIVE') = 'ACTIVE'
-      AND COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') = ANY($2::text[])
+      AND COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') = ANY($2::text[])
       ${searchSql}
     ORDER BY
       has_existing_thread DESC,
@@ -920,7 +920,7 @@ async function listDiscoverableChatContacts(client, userId, activeRole, searchTe
       display_name ASC
     LIMIT 30
     `, params);
-    return applyPromoterReviewSummaries(client, res.rows.map(serializeUserSummary));
+    return applyAmbassadorReviewSummaries(client, res.rows.map(serializeUserSummary));
 }
 async function listMyGroups(client, userId) {
     const res = await client.query(`
@@ -949,8 +949,8 @@ async function listGroupInvites(client, userId) {
       inviter.id AS inviter_id,
       inviter.public_id AS inviter_public_id,
       COALESCE(NULLIF(inviter.full_name, ''), NULLIF(inviter.email, ''), NULLIF(inviter.phone, ''), 'Participant') AS inviter_display_name,
-      COALESCE(NULLIF(inviter.role, ''), 'DISTRIBUTOR') AS inviter_role,
-      COALESCE(NULLIF(inviter.active_role, ''), COALESCE(NULLIF(inviter.role, ''), 'DISTRIBUTOR')) AS inviter_active_role,
+      COALESCE(NULLIF(inviter.role, ''), 'AMBASSADOR') AS inviter_role,
+      COALESCE(NULLIF(inviter.active_role, ''), COALESCE(NULLIF(inviter.role, ''), 'AMBASSADOR')) AS inviter_active_role,
       inviter.last_seen_at AS inviter_last_seen_at,
       (inviter.last_seen_at >= NOW() - interval '2 minutes') AS inviter_is_online
     FROM chat_group_memberships membership
@@ -1046,7 +1046,7 @@ async function listDiscoverableGroups(client, userId, searchText) {
     for (const row of res.rows) {
         const group = await buildGroupSnapshot(client, String(row.id), {
             currentUserId: userId,
-            pricingAdvertiserId: userId,
+            pricingBusinessId: userId,
         });
         if (group)
             groups.push(group);
@@ -1060,13 +1060,13 @@ async function listGroupCandidates(client, userId, options = {}) {
       u.id,
       u.public_id,
       COALESCE(NULLIF(u.full_name, ''), NULLIF(u.email, ''), NULLIF(u.phone, ''), 'Participant') AS display_name,
-      COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') AS role,
-      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR')) AS active_role,
+      COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') AS role,
+      COALESCE(NULLIF(u.active_role, ''), COALESCE(NULLIF(u.role, ''), 'AMBASSADOR')) AS active_role,
       u.last_seen_at,
       (u.last_seen_at >= NOW() - interval '2 minutes') AS is_online
     FROM users u
     WHERE u.id <> $1
-      AND COALESCE(NULLIF(u.role, ''), 'DISTRIBUTOR') IN ('DISTRIBUTOR', 'DUAL_USER')
+      AND COALESCE(NULLIF(u.role, ''), 'AMBASSADOR') IN ('AMBASSADOR', 'DUAL_USER')
   `;
     const search = String(options.search ?? '').trim();
     if (search) {
@@ -1114,8 +1114,8 @@ async function listGroupCandidates(client, userId, options = {}) {
     LIMIT 20
   `;
     const res = await client.query(sql, params);
-    return applyPromoterReviewSummaries(client, res.rows
-        .filter((row) => isPromoterChatBizRole(row.role))
+    return applyAmbassadorReviewSummaries(client, res.rows
+        .filter((row) => isAmbassadorChatBizRole(row.role))
         .map(serializeUserSummary));
 }
 async function buildThreadSummary(client, threadId, userId) {
@@ -1159,16 +1159,16 @@ async function buildThreadSummary(client, threadId, userId) {
         if (deal) {
             group = await buildGroupSnapshot(client, String(deal.group_id), {
                 currentUserId: userId,
-                pricingAdvertiserId: String(deal.advertiser_id),
+                pricingBusinessId: String(deal.business_id),
                 includeMembers: false,
             });
-            if (String(deal.advertiser_id) !== userId) {
-                counterpart = await loadUserSummary(client, String(deal.advertiser_id));
+            if (String(deal.business_id) !== userId) {
+                counterpart = await loadUserSummary(client, String(deal.business_id));
             }
             title =
-                String(deal.advertiser_id) === userId
+                String(deal.business_id) === userId
                     ? String(group?.name ?? title ?? 'Group Pool').trim()
-                    : `${String(group?.name ?? 'Group Pool').trim()} · ${counterpart?.display_name ?? 'Advertiser'}`;
+                    : `${String(group?.name ?? 'Group Pool').trim()} · ${counterpart?.display_name ?? 'Business'}`;
         }
     }
     return {
@@ -1229,7 +1229,7 @@ async function buildThreadDetail(client, threadId, userId) {
             ...summary,
             group: await buildGroupSnapshot(client, String(summary.group.id), {
                 currentUserId: userId,
-                pricingAdvertiserId: summary.kind === CHAT_THREAD_KIND_GROUP_DEAL &&
+                pricingBusinessId: summary.kind === CHAT_THREAD_KIND_GROUP_DEAL &&
                     summary.counterpart == null
                     ? userId
                     : undefined,
@@ -1250,7 +1250,7 @@ async function buildThreadDetail(client, threadId, userId) {
         cursor,
     };
 }
-async function ensureGroupDealThread(client, groupId, advertiserId, createdBy, mediaUrl, mediaType) {
+async function ensureGroupDealThread(client, groupId, businessId, createdBy, mediaUrl, mediaType) {
     const group = await loadGroupById(client, groupId);
     if (!group)
         return null;
@@ -1258,9 +1258,9 @@ async function ensureGroupDealThread(client, groupId, advertiserId, createdBy, m
     SELECT thread_id
     FROM chat_group_deal_threads
     WHERE group_id = $1
-      AND advertiser_id = $2
+      AND business_id = $2
     LIMIT 1
-    `, [groupId, advertiserId]);
+    `, [groupId, businessId]);
     let threadId = String(existingRes.rows[0]?.thread_id ?? '').trim();
     let created = false;
     if (!threadId) {
@@ -1279,16 +1279,16 @@ async function ensureGroupDealThread(client, groupId, advertiserId, createdBy, m
         const dealInsertRes = await client.query(`
       INSERT INTO chat_group_deal_threads (
         group_id,
-        advertiser_id,
+        business_id,
         thread_id,
         created_by,
         updated_at
       )
       VALUES ($1, $2, $3, $4, NOW())
-      ON CONFLICT (group_id, advertiser_id) DO UPDATE
+      ON CONFLICT (group_id, business_id) DO UPDATE
         SET updated_at = NOW()
       RETURNING thread_id
-      `, [groupId, advertiserId, threadId, createdBy]);
+      `, [groupId, businessId, threadId, createdBy]);
         threadId = String(dealInsertRes.rows[0]?.thread_id ?? threadId).trim();
         created = true;
     }
@@ -1299,7 +1299,7 @@ async function ensureGroupDealThread(client, groupId, advertiserId, createdBy, m
       AND status = 'ACTIVE'
     `, [groupId]);
     const participantIds = Array.from(new Set([
-        advertiserId,
+        businessId,
         ...memberRes.rows.map((row) => String(row.user_id)),
     ]));
     if (participantIds.length > 0) {
@@ -1319,7 +1319,7 @@ async function ensureGroupDealThread(client, groupId, advertiserId, createdBy, m
     `, [threadId, String(group.name ?? 'Group Pool').trim(), mediaUrl, mediaType]);
     return { threadId, created, group };
 }
-async function ensureDistributorCandidates(client, userIds) {
+async function ensureAmbassadorCandidates(client, userIds) {
     const normalizedIds = Array.from(new Set(userIds.map((value) => String(value ?? '').trim()).filter(Boolean)));
     if (normalizedIds.length === 0) {
         return { validUsers: [], missingIds: [] };
@@ -1329,7 +1329,7 @@ async function ensureDistributorCandidates(client, userIds) {
     FROM users
     WHERE id = ANY($1::uuid[])
     `, [normalizedIds]);
-    const validUsers = res.rows.filter((row) => isPromoterChatBizRole(row.role));
+    const validUsers = res.rows.filter((row) => isAmbassadorChatBizRole(row.role));
     const foundIds = new Set(res.rows.map((row) => String(row.id)));
     const missingIds = normalizedIds.filter((id) => !foundIds.has(id));
     return { validUsers, missingIds };
@@ -1364,7 +1364,7 @@ async function buildThreadOfferContext(client, threadId, userId, mediaType) {
         }
         const group = await buildGroupSnapshot(client, String(deal.group_id), {
             currentUserId: userId,
-            pricingAdvertiserId: String(deal.advertiser_id),
+            pricingBusinessId: String(deal.business_id),
             includeMembers: true,
         });
         if (!group) {
@@ -1417,7 +1417,7 @@ async function seedInitialThreadQuoteIfMissing(client, threadId, actingUserId, m
     }
     const seedNote = context.target_kind === 'GROUP'
         ? 'Current group quote'
-        : 'Current promoter quote';
+        : 'Current ambassador quote';
     const insertRes = await client.query(`
     INSERT INTO chat_offer_events (
       thread_id,
@@ -1674,7 +1674,7 @@ async function buildCampaignPrefillFromOffer(client, offer) {
     else if (offer.target_kind === 'GROUP' && offer.target_group_id) {
         const deal = await loadGroupDealByThreadId(client, String(offer.thread_id));
         target = await buildGroupSnapshot(client, String(offer.target_group_id), {
-            pricingAdvertiserId: String(deal?.advertiser_id ?? ''),
+            pricingBusinessId: String(deal?.business_id ?? ''),
         });
     }
     const acceptedPrice = toInt(offer.resolved_price_ugx ?? offer.proposed_price_ugx);
@@ -1710,7 +1710,7 @@ async function serializeOffer(client, offer) {
         ? await loadUserSummary(client, String(offer.target_user_id))
         : offer.target_kind === 'GROUP' && offer.target_group_id
             ? await buildGroupSnapshot(client, String(offer.target_group_id), {
-                pricingAdvertiserId: String(deal?.advertiser_id ?? ''),
+                pricingBusinessId: String(deal?.business_id ?? ''),
             })
             : null;
     const votes = offer.target_kind === 'GROUP' ? await listOfferVotes(client, String(offer.id)) : [];
@@ -1775,7 +1775,7 @@ export async function chatRoutes(app) {
         }
         await withTransaction(async (client) => {
             await ensureChatSchema(client);
-            await ensurePromoterReviewsSchema(client);
+            await ensureAmbassadorReviewsSchema(client);
         });
     });
     app.get('/chat/contacts', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -1790,8 +1790,8 @@ export async function chatRoutes(app) {
             await ensureChatSchema(client);
             if (scope === 'directory') {
                 const activeRole = authActiveRole(request);
-                if (activeRole !== ACCOUNT_ROLE_ADVERTISER &&
-                    activeRole !== ACCOUNT_ROLE_DISTRIBUTOR) {
+                if (activeRole !== ACCOUNT_ROLE_BUSINESS &&
+                    activeRole !== ACCOUNT_ROLE_AMBASSADOR) {
                     return [];
                 }
                 return listDiscoverableChatContacts(client, userId, activeRole, query.search);
@@ -1810,21 +1810,21 @@ export async function chatRoutes(app) {
         const activeRole = authActiveRole(request);
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
-            await ensurePromoterReviewsSchema(client);
-            const promoter = await resolvePromoterProfileUser(client, params.id);
-            if (!promoter) {
+            await ensureAmbassadorReviewsSchema(client);
+            const ambassador = await resolveAmbassadorProfileUser(client, params.id);
+            if (!ambassador) {
                 return { error: 'profile_not_found' };
             }
-            const profile = await loadUserSummary(client, String(promoter.id));
+            const profile = await loadUserSummary(client, String(ambassador.id));
             if (!profile) {
                 return { error: 'profile_not_found' };
             }
-            const latestCompletedContract = userId !== String(promoter.id) && isAdvertiserChatBizRole(activeRole)
-                ? await loadLatestCompletedContractForReview(client, userId, String(promoter.id))
+            const latestCompletedContract = userId !== String(ambassador.id) && isBusinessChatBizRole(activeRole)
+                ? await loadLatestCompletedContractForReview(client, userId, String(ambassador.id))
                 : null;
             return {
                 profile,
-                reviews: await listPromoterReviews(client, String(promoter.id)),
+                reviews: await listAmbassadorReviews(client, String(ambassador.id)),
                 can_review: latestCompletedContract != null,
                 review_contract_id: latestCompletedContract == null
                     ? null
@@ -1841,7 +1841,7 @@ export async function chatRoutes(app) {
         const userId = authUserId(request);
         const activeRole = authActiveRole(request);
         const params = request.params;
-        const parsed = createPromoterReviewSchema.safeParse(request.body);
+        const parsed = createAmbassadorReviewSchema.safeParse(request.body);
         if (!userId) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -1850,28 +1850,28 @@ export async function chatRoutes(app) {
             reply.code(400);
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
-        if (!isAdvertiserChatBizRole(activeRole)) {
+        if (!isBusinessChatBizRole(activeRole)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
-            await ensurePromoterReviewsSchema(client);
-            const promoter = await resolvePromoterProfileUser(client, params.id);
-            if (!promoter) {
+            await ensureAmbassadorReviewsSchema(client);
+            const ambassador = await resolveAmbassadorProfileUser(client, params.id);
+            if (!ambassador) {
                 return { error: 'profile_not_found' };
             }
-            if (String(promoter.id) === userId) {
+            if (String(ambassador.id) === userId) {
                 return { error: 'cannot_review_self' };
             }
-            const contract = await loadLatestCompletedContractForReview(client, userId, String(promoter.id));
+            const contract = await loadLatestCompletedContractForReview(client, userId, String(ambassador.id));
             if (!contract?.id) {
                 return { error: 'review_contract_required' };
             }
             const savedReview = await client.query(`
-        INSERT INTO promoter_profile_reviews (
-          promoter_id,
-          advertiser_id,
+        INSERT INTO ambassador_profile_reviews (
+          ambassador_id,
+          business_id,
           contract_id,
           rating,
           comment,
@@ -1882,9 +1882,9 @@ export async function chatRoutes(app) {
           SET rating = EXCLUDED.rating,
               comment = EXCLUDED.comment,
               updated_at = NOW()
-        RETURNING id, promoter_id, advertiser_id, contract_id, rating, comment, created_at, updated_at
+        RETURNING id, ambassador_id, business_id, contract_id, rating, comment, created_at, updated_at
         `, [
-                String(promoter.id),
+                String(ambassador.id),
                 userId,
                 String(contract.id),
                 parsed.data.rating,
@@ -1892,8 +1892,8 @@ export async function chatRoutes(app) {
             ]);
             return {
                 review: savedReview.rows[0] ?? null,
-                profile: await loadUserSummary(client, String(promoter.id)),
-                reviews: await listPromoterReviews(client, String(promoter.id)),
+                profile: await loadUserSummary(client, String(ambassador.id)),
+                reviews: await listAmbassadorReviews(client, String(ambassador.id)),
                 can_review: true,
                 review_contract_id: String(contract.id),
             };
@@ -1930,9 +1930,9 @@ export async function chatRoutes(app) {
         }
         const scope = String(query.scope ?? 'mine').trim().toLowerCase();
         const search = String(query.search ?? '').trim();
-        if (scope === 'directory' && authActiveRole(request) !== ACCOUNT_ROLE_ADVERTISER) {
+        if (scope === 'directory' && authActiveRole(request) !== ACCOUNT_ROLE_BUSINESS) {
             reply.code(403);
-            return { error: 'advertiser_role_required' };
+            return { error: 'business_role_required' };
         }
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
@@ -1953,10 +1953,10 @@ export async function chatRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (authActiveRole(request) !== ACCOUNT_ROLE_DISTRIBUTOR ||
-            !canAccessDistributorFeatures(authAccountRole(request))) {
+        if (authActiveRole(request) !== ACCOUNT_ROLE_AMBASSADOR ||
+            !canAccessAmbassadorFeatures(authAccountRole(request))) {
             reply.code(403);
-            return { error: 'distributor_group_only' };
+            return { error: 'ambassador_group_only' };
         }
         const candidates = await withTransaction(async (client) => {
             await ensureChatSchema(client);
@@ -2022,10 +2022,10 @@ export async function chatRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (authActiveRole(request) !== ACCOUNT_ROLE_DISTRIBUTOR ||
-            !canAccessDistributorFeatures(authAccountRole(request))) {
+        if (authActiveRole(request) !== ACCOUNT_ROLE_AMBASSADOR ||
+            !canAccessAmbassadorFeatures(authAccountRole(request))) {
             reply.code(403);
-            return { error: 'distributor_group_only' };
+            return { error: 'ambassador_group_only' };
         }
         const parsed = createGroupSchema.safeParse(request.body);
         if (!parsed.success) {
@@ -2037,7 +2037,7 @@ export async function chatRoutes(app) {
             .filter((value) => value && value !== userId)));
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
-            const { validUsers, missingIds } = await ensureDistributorCandidates(client, inviteeIds);
+            const { validUsers, missingIds } = await ensureAmbassadorCandidates(client, inviteeIds);
             if (missingIds.length > 0) {
                 return { error: 'group_candidate_not_found' };
             }
@@ -2259,7 +2259,7 @@ export async function chatRoutes(app) {
             const targetIds = Array.from(new Set(parsed.data.member_ids
                 .map((value) => String(value ?? '').trim())
                 .filter((value) => value && value !== userId)));
-            const { validUsers, missingIds } = await ensureDistributorCandidates(client, targetIds);
+            const { validUsers, missingIds } = await ensureAmbassadorCandidates(client, targetIds);
             if (missingIds.length > 0) {
                 return { error: 'group_candidate_not_found' };
             }
@@ -2388,7 +2388,7 @@ export async function chatRoutes(app) {
             await createUserNotifications(client, adminRes.rows.map((row) => row.user_id), {
                 category: 'BARGAIN_TABLE',
                 title: 'Pool invite accepted',
-                body: 'A promoter accepted your ChatBiz group invite.',
+                body: 'A ambassador accepted your ChatBiz group invite.',
                 actorId: userId,
                 targetType: 'CHAT_GROUP',
                 targetId: params.id,
@@ -2420,16 +2420,16 @@ export async function chatRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (authActiveRole(request) !== ACCOUNT_ROLE_ADVERTISER ||
-            !canAccessAdvertiserFeatures(authAccountRole(request))) {
+        if (authActiveRole(request) !== ACCOUNT_ROLE_BUSINESS ||
+            !canAccessBusinessFeatures(authAccountRole(request))) {
             reply.code(403);
-            return { error: 'advertiser_role_required' };
+            return { error: 'business_role_required' };
         }
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
             const groupSnapshot = await buildGroupSnapshot(client, params.id, {
                 currentUserId: userId,
-                pricingAdvertiserId: userId,
+                pricingBusinessId: userId,
                 includeMembers: true,
             });
             if (!groupSnapshot) {
@@ -2452,8 +2452,8 @@ export async function chatRoutes(app) {
           `, [params.id]);
                 await createUserNotifications(client, activeMemberIdsRes.rows.map((row) => row.user_id), {
                     category: 'BARGAIN_TABLE',
-                    title: 'New advertiser deal room',
-                    body: `An advertiser opened a ChatBiz room with ${String(deal.group?.name ?? 'your group')}.`,
+                    title: 'New business deal room',
+                    body: `An business opened a ChatBiz room with ${String(deal.group?.name ?? 'your group')}.`,
                     actorId: userId,
                     targetType: 'CHAT_THREAD',
                     targetId: deal.threadId,
@@ -2492,48 +2492,48 @@ export async function chatRoutes(app) {
             if (String(membership.role) !== 'ADMIN') {
                 return { error: 'group_admin_required' };
             }
-            const advertiserRes = await client.query(`
+            const businessRes = await client.query(`
         SELECT id, role
         FROM users
         WHERE id = $1
         LIMIT 1
-        `, [parsed.data.advertiser_id]);
-            const advertiser = advertiserRes.rows[0];
-            if (!advertiser) {
+        `, [parsed.data.business_id]);
+            const business = businessRes.rows[0];
+            if (!business) {
                 return { error: 'participant_not_found' };
             }
-            if (!canAccessAdvertiserFeatures(advertiser.role)) {
+            if (!canAccessBusinessFeatures(business.role)) {
                 return { error: 'invalid_group_pricing_target' };
             }
             if (parsed.data.override_price_ugx <= 0) {
                 await client.query(`
           DELETE FROM chat_group_price_overrides
           WHERE group_id = $1
-            AND advertiser_id = $2
-          `, [params.id, parsed.data.advertiser_id]);
+            AND business_id = $2
+          `, [params.id, parsed.data.business_id]);
             }
             else {
                 await client.query(`
           INSERT INTO chat_group_price_overrides (
             group_id,
-            advertiser_id,
+            business_id,
             override_price_ugx,
             set_by,
             updated_at
           )
           VALUES ($1, $2, $3, $4, NOW())
-          ON CONFLICT (group_id, advertiser_id) DO UPDATE
+          ON CONFLICT (group_id, business_id) DO UPDATE
             SET override_price_ugx = EXCLUDED.override_price_ugx,
                 set_by = EXCLUDED.set_by,
                 updated_at = EXCLUDED.updated_at
           `, [
                     params.id,
-                    parsed.data.advertiser_id,
+                    parsed.data.business_id,
                     parsed.data.override_price_ugx,
                     userId,
                 ]);
             }
-            await createUserNotifications(client, [parsed.data.advertiser_id], {
+            await createUserNotifications(client, [parsed.data.business_id], {
                 category: 'BARGAIN_TABLE',
                 title: 'Your group deal price changed',
                 body: parsed.data.override_price_ugx <= 0
@@ -2544,11 +2544,11 @@ export async function chatRoutes(app) {
                 targetId: params.id,
             });
             return {
-                advertiser_id: parsed.data.advertiser_id,
+                business_id: parsed.data.business_id,
                 override_price_ugx: parsed.data.override_price_ugx,
                 group: await buildGroupSnapshot(client, params.id, {
                     currentUserId: userId,
-                    pricingAdvertiserId: parsed.data.advertiser_id,
+                    pricingBusinessId: parsed.data.business_id,
                     includeMembers: true,
                 }),
             };
@@ -2638,10 +2638,10 @@ export async function chatRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (authActiveRole(request) !== ACCOUNT_ROLE_ADVERTISER ||
-            !canAccessAdvertiserFeatures(authAccountRole(request))) {
+        if (authActiveRole(request) !== ACCOUNT_ROLE_BUSINESS ||
+            !canAccessBusinessFeatures(authAccountRole(request))) {
             reply.code(403);
-            return { error: 'advertiser_role_required' };
+            return { error: 'business_role_required' };
         }
         const parsed = createOfferSchema.safeParse(request.body);
         if (!parsed.success) {
@@ -2776,7 +2776,7 @@ export async function chatRoutes(app) {
             }
             else if (offer.target_kind === 'GROUP') {
                 const deal = await loadGroupDealByThreadId(client, String(offer.thread_id));
-                responseAllowed = String(deal?.advertiser_id ?? '') === userId;
+                responseAllowed = String(deal?.business_id ?? '') === userId;
             }
             if (!responseAllowed) {
                 return { error: 'offer_response_not_allowed' };

@@ -52,7 +52,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
     impression_target: z.ZodOptional<z.ZodNumber>;
     platform_fee_percent: z.ZodOptional<z.ZodNumber>;
-    advertiser_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
+    business_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
     terms_keep_hours: z.ZodOptional<z.ZodNumber>;
     terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
     terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
@@ -76,7 +76,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -100,7 +100,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -124,7 +124,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -148,7 +148,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -177,7 +177,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
         impression_target: z.ZodOptional<z.ZodNumber>;
         platform_fee_percent: z.ZodOptional<z.ZodNumber>;
-        advertiser_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
+        business_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
         terms_keep_hours: z.ZodOptional<z.ZodNumber>;
         terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
         terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
@@ -201,7 +201,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -225,7 +225,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -249,7 +249,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -273,7 +273,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -295,7 +295,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
     impression_target: z.ZodOptional<z.ZodNumber>;
     platform_fee_percent: z.ZodOptional<z.ZodNumber>;
-    advertiser_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
+    business_wallet_mode: z.ZodOptional<z.ZodEnum<["CAMPAIGN_ONLY"]>>;
     terms_keep_hours: z.ZodOptional<z.ZodNumber>;
     terms_min_views: z.ZodNullable<z.ZodOptional<z.ZodNumber>>;
     terms_requirement: z.ZodOptional<z.ZodEnum<["DURATION", "VIEWS", "BOTH"]>>;
@@ -319,7 +319,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -344,7 +344,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -369,7 +369,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -394,7 +394,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -419,7 +419,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -444,7 +444,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -469,7 +469,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
     platform_fee_percent?: number | undefined;
-    advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+    business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
     terms_keep_hours?: number | undefined;
     terms_min_views?: number | null | undefined;
     terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;
@@ -494,7 +494,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
         platform_fee_percent?: number | undefined;
-        advertiser_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
+        business_wallet_mode?: "CAMPAIGN_ONLY" | undefined;
         terms_keep_hours?: number | undefined;
         terms_min_views?: number | null | undefined;
         terms_requirement?: "DURATION" | "VIEWS" | "BOTH" | undefined;

@@ -35,7 +35,7 @@ export const CampaignBundleItemSchema = z
     execution_meta: z.record(z.any()).optional(),
     impression_target: z.number().int().min(1).optional(),
     platform_fee_percent: z.number().min(0).max(100).optional(),
-    advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
+    business_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
     terms_keep_hours: z.number().int().min(1).max(168).optional(),
     terms_min_views: z.number().int().min(1).optional().nullable(),
     terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional()
@@ -75,7 +75,7 @@ export const CreateCampaignSchema = z
     execution_meta: z.record(z.any()).optional(),
     impression_target: z.number().int().min(1).optional(),
     platform_fee_percent: z.number().min(0).max(100).optional(),
-    advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
+    business_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
     terms_keep_hours: z.number().int().min(1).max(168).optional(),
     terms_min_views: z.number().int().min(1).optional().nullable(),
     terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional()

@@ -7,7 +7,7 @@ import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
 import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
-import { calculatePromoterPayoutBreakdown, generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, PROMOTER_PLATFORM_FEE_PERCENT, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
+import { calculateAmbassadorPayoutBreakdown, generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, AMBASSADOR_PLATFORM_FEE_PERCENT, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
@@ -73,7 +73,7 @@ async function ensureCampaignAllocatorColumns(client) {
   `);
     await client.query(`
     ALTER TABLE campaigns
-      ADD COLUMN IF NOT EXISTS assigned_distributor_id UUID REFERENCES users(id)
+      ADD COLUMN IF NOT EXISTS assigned_ambassador_id UUID REFERENCES users(id)
   `);
     await client.query(`
     ALTER TABLE campaigns
@@ -97,7 +97,7 @@ async function ensureCampaignAllocatorColumns(client) {
   `);
     await client.query(`
     ALTER TABLE campaigns
-      ADD COLUMN IF NOT EXISTS advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY'
+      ADD COLUMN IF NOT EXISTS business_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY'
   `);
     await client.query(`
     ALTER TABLE campaigns
@@ -132,10 +132,10 @@ async function ensureCampaignAllocatorColumns(client) {
     ON campaigns (bundle_root_campaign_id)
   `);
 }
-async function ensurePromoterPayoutColumns(client) {
+async function ensureambassadorPayoutColumns(client) {
     await client.query(`
     ALTER TABLE payout_requests
-      ADD COLUMN IF NOT EXISTS platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT ${PROMOTER_PLATFORM_FEE_PERCENT}
+      ADD COLUMN IF NOT EXISTS platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT ${AMBASSADOR_PLATFORM_FEE_PERCENT}
   `);
     await client.query(`
     ALTER TABLE payout_requests
@@ -231,7 +231,7 @@ async function syncCreatorsFromUsers(client) {
       50
     FROM users u
     LEFT JOIN trust_scores ts ON ts.user_id = u.id
-    WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
+    WHERE u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
     ON CONFLICT (user_id)
     DO UPDATE SET
       creator_score = GREATEST(creators.creator_score, COALESCE(EXCLUDED.creator_score, creators.creator_score)),
@@ -263,14 +263,14 @@ function getPerAllocationTarget(campaign, unitCount) {
     const totalTarget = Math.max(1, Math.floor(Number(campaign?.impression_target ?? campaign?.terms_min_views ?? 1)));
     return Math.max(1, Math.ceil(totalTarget / Math.max(1, unitCount)));
 }
-async function getEligibleDistributors(client) {
+async function getEligibleambassadors(client) {
     const res = await client.query(`
     SELECT
       u.id,
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h
     FROM users u
-    WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER')
+    WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
       AND u.status = 'ACTIVE'
       AND COALESCE(u.max_status_viewers_12h, 0) > 0
     ORDER BY u.max_status_viewers_12h DESC, u.created_at ASC
@@ -301,7 +301,7 @@ async function getEligibleCreators(client, platform, creatorScoreFloor) {
       ON ca.creator_id = c.id
      AND ca.platform = $1
      AND ca.active = TRUE
-    WHERE u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
+    WHERE u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
       AND u.status = 'ACTIVE'
       AND COALESCE(c.creator_score, 50) >= $2
       AND NULLIF(BTRIM(COALESCE(ca.profile_url, ca.handle, '')), '') IS NOT NULL
@@ -380,7 +380,7 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
         SELECT 1
         FROM campaigns
         WHERE parent_campaign_id=$1
-          AND assigned_distributor_id=$2
+          AND assigned_ambassador_id=$2
           AND status='ACTIVE'
         LIMIT 1
         `, [rootCampaign.id, creator.user_id]);
@@ -402,11 +402,11 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
             const childExecutionMetaJson = JSON.stringify(childExecutionMeta);
             await client.query(`
         INSERT INTO campaigns (
-          advertiser_id,
+          business_id,
           campaign_bundle_id,
           bundle_root_campaign_id,
           parent_campaign_id,
-          assigned_distributor_id,
+          assigned_ambassador_id,
           assigned_phone,
           title,
           platform,
@@ -417,7 +417,7 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
           budget_total,
           impression_target,
           platform_fee_percent,
-          advertiser_wallet_mode,
+          business_wallet_mode,
           last_allocated_at,
           allocation_round,
           media_type,
@@ -436,20 +436,20 @@ async function allocateCreatorCampaignShares(client, rootCampaign) {
           $1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN_BUDGET','PRIVATE',$10,$11,$12,$13,$14,now(),$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,'ACTIVE',$24,$25
         )
         `, [
-                rootCampaign.advertiser_id,
+                rootCampaign.business_id,
                 rootCampaign.campaign_bundle_id ?? null,
                 rootCampaign.bundle_root_campaign_id ?? rootCampaign.id,
                 rootCampaign.id,
                 creator.user_id,
                 creator.phone || null,
-                `${rootCampaign.title} · Creator ${uuid().slice(0, 8)}`,
+                `${rootCampaign.title} - Creator ${uuid().slice(0, 8)}`,
                 rootCampaign.platform,
                 rootCampaign.delivery_model ?? 'DETERMINISTIC',
                 unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
                 unitTarget * getPublicContractUnitRate(rootCampaign.media_type),
                 unitTarget,
                 rootCampaign.platform_fee_percent ?? 0,
-                rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
+                rootCampaign.business_wallet_mode ?? 'CAMPAIGN_ONLY',
                 round,
                 rootCampaign.media_type,
                 rootCampaign.media_text,
@@ -489,7 +489,7 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
     if (isCreatorPlatform(rootCampaign.platform)) {
         return allocateCreatorCampaignShares(client, rootCampaign);
     }
-    const eligible = shuffle(await getEligibleDistributors(client));
+    const eligible = shuffle(await getEligibleambassadors(client));
     if (!eligible.length) {
         return 0;
     }
@@ -509,35 +509,35 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
     const recentlyAssigned = new Set();
     while (remainingViews > 0 && eligible.length > 0) {
         let allocatedThisPass = false;
-        for (const distributor of eligible) {
+        for (const ambassador of eligible) {
             if (remainingViews <= 0)
                 break;
-            if (recentlyAssigned.has(distributor.id) && recentlyAssigned.size < eligible.length) {
+            if (recentlyAssigned.has(ambassador.id) && recentlyAssigned.size < eligible.length) {
                 continue;
             }
             const activeRes = await client.query(`
         SELECT 1
         FROM campaigns
         WHERE parent_campaign_id=$1
-          AND assigned_distributor_id=$2
+          AND assigned_ambassador_id=$2
           AND status='ACTIVE'
         LIMIT 1
-        `, [rootCampaign.id, distributor.id]);
+        `, [rootCampaign.id, ambassador.id]);
             if (activeRes.rows[0]) {
                 continue;
             }
-            const views = Math.max(1, Math.min(distributor.max_status_viewers_12h, remainingViews));
+            const views = Math.max(1, Math.min(ambassador.max_status_viewers_12h, remainingViews));
             const budgetTotal = views * getPublicContractUnitRate(rootCampaign.media_type);
             const executionMetaJson = rootCampaign.execution_meta == null
                 ? null
                 : JSON.stringify(rootCampaign.execution_meta);
             await client.query(`
         INSERT INTO campaigns (
-          advertiser_id,
+          business_id,
           campaign_bundle_id,
           bundle_root_campaign_id,
           parent_campaign_id,
-          assigned_distributor_id,
+          assigned_ambassador_id,
           assigned_phone,
           title,
           platform,
@@ -548,7 +548,7 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
           budget_total,
           impression_target,
           platform_fee_percent,
-          advertiser_wallet_mode,
+          business_wallet_mode,
           last_allocated_at,
           allocation_round,
           media_type,
@@ -567,20 +567,20 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
           $1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN_BUDGET','PRIVATE',$10,$11,$12,$13,$14,now(),$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,'ACTIVE',$24,$25
         )
         `, [
-                rootCampaign.advertiser_id,
+                rootCampaign.business_id,
                 rootCampaign.campaign_bundle_id ?? null,
                 rootCampaign.bundle_root_campaign_id ?? rootCampaign.id,
                 rootCampaign.id,
-                distributor.id,
-                distributor.phone,
-                `${rootCampaign.title} · Allocation ${uuid().slice(0, 8)}`,
+                ambassador.id,
+                ambassador.phone,
+                `${rootCampaign.title} - Allocation ${uuid().slice(0, 8)}`,
                 rootCampaign.platform,
                 rootCampaign.delivery_model ?? 'DETERMINISTIC',
                 budgetTotal,
                 budgetTotal,
                 views,
                 rootCampaign.platform_fee_percent ?? 0,
-                rootCampaign.advertiser_wallet_mode ?? 'CAMPAIGN_ONLY',
+                rootCampaign.business_wallet_mode ?? 'CAMPAIGN_ONLY',
                 round,
                 rootCampaign.media_type,
                 rootCampaign.media_text,
@@ -596,7 +596,7 @@ async function allocateOpenCampaignShares(client, rootCampaign) {
             remainingViews -= views;
             created += 1;
             allocatedThisPass = true;
-            recentlyAssigned.add(distributor.id);
+            recentlyAssigned.add(ambassador.id);
         }
         if (!allocatedThisPass) {
             break;
@@ -632,7 +632,7 @@ async function reallocateExpiredOpenAllocations(client) {
       )
     ORDER BY c.last_allocated_at ASC
     `);
-    const eligibleDistributors = shuffle(await getEligibleDistributors(client));
+    const Eligibleambassadors = shuffle(await getEligibleambassadors(client));
     for (const allocation of res.rows) {
         const unresolvedProofRes = await client.query(`
       SELECT 1
@@ -650,7 +650,7 @@ async function reallocateExpiredOpenAllocations(client) {
         }
         if (isCreatorPlatform(allocation.platform)) {
             const eligibleCreators = shuffle(await getEligibleCreators(client, String(allocation.platform ?? ''), getCreatorScoreFloor(allocation)));
-            const nextCreator = eligibleCreators.find((row) => row.user_id !== allocation.assigned_distributor_id);
+            const nextCreator = eligibleCreators.find((row) => row.user_id !== allocation.assigned_ambassador_id);
             if (!nextCreator) {
                 continue;
             }
@@ -665,7 +665,7 @@ async function reallocateExpiredOpenAllocations(client) {
             });
             await client.query(`
         UPDATE campaigns
-        SET assigned_distributor_id=$2,
+        SET assigned_ambassador_id=$2,
             assigned_phone=$3,
             execution_meta=$4::jsonb,
             last_allocated_at=now(),
@@ -674,19 +674,19 @@ async function reallocateExpiredOpenAllocations(client) {
         `, [allocation.id, nextCreator.user_id, nextCreator.phone || null, nextExecutionMeta]);
             continue;
         }
-        const nextDistributor = eligibleDistributors.find((row) => row.id !== allocation.assigned_distributor_id
+        const nextambassador = Eligibleambassadors.find((row) => row.id !== allocation.assigned_ambassador_id
             && row.max_status_viewers_12h >= Number(allocation.impression_target ?? 0));
-        if (!nextDistributor) {
+        if (!nextambassador) {
             continue;
         }
         await client.query(`
       UPDATE campaigns
-      SET assigned_distributor_id=$2,
+      SET assigned_ambassador_id=$2,
           assigned_phone=$3,
           last_allocated_at=now(),
           allocation_round=allocation_round + 1
       WHERE id=$1
-      `, [allocation.id, nextDistributor.id, nextDistributor.phone]);
+      `, [allocation.id, nextambassador.id, nextambassador.phone]);
     }
 }
 function clampUnitInterval(value) {
@@ -932,7 +932,7 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     SET status='COMPLETED',
         completed_at=COALESCE(completed_at, now())
     WHERE campaign_id=$1
-      AND distributor_id=$2
+      AND ambassador_id=$2
       AND status='ACTIVE'
     `, [proofContext.campaign_id, proofContext.user_id]);
     await client.query(`
@@ -943,14 +943,14 @@ async function markContractCompletedForVerifiedProof(client, proofId) {
     await recordCampaignRevenueEntry(client, proofContext.campaign_id);
 }
 async function preparePayoutRequest(client, proof, campaign) {
-    await ensurePromoterPayoutColumns(client);
+    await ensureambassadorPayoutColumns(client);
     const escrowCampaignId = getEscrowCampaignId(campaign);
-    const payoutBreakdown = calculatePromoterPayoutBreakdown(Number(campaign?.payout_amount ?? campaign?.budget_total ?? 0));
+    const payoutBreakdown = calculateAmbassadorPayoutBreakdown(Number(campaign?.payout_amount ?? campaign?.budget_total ?? 0));
     const escrowDebitAmount = Math.max(0, Math.round(Number(campaign?.budget_total ?? payoutBreakdown.gross_amount)));
     const contractRes = await client.query(`SELECT id
      FROM contracts
      WHERE campaign_id=$1
-       AND distributor_id=$2
+       AND ambassador_id=$2
        AND status IN ('ACTIVE', 'COMPLETED')
      LIMIT 1`, [campaign.id, proof.user_id]);
     if (!contractRes.rows[0]) {
@@ -1063,7 +1063,7 @@ async function preparePayoutRequest(client, proof, campaign) {
       `, [
             wallet.id,
             payoutBreakdown.platform_fee_amount,
-            `PROMOTER_PLATFORM_FEE:${proof.id}`,
+            `AMBASSADOR_PLATFORM_FEE:${proof.id}`,
         ]);
     }
     await client.query(`
@@ -1269,7 +1269,7 @@ async function queueRejectedOpenAllocationRetry(client, campaign, proof, validat
     SET status='CANCELLED',
         cancelled_at=COALESCE(cancelled_at, NOW())
     WHERE campaign_id=$1
-      AND distributor_id=$2
+      AND ambassador_id=$2
       AND status='ACTIVE'
     `, [campaign.id, proof.user_id]);
     await client.query(`
@@ -1330,7 +1330,7 @@ async function refundExpiredPrivateContractToWallet(client, expiredContract) {
     if (!escrowRes.rows[0]) {
         return;
     }
-    const wallet = await ensureWalletForUser(client, expiredContract.advertiser_id);
+    const wallet = await ensureWalletForUser(client, expiredContract.business_id);
     await client.query(`
     UPDATE wallets
     SET balance_available = balance_available + $2,
@@ -1474,8 +1474,8 @@ async function processVerificationJob(job) {
             ]);
             await upsertContentSubmission(client, campaign, proof, platformValidation, finalDecision);
             await updateCreatorPerformance(client, campaign, proof, finalDecision, platformValidation);
-            const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
-            if (!isAdvertiserProof) {
+            const isBusinessProof = proof.user_id === campaign.business_id;
+            if (!isBusinessProof) {
                 // Trust-based payout gating is disabled for now; autonomous verification drives settlement.
             }
             if (finalDecision === 'VERIFIED') {
@@ -1525,8 +1525,8 @@ async function processPayoutJob(job) {
         if (!campaign)
             throw new Error('campaign_not_found');
         const payoutRequest = await withTransaction(async (client) => {
-            const isAdvertiserProof = proof.user_id === campaign.advertiser_id;
-            if (!isAdvertiserProof) {
+            const isBusinessProof = proof.user_id === campaign.business_id;
+            if (!isBusinessProof) {
                 return preparePayoutRequest(client, proof, campaign);
             }
             return null;
@@ -1581,7 +1581,7 @@ async function expireOverdueContractsIfDue() {
           ctr.id,
           ctr.campaign_id,
           c.execution_mode,
-          c.advertiser_id,
+          c.business_id,
           c.budget_total,
           COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id`);
         const openCampaignIds = expired.rows

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { withTransaction } from '../db.js';
-import { canAccessAdvertiserFeatures } from '../services/roles.js';
+import { canAccessBusinessFeatures } from '../services/roles.js';
 const campaignDraftBodySchema = z.object({
     draft: z.record(z.string(), z.unknown()),
 });
@@ -9,7 +9,7 @@ async function ensureCampaignDraftsTable(client) {
     await client.query(`
     CREATE TABLE IF NOT EXISTS campaign_creation_drafts (
       id UUID PRIMARY KEY,
-      advertiser_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      business_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
       payload JSONB NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -70,13 +70,13 @@ export async function campaignDraftRoutes(app) {
         await ensureCampaignDraftsTable(client);
     });
     app.get('/campaign-drafts/active', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const advertiserId = request.user?.sub;
+        const businessId = request.user?.sub;
         const role = request.user?.role;
-        if (!advertiserId) {
+        if (!businessId) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -85,9 +85,9 @@ export async function campaignDraftRoutes(app) {
             const draftRes = await client.query(`
         SELECT payload, updated_at
         FROM campaign_creation_drafts
-        WHERE advertiser_id = $1
+        WHERE business_id = $1
         LIMIT 1
-        `, [advertiserId]);
+        `, [businessId]);
             const row = draftRes.rows[0];
             return {
                 draft: row ? toDraftResponse(row.payload, row.updated_at) : null,
@@ -95,13 +95,13 @@ export async function campaignDraftRoutes(app) {
         });
     });
     app.put('/campaign-drafts/active', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const advertiserId = request.user?.sub;
+        const businessId = request.user?.sub;
         const role = request.user?.role;
-        if (!advertiserId) {
+        if (!businessId) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -117,18 +117,18 @@ export async function campaignDraftRoutes(app) {
             const result = await client.query(`
         INSERT INTO campaign_creation_drafts (
           id,
-          advertiser_id,
+          business_id,
           payload,
           created_at,
           updated_at
         )
         VALUES ($1, $2, $3::jsonb, NOW(), NOW())
-        ON CONFLICT (advertiser_id)
+        ON CONFLICT (business_id)
         DO UPDATE SET
           payload = EXCLUDED.payload,
           updated_at = NOW()
         RETURNING payload, updated_at
-        `, [uuid(), advertiserId, JSON.stringify(payload)]);
+        `, [uuid(), businessId, JSON.stringify(payload)]);
             const row = result.rows[0];
             return {
                 draft: row ? toDraftResponse(row.payload, row.updated_at) : payload,
@@ -136,13 +136,13 @@ export async function campaignDraftRoutes(app) {
         });
     });
     app.delete('/campaign-drafts/active', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const advertiserId = request.user?.sub;
+        const businessId = request.user?.sub;
         const role = request.user?.role;
-        if (!advertiserId) {
+        if (!businessId) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -150,8 +150,8 @@ export async function campaignDraftRoutes(app) {
             await ensureCampaignDraftsTable(client);
             await client.query(`
         DELETE FROM campaign_creation_drafts
-        WHERE advertiser_id = $1
-        `, [advertiserId]);
+        WHERE business_id = $1
+        `, [businessId]);
             return { deleted: true };
         });
     });
