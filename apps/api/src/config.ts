@@ -52,8 +52,20 @@ const allowDirectApiBypass = allowDirectYoHostBypass(
 export const YO_PROXY_URL_MISSING_MESSAGE = 'YO_PROXY_URL is missing';
 export const YO_API_USERNAME_MISSING_MESSAGE = 'YO_API_USERNAME is missing';
 export const YO_API_PASSWORD_MISSING_MESSAGE = 'YO_API_PASSWORD is missing';
-export const YO_AUTHORIZATION_MISSING_MESSAGE =
-  'YO_AUTHORIZATION is missing';
+
+const configuredYoApiPassword = stripWrappingQuotes(
+  process.env.YO_API_PASSWORD ??
+    process.env.YO_PASSWORD ??
+    process.env.FLUTTERWAVE_CLIENT_SECRET ??
+    ''
+);
+
+const configuredYoAuthorization = stripWrappingQuotes(
+  process.env.YO_AUTHORIZATION ??
+    process.env.YO_ACCOUNT_AUTHORIZATION ??
+    process.env.YO_PROXY_AUTHORIZATION ??
+    configuredYoApiPassword
+);
 
 const configuredYoBaseUrl = stripWrappingQuotes(
   process.env.YO_PROXY_URL ??
@@ -94,18 +106,8 @@ const yoConfig = {
       process.env.FLUTTERWAVE_CLIENT_ID ??
       ''
   ),
-  apiPassword: stripWrappingQuotes(
-    process.env.YO_API_PASSWORD ??
-      process.env.YO_PASSWORD ??
-      process.env.FLUTTERWAVE_CLIENT_SECRET ??
-      ''
-  ),
-  authorizationCode: stripWrappingQuotes(
-    process.env.YO_AUTHORIZATION ??
-      process.env.YO_ACCOUNT_AUTHORIZATION ??
-      process.env.YO_PROXY_AUTHORIZATION ??
-      ''
-  ),
+  apiPassword: configuredYoApiPassword,
+  authorizationCode: configuredYoAuthorization,
   webhookSecretHash: stripWrappingQuotes(
     process.env.YO_WEBHOOK_SECRET_HASH ??
       process.env.FLUTTERWAVE_WEBHOOK_SECRET_HASH ??
@@ -182,9 +184,6 @@ export function getStartupConfigIssues() {
   if (!hasYoApiPassword) {
     issues.push(YO_API_PASSWORD_MISSING_MESSAGE);
   }
-  if (!config.yo.authorizationCode.trim()) {
-    issues.push(YO_AUTHORIZATION_MISSING_MESSAGE);
-  }
   if (config.yo.allowDirectApiBypass) {
     issues.push(
       'YO_ALLOW_DIRECT_API_BYPASS is enabled, so direct YO hosts can bypass the static-IP gateway'
@@ -222,7 +221,6 @@ export function isFatalStartupIssue(issue: string) {
     issue.includes(YO_PROXY_URL_MISSING_MESSAGE) ||
     issue.includes(YO_API_USERNAME_MISSING_MESSAGE) ||
     issue.includes(YO_API_PASSWORD_MISSING_MESSAGE) ||
-    issue.includes(YO_AUTHORIZATION_MISSING_MESSAGE) ||
     issue.includes('FIREBASE_PROJECT_ID is missing') ||
     issue.includes('FIREBASE_CLIENT_EMAIL is missing') ||
     issue.includes('FIREBASE_PRIVATE_KEY is missing') ||
@@ -233,8 +231,7 @@ export function isFatalStartupIssue(issue: string) {
 export function hasYoCredentials() {
   return (
     config.yo.apiUsername.trim().length > 0 &&
-    config.yo.apiPassword.trim().length > 0 &&
-    config.yo.authorizationCode.trim().length > 0
+    config.yo.apiPassword.trim().length > 0
   );
 }
 

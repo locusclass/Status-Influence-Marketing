@@ -159,4 +159,33 @@ describe('YO Uganda failover handling', () => {
     expect(body).not.toContain('PhoneNumber=');
     expect(body).not.toContain('Provider=');
   });
+
+  it('falls back to YO_API_PASSWORD for Authorization when YO_AUTHORIZATION is missing', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () =>
+        '<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Response><Status>OK</Status><StatusCode>0</StatusCode><TransactionReference>yo-ref-789</TransactionReference></Response></AutoCreate>',
+    } as any);
+
+    const { initiateMobileMoneyCollection } = await loadService({
+      YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
+      YO_API_USERNAME: 'demo-user',
+      YO_API_PASSWORD: 'demo-api-key',
+    });
+
+    await initiateMobileMoneyCollection({
+      amount: 1750,
+      phoneNumber: '0700000000',
+      narrative: 'Prime fallback auth payment',
+      reference: 'merchant-ref-789',
+      network: 'AIRTEL',
+    });
+
+    const [, requestInit] = fetchMock.mock.calls[0] ?? [];
+    const body = String(requestInit?.body ?? '');
+
+    expect(body).toContain('Authorization=demo-api-key');
+    expect(body).toContain('AccountProviderCode=AIRTEL_UGANDA');
+  });
 });

@@ -320,7 +320,7 @@ async function yoRequest(
   const combined: Record<string, string | number | boolean | null | undefined> = {
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
-    Authorization: config.yo.authorizationCode,
+    Authorization: config.yo.authorizationCode || config.yo.apiPassword,
     ...request,
   };
   for (const [key, value] of Object.entries(combined)) {
@@ -336,6 +336,9 @@ async function yoRequest(
     hasApiUsername: Boolean(fields.APIUsername),
     hasApiPassword: Boolean(fields.APIPassword),
     hasAuthorization: Boolean(fields.Authorization),
+    authorizationSource: process.env.YO_AUTHORIZATION?.trim()
+      ? 'YO_AUTHORIZATION'
+      : 'YO_API_PASSWORD_FALLBACK',
     amount: fields.Amount,
     account: fields.Account
       ? `***${String(fields.Account).slice(-4)}`

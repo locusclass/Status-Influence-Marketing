@@ -10,9 +10,9 @@ const requestUrl = new URL(
 );
 const apiUsername = process.env.YO_API_USERNAME || '<YO_API_USERNAME>';
 const apiPassword = process.env.YO_API_PASSWORD || '<YO_API_KEY>';
-const authorization = process.env.YO_AUTHORIZATION || '<YO_AUTHORIZATION>';
+const authorization = process.env.YO_AUTHORIZATION || apiPassword;
 const missingCredentialsMessage =
-  'YO_API_USERNAME and/or YO_API_PASSWORD and/or YO_AUTHORIZATION are not set.';
+  'YO_API_USERNAME and/or YO_API_PASSWORD are not set.';
 
 function xmlEscape(value) {
   return String(value)
