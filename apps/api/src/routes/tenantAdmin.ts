@@ -870,10 +870,10 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
             c.start_date,
             c.end_date,
             d.name AS division_name,
-            adv.email AS advertiser_email,
+            adv.email AS business_email,
             c.created_at
           FROM campaigns c
-          JOIN users adv ON adv.id = c.advertiser_id
+          JOIN users adv ON adv.id = c.business_id
           LEFT JOIN divisions d ON d.id = c.division_id
           WHERE c.country_id = $1
           ORDER BY c.created_at DESC
@@ -1192,10 +1192,10 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
             c.payout_amount,
             c.start_date,
             c.end_date,
-            adv.email AS advertiser_email,
+            adv.email AS business_email,
             c.created_at
           FROM campaigns c
-          JOIN users adv ON adv.id = c.advertiser_id
+          JOIN users adv ON adv.id = c.business_id
           WHERE c.division_id = $1
           ORDER BY c.created_at DESC
           LIMIT $2 OFFSET $3

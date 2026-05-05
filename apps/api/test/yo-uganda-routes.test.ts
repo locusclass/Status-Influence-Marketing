@@ -76,7 +76,7 @@ function buildYoResponse(input: {
   };
 }
 
-async function insertAdvertiser(label: string) {
+async function insertBusiness(label: string) {
   const result = await pool!.query(
     `
     INSERT INTO users (
@@ -88,11 +88,11 @@ async function insertAdvertiser(label: string) {
       status,
       country
     )
-    VALUES ($1, $2, $3, 'x', 'ADVERTISER', 'ACTIVE', 'UG')
+    VALUES ($1, $2, $3, 'x', 'BUSINESS', 'ACTIVE', 'UG')
     RETURNING *
     `,
     [
-      `${label} Advertiser`,
+      `${label} Business`,
       `${label}-${randomUUID()}@example.com`,
       `+25670${Date.now().toString().slice(-7)}`,
     ]
@@ -101,21 +101,21 @@ async function insertAdvertiser(label: string) {
 }
 
 async function createCampaignFundingTransaction(options?: {
-  advertiserId?: string;
+  businessId?: string;
   amount?: number;
   merchantReference?: string;
   transactionReference?: string | null;
   rawPayload?: Record<string, unknown>;
 }) {
-  const advertiserId = options?.advertiserId ?? (await insertAdvertiser('tx-owner')).id;
+  const businessId = options?.businessId ?? (await insertBusiness('tx-owner')).id;
   const amount = options?.amount ?? 1000;
   const merchantReference = options?.merchantReference ?? `yo-${randomUUID()}`;
-  const advertiserRes = await pool!.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [advertiserId]);
-  const advertiser = advertiserRes.rows[0];
+  const businessRes = await pool!.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [businessId]);
+  const business = businessRes.rows[0];
   const campaign = await pool!.query(
     `
     INSERT INTO campaigns (
-      advertiser_id,
+      business_id,
       title,
       platform,
       payout_amount,
@@ -140,7 +140,7 @@ async function createCampaignFundingTransaction(options?: {
     )
     RETURNING *
     `,
-    [advertiserId, amount]
+    [businessId, amount]
   );
   const escrow = await pool!.query(
     `
@@ -158,7 +158,7 @@ async function createCampaignFundingTransaction(options?: {
     supported_payment_methods: ['MOBILE_MONEY'],
     mobile_money_networks: ['MTN', 'AIRTEL'],
     customer: {
-      phone_number: advertiser.phone,
+      phone_number: business.phone,
     },
     ...(options?.rawPayload ?? {}),
   };
@@ -185,7 +185,7 @@ async function createCampaignFundingTransaction(options?: {
     ]
   );
   return {
-    advertiser,
+    business,
     campaign: campaign.rows[0],
     escrow: escrow.rows[0],
     txn: txn.rows[0],
@@ -225,8 +225,8 @@ describe('YO Uganda payment routes', () => {
   });
 
   it('stores the YO transaction reference during initiate', async () => {
-    const { advertiser, txn } = await createCampaignFundingTransaction();
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const { business, txn } = await createCampaignFundingTransaction();
+    const token = app.jwt.sign(buildAuthClaims(business));
     yoMocks.initiateMobileMoneyCollection.mockResolvedValue(
       buildYoResponse({
         transactionReference: 'yo-init-123',
@@ -244,7 +244,7 @@ describe('YO Uganda payment routes', () => {
         tx_ref: txn.merchant_reference,
         payment_method: 'MOBILE_MONEY',
         network: 'MTN',
-        phone_number: advertiser.phone,
+        phone_number: business.phone,
       },
     });
 
@@ -265,7 +265,7 @@ describe('YO Uganda payment routes', () => {
     expect(yoMocks.initiateMobileMoneyCollection).toHaveBeenCalledWith(
       expect.objectContaining({
         amount: Number(txn.amount),
-        phoneNumber: advertiser.phone,
+        phoneNumber: business.phone,
         network: 'MTN',
         reference: txn.merchant_reference,
         providerReferenceText: `Prime ${txn.merchant_reference}`,
@@ -303,10 +303,10 @@ describe('YO Uganda payment routes', () => {
   });
 
   it('prefers the stored YO reference during verify even when the client sends the merchant reference', async () => {
-    const { advertiser, escrow, txn } = await createCampaignFundingTransaction({
+    const { business, escrow, txn } = await createCampaignFundingTransaction({
       transactionReference: 'yo-verify-123',
     });
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const token = app.jwt.sign(buildAuthClaims(business));
     yoMocks.getTransactionStatus.mockResolvedValue(
       buildYoResponse({
         transactionReference: 'yo-verify-123',
@@ -348,13 +348,13 @@ describe('YO Uganda payment routes', () => {
   });
 
   it('accepts provider_reference aliases when the provider transaction id is not yet stored', async () => {
-    const { advertiser, txn } = await createCampaignFundingTransaction({
+    const { business, txn } = await createCampaignFundingTransaction({
       transactionReference: null,
       rawPayload: {
         yo_transaction_reference: null,
       },
     });
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const token = app.jwt.sign(buildAuthClaims(business));
     yoMocks.getTransactionStatus.mockResolvedValue(
       buildYoResponse({
         transactionReference: 'yo-alias-123',
@@ -394,7 +394,7 @@ describe('YO Uganda payment routes', () => {
 
   it('returns a cached pending verification result instead of polling YO repeatedly within the throttle window', async () => {
     const checkedAt = new Date().toISOString();
-    const { advertiser, txn } = await createCampaignFundingTransaction({
+    const { business, txn } = await createCampaignFundingTransaction({
       transactionReference: 'yo-cached-123',
       rawPayload: {
         yo_transaction_reference: 'yo-cached-123',
@@ -411,7 +411,7 @@ describe('YO Uganda payment routes', () => {
         },
       },
     });
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const response = await app.inject({
       method: 'POST',
@@ -449,8 +449,8 @@ describe('YO Uganda payment routes', () => {
     const { txn } = await createCampaignFundingTransaction({
       transactionReference: 'yo-forbidden-123',
     });
-    const otherAdvertiser = await insertAdvertiser('foreign');
-    const token = app.jwt.sign(buildAuthClaims(otherAdvertiser));
+    const otherBusiness = await insertBusiness('foreign');
+    const token = app.jwt.sign(buildAuthClaims(otherBusiness));
 
     const response = await app.inject({
       method: 'POST',

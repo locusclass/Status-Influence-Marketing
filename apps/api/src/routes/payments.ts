@@ -667,7 +667,7 @@ export async function paymentRoutes(app: FastifyInstance) {
       }
     } else {
       const escrowRes = await client.query(
-        `SELECT e.id, c.id AS campaign_id, c.advertiser_id
+        `SELECT e.id, c.id AS campaign_id, c.business_id
          FROM escrow_ledger e
          JOIN campaigns c ON c.id = e.campaign_id
          WHERE e.id=$1
@@ -675,7 +675,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         [txn.escrow_id]
       );
       const escrow = escrowRes.rows[0];
-      if (!escrow || escrow.advertiser_id !== authUser) {
+      if (!escrow || escrow.business_id !== authUser) {
         return { error: 'forbidden' } as const;
       }
     }

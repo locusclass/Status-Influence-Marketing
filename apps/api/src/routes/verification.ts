@@ -11,7 +11,7 @@ import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from 
 import { randomInt } from 'crypto';
 import { config } from '../config.js';
 import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
-import { canAccessDistributorFeatures } from '../services/roles.js';
+import { canAccessAmbassadorFeatures } from '../services/roles.js';
 
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
@@ -148,7 +148,7 @@ function validateStrictClientMeta(clientMeta: any, script: any): string | null {
   return null;
 }
 
-async function getActiveDistributorContract(
+async function getActiveAmbassadorContract(
   client: any,
   campaignId: string,
   userId: string
@@ -157,7 +157,7 @@ async function getActiveDistributorContract(
     `SELECT id, post_deadline_at, contract_deadline_at
      FROM contracts
      WHERE campaign_id=$1
-       AND distributor_id=$2
+       AND ambassador_id=$2
        AND status='ACTIVE'
      LIMIT 1`,
     [campaignId, userId]
@@ -219,7 +219,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       reply.code(401);
       return { error: 'unauthorized' } as any;
     }
-    if (!canAccessDistributorFeatures(role)) {
+    if (!canAccessAmbassadorFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' } as any;
     }
@@ -253,7 +253,7 @@ export async function verificationRoutes(app: FastifyInstance) {
         return script;
       }
 
-      const contract = await getActiveDistributorContract(
+      const contract = await getActiveAmbassadorContract(
         client,
         body.campaign_id,
         authUser
@@ -345,7 +345,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       );
       if (existingForSession.rows[0]) return { error: 'proof_already_submitted' } as any;
 
-      const contract = await getActiveDistributorContract(
+      const contract = await getActiveAmbassadorContract(
         client,
         session.campaign_id,
         authUser

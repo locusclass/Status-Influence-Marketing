@@ -73,15 +73,15 @@ CREATE TABLE IF NOT EXISTS users (
   whatsapp_verified_at TIMESTAMPTZ,
   whatsapp_jid TEXT,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN')),
-  active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR' CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
+  role TEXT NOT NULL CHECK (role IN ('BUSINESS', 'AMBASSADOR', 'DUAL_USER', 'ADMIN')),
+  active_role TEXT NOT NULL DEFAULT 'AMBASSADOR' CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
   country TEXT NOT NULL DEFAULT 'UG',
   preferred_currency TEXT NOT NULL DEFAULT 'UGX',
   can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE,
   max_status_viewers_12h INTEGER NOT NULL DEFAULT 0,
   private_contract_rate_ugx INTEGER NOT NULL DEFAULT 0,
-  current_advertiser_viewers INTEGER NOT NULL DEFAULT 0,
+  current_business_viewers INTEGER NOT NULL DEFAULT 0,
   privacy_policy_accepted_version TEXT,
   privacy_policy_accepted_at TIMESTAMPTZ,
   platform_policy_accepted_version TEXT,
@@ -96,15 +96,15 @@ DO $$ BEGIN
     WHERE table_name = 'users' AND column_name = 'active_role'
   ) THEN
     ALTER TABLE users
-      ADD COLUMN active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
-      CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+      ADD COLUMN active_role TEXT NOT NULL DEFAULT 'AMBASSADOR'
+      CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN'));
   END IF;
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
   ALTER TABLE users
-    ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN'));
+    ADD CONSTRAINT users_role_check CHECK (role IN ('BUSINESS', 'AMBASSADOR', 'DUAL_USER', 'ADMIN'));
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_role_check;
   ALTER TABLE users
-    ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+    ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN'));
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
   ALTER TABLE users
     ADD CONSTRAINT users_status_check CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
@@ -159,15 +159,15 @@ DO $$ BEGIN
   UPDATE users
   SET active_role = CASE
       WHEN role = 'ADMIN' THEN 'ADMIN'
-      WHEN role = 'ADVERTISER' THEN 'ADVERTISER'
-      WHEN role = 'DUAL_USER' AND (active_role IS NULL OR btrim(active_role) = '') THEN 'DISTRIBUTOR'
-      ELSE COALESCE(NULLIF(active_role, ''), 'DISTRIBUTOR')
+      WHEN role = 'BUSINESS' THEN 'BUSINESS'
+      WHEN role = 'DUAL_USER' AND (active_role IS NULL OR btrim(active_role) = '') THEN 'AMBASSADOR'
+      ELSE COALESCE(NULLIF(active_role, ''), 'AMBASSADOR')
     END
   WHERE active_role IS NULL
      OR btrim(active_role) = ''
      OR (role = 'ADMIN' AND active_role <> 'ADMIN')
-     OR (role = 'ADVERTISER' AND active_role NOT IN ('ADVERTISER', 'ADMIN'))
-     OR (role = 'DISTRIBUTOR' AND active_role NOT IN ('DISTRIBUTOR', 'ADMIN'));
+     OR (role = 'BUSINESS' AND active_role NOT IN ('BUSINESS', 'ADMIN'))
+     OR (role = 'AMBASSADOR' AND active_role NOT IN ('AMBASSADOR', 'ADMIN'));
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -211,10 +211,10 @@ DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
-    WHERE table_name = 'users' AND column_name = 'current_advertiser_viewers'
+    WHERE table_name = 'users' AND column_name = 'current_business_viewers'
   ) THEN
     ALTER TABLE users
-      ADD COLUMN current_advertiser_viewers INTEGER NOT NULL DEFAULT 0;
+      ADD COLUMN current_business_viewers INTEGER NOT NULL DEFAULT 0;
   END IF;
   IF NOT EXISTS (
     SELECT 1
@@ -277,9 +277,9 @@ END $$;
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('cmp'),
-  advertiser_id UUID NOT NULL REFERENCES users(id),
+  business_id UUID NOT NULL REFERENCES users(id),
   parent_campaign_id UUID REFERENCES campaigns(id),
-  assigned_distributor_id UUID REFERENCES users(id),
+  assigned_ambassador_id UUID REFERENCES users(id),
   assigned_phone TEXT,
   title TEXT NOT NULL,
   platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS')),
@@ -289,7 +289,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   budget_total INTEGER NOT NULL,
   impression_target INTEGER,
   platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
-  advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY',
+  business_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY',
   last_allocated_at TIMESTAMPTZ,
   allocation_round INTEGER NOT NULL DEFAULT 0,
   media_type TEXT NOT NULL CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO')),
@@ -327,10 +327,10 @@ DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
-    WHERE table_name = 'campaigns' AND column_name = 'assigned_distributor_id'
+    WHERE table_name = 'campaigns' AND column_name = 'assigned_ambassador_id'
   ) THEN
     ALTER TABLE campaigns
-      ADD COLUMN assigned_distributor_id UUID REFERENCES users(id);
+      ADD COLUMN assigned_ambassador_id UUID REFERENCES users(id);
   END IF;
   IF NOT EXISTS (
     SELECT 1
@@ -377,10 +377,10 @@ DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
-    WHERE table_name = 'campaigns' AND column_name = 'advertiser_wallet_mode'
+    WHERE table_name = 'campaigns' AND column_name = 'business_wallet_mode'
   ) THEN
     ALTER TABLE campaigns
-      ADD COLUMN advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY';
+      ADD COLUMN business_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY';
   END IF;
   IF NOT EXISTS (
     SELECT 1
@@ -467,7 +467,7 @@ END $$;
 CREATE TABLE IF NOT EXISTS contracts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   campaign_id UUID NOT NULL REFERENCES campaigns(id),
-  distributor_id UUID NOT NULL REFERENCES users(id),
+  ambassador_id UUID NOT NULL REFERENCES users(id),
   status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   post_deadline_at TIMESTAMPTZ,
@@ -1186,16 +1186,16 @@ WHERE UPPER(COALESCE(u.admin_role, '')) = 'DIVISION_ADMIN'
 ON CONFLICT (admin_user_id, division_id) DO NOTHING;
 
 UPDATE campaigns c
-SET country_id = COALESCE(c.country_id, advertiser.country_id, fallback.id),
-    division_id = COALESCE(c.division_id, advertiser.division_id)
-FROM users advertiser
+SET country_id = COALESCE(c.country_id, business.country_id, fallback.id),
+    division_id = COALESCE(c.division_id, business.division_id)
+FROM users business
 CROSS JOIN LATERAL (
   SELECT id
   FROM countries
   WHERE code = 'GLOBAL_TEMP'
   LIMIT 1
 ) AS fallback
-WHERE advertiser.id = c.advertiser_id
+WHERE business.id = c.business_id
   AND (c.country_id IS NULL OR c.division_id IS NULL);
 
 CREATE OR REPLACE FUNCTION ensure_country_scope(input_code TEXT)
@@ -1280,8 +1280,8 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  advertiser_country_id UUID;
-  advertiser_division_id UUID;
+  business_country_id UUID;
+  business_division_id UUID;
   division_country_id UUID;
 BEGIN
   IF NEW.division_id IS NOT NULL THEN
@@ -1296,19 +1296,19 @@ BEGIN
     END IF;
   END IF;
 
-  IF NEW.advertiser_id IS NOT NULL THEN
+  IF NEW.business_id IS NOT NULL THEN
     SELECT country_id, division_id
-    INTO advertiser_country_id, advertiser_division_id
+    INTO business_country_id, business_division_id
     FROM users
-    WHERE id = NEW.advertiser_id
+    WHERE id = NEW.business_id
     LIMIT 1;
 
     IF NEW.country_id IS NULL THEN
-      NEW.country_id := advertiser_country_id;
+      NEW.country_id := business_country_id;
     END IF;
 
     IF NEW.division_id IS NULL THEN
-      NEW.division_id := advertiser_division_id;
+      NEW.division_id := business_division_id;
     END IF;
   END IF;
 
@@ -1322,7 +1322,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_campaigns_sync_tenant_scope ON campaigns;
 CREATE TRIGGER trg_campaigns_sync_tenant_scope
-BEFORE INSERT OR UPDATE OF advertiser_id, country_id, division_id
+BEFORE INSERT OR UPDATE OF business_id, country_id, division_id
 ON campaigns
 FOR EACH ROW
 EXECUTE FUNCTION sync_campaign_tenant_scope();

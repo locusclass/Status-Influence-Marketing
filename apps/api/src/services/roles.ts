@@ -6,27 +6,36 @@ import {
 import { buildPolicyAcceptanceState } from './policies.js';
 
 export const ACCOUNT_ROLE_ADMIN = 'ADMIN';
-export const ACCOUNT_ROLE_ADVERTISER = 'ADVERTISER';
-export const ACCOUNT_ROLE_DISTRIBUTOR = 'DISTRIBUTOR';
+export const ACCOUNT_ROLE_BUSINESS = 'BUSINESS';
+export const ACCOUNT_ROLE_AMBASSADOR = 'AMBASSADOR';
 export const ACCOUNT_ROLE_DUAL_USER = 'DUAL_USER';
 
 export type AccountRole =
   | typeof ACCOUNT_ROLE_ADMIN
-  | typeof ACCOUNT_ROLE_ADVERTISER
-  | typeof ACCOUNT_ROLE_DISTRIBUTOR
+  | typeof ACCOUNT_ROLE_BUSINESS
+  | typeof ACCOUNT_ROLE_AMBASSADOR
   | typeof ACCOUNT_ROLE_DUAL_USER;
 
 export type ActiveRole =
   | typeof ACCOUNT_ROLE_ADMIN
-  | typeof ACCOUNT_ROLE_ADVERTISER
-  | typeof ACCOUNT_ROLE_DISTRIBUTOR;
+  | typeof ACCOUNT_ROLE_BUSINESS
+  | typeof ACCOUNT_ROLE_AMBASSADOR;
+
+function normalizeLegacyRoleValue(value: unknown) {
+  const role = String(value ?? '').trim().toUpperCase();
+  if (role == 'ADVERTISER') return ACCOUNT_ROLE_BUSINESS;
+  if (role == 'PROMOTER' || role == 'DISTRIBUTOR') {
+    return ACCOUNT_ROLE_AMBASSADOR;
+  }
+  return role;
+}
 
 export function normalizeAccountRole(value: unknown): AccountRole {
-  const role = String(value ?? '').trim().toUpperCase();
+  const role = normalizeLegacyRoleValue(value);
   if (role === ACCOUNT_ROLE_ADMIN) return ACCOUNT_ROLE_ADMIN;
-  if (role === ACCOUNT_ROLE_ADVERTISER) return ACCOUNT_ROLE_ADVERTISER;
+  if (role === ACCOUNT_ROLE_BUSINESS) return ACCOUNT_ROLE_BUSINESS;
   if (role === ACCOUNT_ROLE_DUAL_USER) return ACCOUNT_ROLE_DUAL_USER;
-  return ACCOUNT_ROLE_DISTRIBUTOR;
+  return ACCOUNT_ROLE_AMBASSADOR;
 }
 
 export function normalizeActiveRole(
@@ -34,33 +43,42 @@ export function normalizeActiveRole(
   accountRole: unknown
 ): ActiveRole {
   const normalizedAccountRole = normalizeAccountRole(accountRole);
-  const role = String(activeRole ?? '').trim().toUpperCase();
+  const role = normalizeLegacyRoleValue(activeRole);
   if (role === ACCOUNT_ROLE_ADMIN) return ACCOUNT_ROLE_ADMIN;
-  if (role === ACCOUNT_ROLE_ADVERTISER) return ACCOUNT_ROLE_ADVERTISER;
-  if (role === ACCOUNT_ROLE_DISTRIBUTOR) return ACCOUNT_ROLE_DISTRIBUTOR;
+  if (role === ACCOUNT_ROLE_BUSINESS) return ACCOUNT_ROLE_BUSINESS;
+  if (role === ACCOUNT_ROLE_AMBASSADOR) return ACCOUNT_ROLE_AMBASSADOR;
   if (normalizedAccountRole === ACCOUNT_ROLE_ADMIN) return ACCOUNT_ROLE_ADMIN;
-  if (normalizedAccountRole === ACCOUNT_ROLE_ADVERTISER) {
-    return ACCOUNT_ROLE_ADVERTISER;
+  if (normalizedAccountRole === ACCOUNT_ROLE_BUSINESS) {
+    return ACCOUNT_ROLE_BUSINESS;
   }
-  return ACCOUNT_ROLE_DISTRIBUTOR;
+  return ACCOUNT_ROLE_AMBASSADOR;
 }
 
-export function canAccessAdvertiserFeatures(accountRole: unknown) {
+export function canAccessBusinessFeatures(accountRole: unknown) {
   const role = normalizeAccountRole(accountRole);
   return (
     role === ACCOUNT_ROLE_ADMIN ||
-    role === ACCOUNT_ROLE_ADVERTISER ||
+    role === ACCOUNT_ROLE_BUSINESS ||
     role === ACCOUNT_ROLE_DUAL_USER
   );
 }
 
-export function canAccessDistributorFeatures(accountRole: unknown) {
+export function canAccessAmbassadorFeatures(accountRole: unknown) {
   const role = normalizeAccountRole(accountRole);
   return (
     role === ACCOUNT_ROLE_ADMIN ||
-    role === ACCOUNT_ROLE_DISTRIBUTOR ||
+    role === ACCOUNT_ROLE_AMBASSADOR ||
     role === ACCOUNT_ROLE_DUAL_USER
   );
+}
+
+export function normalizeRequestedUserRole(
+  value: unknown
+): typeof ACCOUNT_ROLE_BUSINESS | typeof ACCOUNT_ROLE_AMBASSADOR | null {
+  const role = normalizeLegacyRoleValue(value);
+  if (role === ACCOUNT_ROLE_BUSINESS) return ACCOUNT_ROLE_BUSINESS;
+  if (role === ACCOUNT_ROLE_AMBASSADOR) return ACCOUNT_ROLE_AMBASSADOR;
+  return null;
 }
 
 export function buildAuthClaims(user: {
@@ -105,7 +123,7 @@ export function buildUserSession(user: Record<string, unknown>) {
           ? ADMIN_ROLE_SUPER_ADMIN
           : ADMIN_ROLE_USER;
   const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
-  const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
+  const currentBusinessViewers = Number(user.current_business_viewers ?? 0);
   const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
   const privateContractRate24hUgx = Number(user.private_contract_rate_24h_ugx ?? 0);
   const pricePrivacyMode = String(
@@ -142,10 +160,16 @@ export function buildUserSession(user: Record<string, unknown>) {
     currency: String(user.currency ?? user.preferred_currency ?? 'UGX'),
     can_multi_contract: Boolean(user.can_multi_contract ?? false),
     max_status_viewers_12h: Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0),
+    current_business_viewers: Math.max(
+      0,
+      Number.isFinite(currentBusinessViewers)
+        ? Math.trunc(currentBusinessViewers)
+        : 0
+    ),
     current_advertiser_viewers: Math.max(
       0,
-      Number.isFinite(currentAdvertiserViewers)
-        ? Math.trunc(currentAdvertiserViewers)
+      Number.isFinite(currentBusinessViewers)
+        ? Math.trunc(currentBusinessViewers)
         : 0
     ),
     private_contract_rate_ugx: Math.max(
@@ -165,8 +189,11 @@ export function buildUserSession(user: Record<string, unknown>) {
     last_login_at: user.last_login_at ?? null,
     last_seen_at: user.last_seen_at ?? null,
     is_online: user.is_online === true,
+    requires_ambassador_capacity_setup:
+      canAccessAmbassadorFeatures(role) &&
+      Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0) === 0,
     requires_distributor_capacity_setup:
-      canAccessDistributorFeatures(role) &&
+      canAccessAmbassadorFeatures(role) &&
       Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0) === 0,
     ...buildPolicyAcceptanceState(user),
   };

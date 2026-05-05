@@ -29,7 +29,7 @@ async function resetDatabase() {
   await applySchema(pool);
 }
 
-async function insertAdvertiser() {
+async function insertBusiness() {
   const result = await pool!.query(
     `
     INSERT INTO users (
@@ -41,11 +41,11 @@ async function insertAdvertiser() {
       status
     )
     VALUES (
-      'Threshold Advertiser',
-      'threshold-advertiser@example.com',
+      'Threshold Business',
+      'threshold-business@example.com',
       '+256700000001',
       'x',
-      'ADVERTISER',
+      'BUSINESS',
       'ACTIVE'
     )
     RETURNING *
@@ -54,7 +54,7 @@ async function insertAdvertiser() {
   return result.rows[0];
 }
 
-async function insertActiveDistributors(count: number) {
+async function insertActiveAmbassadors(count: number) {
   if (count <= 0) return;
   await pool!.query(
     `
@@ -67,11 +67,11 @@ async function insertActiveDistributors(count: number) {
       status
     )
     SELECT
-      'Distributor ' || series_id,
-      'distributor-' || series_id || '@example.com',
+      'Ambassador ' || series_id,
+      'ambassador-' || series_id || '@example.com',
       '+25678' || LPAD(series_id::text, 7, '0'),
       'x',
-      'DISTRIBUTOR',
+      'AMBASSADOR',
       'ACTIVE'
     FROM generate_series(1, $1) AS series_id
     `,
@@ -120,10 +120,10 @@ describe('Public contract eligibility', () => {
     await pool.end();
   });
 
-  it('reports the backend-confirmed active distributor threshold for public contracts', async () => {
-    await insertActiveDistributors(4999);
-    const advertiser = await insertAdvertiser();
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+  it('reports the backend-confirmed active ambassador threshold for public contracts', async () => {
+    await insertActiveAmbassadors(4999);
+    const business = await insertBusiness();
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const response = await app.inject({
       method: 'GET',
@@ -134,15 +134,15 @@ describe('Public contract eligibility', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       eligible: false,
-      active_distributors: 4999,
-      required_active_distributors: 5000,
+      active_ambassadors: 4999,
+      required_active_ambassadors: 5000,
     });
   });
 
-  it('blocks public contracts below the threshold and allows them once the backend confirms enough distributors', async () => {
-    await insertActiveDistributors(4999);
-    const advertiser = await insertAdvertiser();
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+  it('blocks public contracts below the threshold and allows them once the backend confirms enough ambassadors', async () => {
+    await insertActiveAmbassadors(4999);
+    const business = await insertBusiness();
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const blocked = await app.inject({
       method: 'POST',
@@ -153,13 +153,13 @@ describe('Public contract eligibility', () => {
 
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json()).toMatchObject({
-      error: 'public_contract_distributor_threshold_unmet',
+      error: 'public_contract_ambassador_threshold_unmet',
       eligible: false,
-      active_distributors: 4999,
-      required_active_distributors: 5000,
+      active_ambassadors: 4999,
+      required_active_ambassadors: 5000,
     });
 
-    await insertActiveDistributors(1);
+    await insertActiveAmbassadors(1);
 
     const allowed = await app.inject({
       method: 'POST',

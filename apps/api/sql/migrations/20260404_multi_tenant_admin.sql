@@ -115,16 +115,16 @@ WHERE u.admin_role = 'COUNTRY_ADMIN'
 ON CONFLICT (user_id, country_id) DO NOTHING;
 
 UPDATE campaigns c
-SET country_id = COALESCE(c.country_id, advertiser.country_id, fallback.id),
-    division_id = COALESCE(c.division_id, advertiser.division_id)
-FROM users advertiser
+SET country_id = COALESCE(c.country_id, business.country_id, fallback.id),
+    division_id = COALESCE(c.division_id, business.division_id)
+FROM users business
 CROSS JOIN LATERAL (
   SELECT id
   FROM countries
   WHERE code = 'GLOBAL_TEMP'
   LIMIT 1
 ) AS fallback
-WHERE advertiser.id = c.advertiser_id
+WHERE business.id = c.business_id
   AND (c.country_id IS NULL OR c.division_id IS NULL);
 
 CREATE OR REPLACE FUNCTION ensure_country_scope(input_code TEXT)
@@ -209,8 +209,8 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  advertiser_country_id UUID;
-  advertiser_division_id UUID;
+  business_country_id UUID;
+  business_division_id UUID;
   division_country_id UUID;
 BEGIN
   IF NEW.division_id IS NOT NULL THEN
@@ -225,19 +225,19 @@ BEGIN
     END IF;
   END IF;
 
-  IF NEW.advertiser_id IS NOT NULL THEN
+  IF NEW.business_id IS NOT NULL THEN
     SELECT country_id, division_id
-    INTO advertiser_country_id, advertiser_division_id
+    INTO business_country_id, business_division_id
     FROM users
-    WHERE id = NEW.advertiser_id
+    WHERE id = NEW.business_id
     LIMIT 1;
 
     IF NEW.country_id IS NULL THEN
-      NEW.country_id := advertiser_country_id;
+      NEW.country_id := business_country_id;
     END IF;
 
     IF NEW.division_id IS NULL THEN
-      NEW.division_id := advertiser_division_id;
+      NEW.division_id := business_division_id;
     END IF;
   END IF;
 
@@ -251,7 +251,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_campaigns_sync_tenant_scope ON campaigns;
 CREATE TRIGGER trg_campaigns_sync_tenant_scope
-BEFORE INSERT OR UPDATE OF advertiser_id, country_id, division_id
+BEFORE INSERT OR UPDATE OF business_id, country_id, division_id
 ON campaigns
 FOR EACH ROW
 EXECUTE FUNCTION sync_campaign_tenant_scope();

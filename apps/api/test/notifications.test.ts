@@ -27,7 +27,7 @@ describe('User notifications', () => {
     const user = await pool.query(
       `
       INSERT INTO users (email, phone, password_hash, role)
-      VALUES ($1, $2, 'x', 'DISTRIBUTOR')
+      VALUES ($1, $2, 'x', 'AMBASSADOR')
       RETURNING id
       `,
       [
@@ -86,7 +86,7 @@ describe('User notifications', () => {
     const user = await pool.query(
       `
       INSERT INTO users (email, phone, password_hash, role)
-      VALUES ($1, $2, 'x', 'DISTRIBUTOR')
+      VALUES ($1, $2, 'x', 'AMBASSADOR')
       RETURNING id
       `,
       [

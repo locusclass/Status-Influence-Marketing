@@ -36,7 +36,7 @@ export class UserRepo {
     email: string,
     phone: string,
     passwordHash: string,
-    role: 'ADVERTISER' | 'DISTRIBUTOR',
+    role: 'BUSINESS' | 'AMBASSADOR',
     country: string,
     currency: string,
     maxStatusViewers12h?: number | null

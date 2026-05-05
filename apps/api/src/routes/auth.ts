@@ -7,7 +7,13 @@ import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
-import { buildAuthClaims, buildUserSession } from '../services/roles.js';
+import {
+  ACCOUNT_ROLE_AMBASSADOR,
+  ACCOUNT_ROLE_BUSINESS,
+  buildAuthClaims,
+  buildUserSession,
+  normalizeRequestedUserRole,
+} from '../services/roles.js';
 import { ADMIN_ROLE_USER, canAccessAdminDashboard } from '@prime/shared';
 import { recordAdminAudit, auditScopeFromAccess } from '../services/adminAudit.js';
 import {
@@ -17,12 +23,27 @@ import {
 } from '../services/adminTenant.js';
 import { touchUserPresenceWithClient } from '../services/userSignals.js';
 
+const publicRoleSchema = z
+  .string()
+  .trim()
+  .transform((value, ctx) => {
+    const normalized = normalizeRequestedUserRole(value);
+    if (normalized != null) {
+      return normalized;
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Invalid role.',
+    });
+    return z.NEVER;
+  });
+
 const registerSchema = z.object({
   full_name: z.string().min(2).max(120),
   email: z.string().email(),
   phone: z.string().min(7).max(20),
   password: z.string().min(8),
-  role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+  role: publicRoleSchema,
   country: z.string().min(2),
   max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
@@ -34,7 +55,7 @@ const loginSchema = z.object({
 
 const googleAuthSchema = z.object({
   id_token: z.string().min(20),
-  role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+  role: publicRoleSchema,
   phone: z.string().trim().min(7).max(20).optional(),
   country: z.string().min(2),
   full_name: z.string().min(2).max(120).optional(),
@@ -46,18 +67,18 @@ const googleAdminAuthSchema = z.object({
   id_token: z.string().min(20),
 });
 
-function resolveDistributorCapacity(body: {
-  role: 'ADVERTISER' | 'DISTRIBUTOR';
+function resolveAmbassadorCapacity(body: {
+  role: typeof ACCOUNT_ROLE_BUSINESS | typeof ACCOUNT_ROLE_AMBASSADOR;
   max_status_viewers_12h?: number;
 }) {
-  if (body.role !== 'DISTRIBUTOR') {
+  if (body.role !== ACCOUNT_ROLE_AMBASSADOR) {
     return 0;
   }
   const capacity = Number(body.max_status_viewers_12h ?? 0);
   return Number.isFinite(capacity) && capacity > 0 ? Math.trunc(capacity) : 0;
 }
 
-function currentDistributorCapacity(user: {
+function currentAmbassadorCapacity(user: {
   max_status_viewers_12h?: unknown;
   maxStatusViewers12h?: unknown;
 }) {
@@ -209,7 +230,7 @@ export async function authRoutes(app: FastifyInstance) {
       return { error: 'validation_failed', issues: parsed.error.issues };
     }
     const body = parsed.data;
-    const distributorCapacity = resolveDistributorCapacity(body);
+    const ambassadorCapacity = resolveAmbassadorCapacity(body);
 
     const countryData = resolveCountry(body.country);
 
@@ -238,7 +259,7 @@ export async function authRoutes(app: FastifyInstance) {
         body.role,
         countryData.iso2,
         countryData.currency,
-        distributorCapacity
+        ambassadorCapacity
       );
       await userRepo.ensureWallet(client, created.id, countryData.currency);
       return created;
@@ -335,7 +356,7 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     const body = parsed.data;
-    const distributorCapacity = resolveDistributorCapacity(body);
+    const ambassadorCapacity = resolveAmbassadorCapacity(body);
     const countryData = resolveCountry(body.country);
 
     let payload: any;
@@ -376,7 +397,7 @@ export async function authRoutes(app: FastifyInstance) {
       const existing = await userRepo.findByEmail(client, email);
       const typedPhone = body.phone?.trim() ?? '';
       if (existing) {
-        const existingDistributorCapacity = currentDistributorCapacity(existing);
+        const existingAmbassadorCapacity = currentAmbassadorCapacity(existing);
         if (typedPhone && typedPhone !== String(existing.phone ?? '').trim()) {
           const phoneOwner = await client.query(
             `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
@@ -402,15 +423,15 @@ export async function authRoutes(app: FastifyInstance) {
             SET role='DUAL_USER',
               active_role=$2,
               max_status_viewers_12h = CASE
-                  WHEN $2='DISTRIBUTOR' AND $3::int > 0
+                  WHEN $2='AMBASSADOR' AND $3::int > 0
                     THEN $3
-                  WHEN $2='DISTRIBUTOR' AND $4::int > 0
+                  WHEN $2='AMBASSADOR' AND $4::int > 0
                     THEN $4
                   ELSE COALESCE(max_status_viewers_12h, 0)
                 END
             WHERE id=$1
             `,
-            [existing.id, body.role, distributorCapacity, existingDistributorCapacity]
+            [existing.id, body.role, ambassadorCapacity, existingAmbassadorCapacity]
           );
         } else {
           await client.query(
@@ -418,15 +439,15 @@ export async function authRoutes(app: FastifyInstance) {
             UPDATE users
             SET active_role=$2,
                 max_status_viewers_12h = CASE
-                  WHEN $2='DISTRIBUTOR' AND $3::int > 0
+                  WHEN $2='AMBASSADOR' AND $3::int > 0
                     THEN $3
-                  WHEN $2='DISTRIBUTOR' AND $4::int > 0
+                  WHEN $2='AMBASSADOR' AND $4::int > 0
                     THEN $4
                   ELSE COALESCE(max_status_viewers_12h, 0)
                 END
             WHERE id=$1
             `,
-            [existing.id, body.role, distributorCapacity, existingDistributorCapacity]
+            [existing.id, body.role, ambassadorCapacity, existingAmbassadorCapacity]
           );
         }
         const refreshed = await userRepo.findByEmail(client, email);
@@ -456,7 +477,7 @@ export async function authRoutes(app: FastifyInstance) {
         body.role,
         countryData.iso2,
         countryData.currency,
-        distributorCapacity
+        ambassadorCapacity
       );
       await userRepo.ensureWallet(client, created.id, countryData.currency);
       await upsertSocialProfile(client, created.id, fullName, photoUrl);

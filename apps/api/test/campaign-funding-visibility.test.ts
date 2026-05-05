@@ -24,25 +24,25 @@ describe('Campaign funding visibility', () => {
     `);
   });
 
-  it('keeps promoter availability false until escrow has real funding evidence', async () => {
-    const advertiserEmail = `advertiser-${randomUUID()}@example.com`;
-    const distributorEmail = `distributor-${randomUUID()}@example.com`;
+  it('keeps ambassador availability false until escrow has real funding evidence', async () => {
+    const businessEmail = `business-${randomUUID()}@example.com`;
+    const ambassadorEmail = `ambassador-${randomUUID()}@example.com`;
 
-    const advertiser = await pool.query(
+    const business = await pool.query(
       `
       INSERT INTO users (email, phone, password_hash, role)
-      VALUES ($1, $2, 'x', 'ADVERTISER')
+      VALUES ($1, $2, 'x', 'BUSINESS')
       RETURNING *
       `,
-      [advertiserEmail, `+25670${Date.now().toString().slice(-7)}`]
+      [businessEmail, `+25670${Date.now().toString().slice(-7)}`]
     );
-    const distributor = await pool.query(
+    const ambassador = await pool.query(
       `
       INSERT INTO users (email, phone, password_hash, role)
-      VALUES ($1, $2, 'x', 'DISTRIBUTOR')
+      VALUES ($1, $2, 'x', 'AMBASSADOR')
       RETURNING *
       `,
-      [distributorEmail, `+25471${Date.now().toString().slice(-7)}`]
+      [ambassadorEmail, `+25471${Date.now().toString().slice(-7)}`]
     );
     const wallet = await pool.query(
       `
@@ -50,12 +50,12 @@ describe('Campaign funding visibility', () => {
       VALUES ($1, 'UGX', 5000, 5000)
       RETURNING *
       `,
-      [advertiser.rows[0].id]
+      [business.rows[0].id]
     );
     const campaign = await pool.query(
       `
       INSERT INTO campaigns (
-        advertiser_id,
+        business_id,
         title,
         platform,
         payout_amount,
@@ -80,7 +80,7 @@ describe('Campaign funding visibility', () => {
       )
       RETURNING *
       `,
-      [advertiser.rows[0].id]
+      [business.rows[0].id]
     );
     await pool.query(
       `
@@ -93,7 +93,7 @@ describe('Campaign funding visibility', () => {
     let summaries = await buildCampaignStatusSummaries(
       pool,
       [campaign.rows[0].id],
-      distributor.rows[0].id
+      ambassador.rows[0].id
     );
     expect(summaries.get(campaign.rows[0].id)).toMatchObject({
       escrow_status: 'FUNDED',
@@ -112,7 +112,7 @@ describe('Campaign funding visibility', () => {
     summaries = await buildCampaignStatusSummaries(
       pool,
       [campaign.rows[0].id],
-      distributor.rows[0].id
+      ambassador.rows[0].id
     );
     expect(summaries.get(campaign.rows[0].id)).toMatchObject({
       escrow_status: 'FUNDED',

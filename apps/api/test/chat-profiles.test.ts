@@ -10,7 +10,7 @@ async function resetDatabase() {
   if (!pool) return;
   await pool.query(`
     TRUNCATE TABLE
-      promoter_profile_reviews,
+      ambassador_profile_reviews,
       chat_offer_group_votes,
       chat_offer_events,
       chat_group_price_overrides,
@@ -44,8 +44,8 @@ async function insertUser(input: {
   fullName: string;
   email: string;
   phone: string;
-  role: 'ADVERTISER' | 'DISTRIBUTOR' | 'DUAL_USER';
-  activeRole?: 'ADVERTISER' | 'DISTRIBUTOR';
+  role: 'BUSINESS' | 'AMBASSADOR' | 'DUAL_USER';
+  activeRole?: 'BUSINESS' | 'AMBASSADOR';
 }) {
   const result = await pool!.query(
     `
@@ -73,11 +73,11 @@ async function insertUser(input: {
   return result.rows[0];
 }
 
-async function insertCompletedContract(advertiserId: string, promoterId: string) {
+async function insertCompletedContract(businessId: string, ambassadorId: string) {
   const campaign = await pool!.query(
     `
     INSERT INTO campaigns (
-      advertiser_id,
+      business_id,
       title,
       platform,
       payout_amount,
@@ -88,7 +88,7 @@ async function insertCompletedContract(advertiserId: string, promoterId: string)
       end_date,
       visibility,
       execution_mode,
-      assigned_distributor_id
+      assigned_ambassador_id
     )
     VALUES (
       $1,
@@ -106,13 +106,13 @@ async function insertCompletedContract(advertiserId: string, promoterId: string)
     )
     RETURNING *
     `,
-    [advertiserId, promoterId]
+    [businessId, ambassadorId]
   );
   const contract = await pool!.query(
     `
     INSERT INTO contracts (
       campaign_id,
-      distributor_id,
+      ambassador_id,
       status,
       accepted_at,
       completed_at
@@ -120,19 +120,19 @@ async function insertCompletedContract(advertiserId: string, promoterId: string)
     VALUES ($1, $2, 'COMPLETED', NOW(), NOW())
     RETURNING *
     `,
-    [campaign.rows[0].id, promoterId]
+    [campaign.rows[0].id, ambassadorId]
   );
   return contract.rows[0];
 }
 
-function buildPrivateCampaignPayload(promoterId: string) {
+function buildPrivateCampaignPayload(ambassadorId: string) {
   return {
     title: 'Profile media payload',
     platform: 'WHATSAPP_STATUS',
     payout_amount: 5000,
     budget_total: 5000,
     execution_mode: 'PRIVATE_CONTRACT',
-    beneficiary_user_ids: [promoterId],
+    beneficiary_user_ids: [ambassadorId],
     start_date: '2026-01-01T00:00:00.000Z',
     end_date: '2026-01-02T00:00:00.000Z',
     media_type: 'IMAGE',
@@ -143,7 +143,7 @@ function buildPrivateCampaignPayload(promoterId: string) {
   };
 }
 
-describe('Chat promoter profiles', () => {
+describe('Chat ambassador profiles', () => {
   if (!pool) {
     it('skipped: TEST_DATABASE_URL not set', () => expect(true).toBe(true));
     return;
@@ -166,27 +166,27 @@ describe('Chat promoter profiles', () => {
     await pool.end();
   });
 
-  it('exposes public promoter profiles with review summaries and accepts advertiser reviews', async () => {
-    const advertiser = await insertUser({
-      fullName: 'Advertiser One',
-      email: 'advertiser-one@example.com',
+  it('exposes public ambassador profiles with review summaries and accepts business reviews', async () => {
+    const business = await insertUser({
+      fullName: 'Business One',
+      email: 'business-one@example.com',
       phone: '+256700100100',
-      role: 'ADVERTISER',
-      activeRole: 'ADVERTISER',
+      role: 'BUSINESS',
+      activeRole: 'BUSINESS',
     });
-    const promoter = await insertUser({
-      fullName: 'Promoter One',
-      email: 'promoter-one@example.com',
+    const ambassador = await insertUser({
+      fullName: 'Ambassador One',
+      email: 'ambassador-one@example.com',
       phone: '+256700200200',
-      role: 'DISTRIBUTOR',
-      activeRole: 'DISTRIBUTOR',
+      role: 'AMBASSADOR',
+      activeRole: 'AMBASSADOR',
     });
-    await insertCompletedContract(advertiser.id, promoter.id);
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    await insertCompletedContract(business.id, ambassador.id);
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const profileResponse = await app.inject({
       method: 'GET',
-      url: `/chat/profiles/${promoter.id}`,
+      url: `/chat/profiles/${ambassador.id}`,
       headers: { authorization: `Bearer ${token}` },
     });
 
@@ -194,7 +194,7 @@ describe('Chat promoter profiles', () => {
     expect(profileResponse.json()).toMatchObject({
       can_review: true,
       profile: {
-        id: promoter.id,
+        id: ambassador.id,
         average_rating: 0,
         rating_count: 0,
       },
@@ -203,7 +203,7 @@ describe('Chat promoter profiles', () => {
 
     const reviewResponse = await app.inject({
       method: 'POST',
-      url: `/chat/profiles/${promoter.id}/reviews`,
+      url: `/chat/profiles/${ambassador.id}/reviews`,
       headers: { authorization: `Bearer ${token}` },
       payload: {
         rating: 5,
@@ -214,7 +214,7 @@ describe('Chat promoter profiles', () => {
     expect(reviewResponse.statusCode).toBe(200);
     expect(reviewResponse.json()).toMatchObject({
       profile: {
-        id: promoter.id,
+        id: ambassador.id,
         average_rating: 5,
         rating_count: 1,
         latest_review_comment: 'Professional delivery and strong audience response.',
@@ -223,14 +223,14 @@ describe('Chat promoter profiles', () => {
 
     const refreshedProfile = await app.inject({
       method: 'GET',
-      url: `/chat/profiles/${promoter.id}`,
+      url: `/chat/profiles/${ambassador.id}`,
       headers: { authorization: `Bearer ${token}` },
     });
 
     expect(refreshedProfile.statusCode).toBe(200);
     expect(refreshedProfile.json()).toMatchObject({
       profile: {
-        id: promoter.id,
+        id: ambassador.id,
         average_rating: 5,
         rating_count: 1,
       },
@@ -244,27 +244,27 @@ describe('Chat promoter profiles', () => {
   });
 
   it('accepts campaign media_urls without requiring a raw media_url field', async () => {
-    const advertiser = await insertUser({
-      fullName: 'Advertiser Two',
-      email: 'advertiser-two@example.com',
+    const business = await insertUser({
+      fullName: 'Business Two',
+      email: 'business-two@example.com',
       phone: '+256700300300',
-      role: 'ADVERTISER',
-      activeRole: 'ADVERTISER',
+      role: 'BUSINESS',
+      activeRole: 'BUSINESS',
     });
-    const promoter = await insertUser({
-      fullName: 'Promoter Two',
-      email: 'promoter-two@example.com',
+    const ambassador = await insertUser({
+      fullName: 'Ambassador Two',
+      email: 'ambassador-two@example.com',
       phone: '+256700400400',
-      role: 'DISTRIBUTOR',
-      activeRole: 'DISTRIBUTOR',
+      role: 'AMBASSADOR',
+      activeRole: 'AMBASSADOR',
     });
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const response = await app.inject({
       method: 'POST',
       url: '/campaigns',
       headers: { authorization: `Bearer ${token}` },
-      payload: buildPrivateCampaignPayload(promoter.id),
+      payload: buildPrivateCampaignPayload(ambassador.id),
     });
 
     expect(response.statusCode).toBe(200);

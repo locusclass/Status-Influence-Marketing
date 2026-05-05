@@ -151,25 +151,25 @@ export async function ensureChatSchema(client: any) {
     CREATE TABLE IF NOT EXISTS chat_group_deal_threads (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       group_id UUID NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
-      advertiser_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      business_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       thread_id UUID NOT NULL UNIQUE REFERENCES chat_threads(id) ON DELETE CASCADE,
       created_by UUID REFERENCES users(id) ON DELETE SET NULL,
       media_url TEXT,
       media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (group_id, advertiser_id)
+      UNIQUE (group_id, business_id)
     )
   `);
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS chat_group_price_overrides (
       group_id UUID NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
-      advertiser_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      business_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       override_price_ugx INTEGER NOT NULL DEFAULT 0,
       set_by UUID REFERENCES users(id) ON DELETE SET NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (group_id, advertiser_id)
+      PRIMARY KEY (group_id, business_id)
     )
   `);
   await client.query(`
@@ -289,8 +289,8 @@ export async function ensureChatSchema(client: any) {
     ON chat_group_memberships (group_id, status, updated_at DESC)
   `);
   await client.query(`
-    CREATE INDEX IF NOT EXISTS chat_group_deal_threads_advertiser_idx
-    ON chat_group_deal_threads (advertiser_id, updated_at DESC)
+    CREATE INDEX IF NOT EXISTS chat_group_deal_threads_business_idx
+    ON chat_group_deal_threads (business_id, updated_at DESC)
   `);
   await client.query(`
     CREATE INDEX IF NOT EXISTS chat_offer_events_thread_created_idx

@@ -86,7 +86,7 @@ async function insertUser(input: {
 }
 
 async function insertCampaign(input: {
-  advertiser_id: string;
+  business_id: string;
   title: string;
   country_id: string;
   division_id?: string | null;
@@ -96,7 +96,7 @@ async function insertCampaign(input: {
   const result = await pool!.query(
     `
     INSERT INTO campaigns (
-      advertiser_id,
+      business_id,
       title,
       platform,
       payout_amount,
@@ -112,7 +112,7 @@ async function insertCampaign(input: {
     RETURNING *
     `,
     [
-      input.advertiser_id,
+      input.business_id,
       input.title,
       input.payout_amount ?? 100,
       input.budget_total ?? 1000,
@@ -506,27 +506,27 @@ describe('Tenant admin architecture', () => {
     await insertUser({
       email: 'ug-user@prime.test',
       phone: '+256700000202',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
     });
     const keUser = await insertUser({
       email: 'ke-user@prime.test',
       phone: '+254700000203',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'KE',
       country_id: ke.id,
     });
 
     await insertCampaign({
-      advertiser_id: ugAdmin.id,
+      business_id: ugAdmin.id,
       title: 'UG Campaign',
       country_id: ug.id,
     });
     await insertCampaign({
-      advertiser_id: keUser.id,
+      business_id: keUser.id,
       title: 'KE Campaign',
       country_id: ke.id,
     });
@@ -580,16 +580,16 @@ describe('Tenant admin architecture', () => {
     const ugUser = await insertUser({
       email: 'ug-library-user@prime.test',
       phone: '+256700000222',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
     });
     const keUser = await insertUser({
       email: 'ke-library-user@prime.test',
       phone: '+254700000223',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'KE',
       country_id: ke.id,
     });
@@ -631,8 +631,8 @@ describe('Tenant admin architecture', () => {
     const target = await insertUser({
       email: 'target-user@prime.test',
       phone: '+256700000232',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
     });
@@ -658,8 +658,8 @@ describe('Tenant admin architecture', () => {
       [target.id]
     );
     expect(userRes.rows[0]).toMatchObject({
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
     });
   });
 
@@ -674,56 +674,56 @@ describe('Tenant admin architecture', () => {
       country: 'UG',
       country_id: ug.id,
     });
-    const ugAdvertiser = await insertUser({
+    const ugBusiness = await insertUser({
       email: 'ug-payout-user@prime.test',
       phone: '+256700000242',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
     });
-    const keAdvertiser = await insertUser({
+    const keBusiness = await insertUser({
       email: 'ke-payout-user@prime.test',
       phone: '+254700000243',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'KE',
       country_id: ke.id,
     });
 
     const ugCampaign = await insertCampaign({
-      advertiser_id: ugAdvertiser.id,
+      business_id: ugBusiness.id,
       title: 'UG payout campaign',
       country_id: ug.id,
     });
     const keCampaign = await insertCampaign({
-      advertiser_id: keAdvertiser.id,
+      business_id: keBusiness.id,
       title: 'KE payout campaign',
       country_id: ke.id,
     });
     const ugSession = await insertVerificationSession({
-      user_id: ugAdvertiser.id,
+      user_id: ugBusiness.id,
       campaign_id: ugCampaign.id,
     });
     const keSession = await insertVerificationSession({
-      user_id: keAdvertiser.id,
+      user_id: keBusiness.id,
       campaign_id: keCampaign.id,
     });
     const ugProof = await insertProof({
       session_id: ugSession.id,
-      user_id: ugAdvertiser.id,
+      user_id: ugBusiness.id,
     });
     const keProof = await insertProof({
       session_id: keSession.id,
-      user_id: keAdvertiser.id,
+      user_id: keBusiness.id,
     });
     const ugRequest = await insertPayoutRequest({
       proof_id: ugProof.id,
-      user_id: ugAdvertiser.id,
+      user_id: ugBusiness.id,
     });
     const keRequest = await insertPayoutRequest({
       proof_id: keProof.id,
-      user_id: keAdvertiser.id,
+      user_id: keBusiness.id,
     });
 
     const token = app.jwt.sign(
@@ -802,8 +802,8 @@ describe('Tenant admin architecture', () => {
     await insertUser({
       email: 'kampala-user@prime.test',
       phone: '+256700000302',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
       division_id: kampala.id,
@@ -811,21 +811,21 @@ describe('Tenant admin architecture', () => {
     const guluUser = await insertUser({
       email: 'gulu-user@prime.test',
       phone: '+256700000303',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
       division_id: gulu.id,
     });
 
     const kampalaCampaign = await insertCampaign({
-      advertiser_id: admin.id,
+      business_id: admin.id,
       title: 'Kampala Campaign',
       country_id: ug.id,
       division_id: kampala.id,
     });
     const guluCampaign = await insertCampaign({
-      advertiser_id: guluUser.id,
+      business_id: guluUser.id,
       title: 'Gulu Campaign',
       country_id: ug.id,
       division_id: gulu.id,
@@ -882,11 +882,11 @@ describe('Tenant admin architecture', () => {
 
   it('calculates revenue splits correctly for completed campaigns', async () => {
     const ug = await insertCountry('UG', 'Uganda');
-    const advertiser = await insertUser({
-      email: 'advertiser@prime.test',
+    const business = await insertUser({
+      email: 'business@prime.test',
       phone: '+256700000401',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
     });
@@ -897,11 +897,11 @@ describe('Tenant admin architecture', () => {
         VALUES ($1,'Makerere','UNIVERSITY',$2)
         RETURNING *
         `,
-        [ug.id, advertiser.id]
+        [ug.id, business.id]
       )
     ).rows[0];
     const campaign = await insertCampaign({
-      advertiser_id: advertiser.id,
+      business_id: business.id,
       title: 'Revenue Campaign',
       country_id: ug.id,
       division_id: division.id,
@@ -929,11 +929,11 @@ describe('Tenant admin architecture', () => {
 
   it('aggregates manager payouts and credits wallets automatically', async () => {
     const ug = await insertCountry('UG', 'Uganda');
-    const advertiser = await insertUser({
+    const business = await insertUser({
       email: 'owner@prime.test',
       phone: '+256700000501',
-      role: 'ADVERTISER',
-      active_role: 'ADVERTISER',
+      role: 'BUSINESS',
+      active_role: 'BUSINESS',
       country: 'UG',
       country_id: ug.id,
     });
@@ -951,7 +951,7 @@ describe('Tenant admin architecture', () => {
         VALUES ($1,'Entebbe','CITY',$2)
         RETURNING *
         `,
-        [ug.id, advertiser.id]
+        [ug.id, business.id]
       )
     ).rows[0];
     const divisionAdmin = await insertUser({
@@ -979,7 +979,7 @@ describe('Tenant admin architecture', () => {
     );
 
     const campaign = await insertCampaign({
-      advertiser_id: advertiser.id,
+      business_id: business.id,
       title: 'Monthly Share Campaign',
       country_id: ug.id,
       division_id: division.id,

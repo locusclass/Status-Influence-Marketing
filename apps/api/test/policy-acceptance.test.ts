@@ -14,7 +14,7 @@ async function resetDatabase() {
   if (!pool) return;
   await pool.query(`
     TRUNCATE TABLE
-      promoter_profile_reviews,
+      ambassador_profile_reviews,
       chat_offer_group_votes,
       chat_offer_events,
       chat_group_price_overrides,
@@ -44,7 +44,7 @@ async function resetDatabase() {
   await applySchema(pool);
 }
 
-async function insertAdvertiser() {
+async function insertBusiness() {
   const result = await pool!.query(
     `
     INSERT INTO users (
@@ -56,12 +56,12 @@ async function insertAdvertiser() {
       active_role,
       status
     )
-    VALUES ($1, $2, $3, $4, 'ADVERTISER', 'ADVERTISER', 'ACTIVE')
+    VALUES ($1, $2, $3, $4, 'BUSINESS', 'BUSINESS', 'ACTIVE')
     RETURNING *
     `,
     [
-      'Policy Advertiser',
-      'policy-advertiser@example.com',
+      'Policy Business',
+      'policy-business@example.com',
       '+256700999111',
       hashPassword('Password123!'),
     ]
@@ -100,13 +100,13 @@ describe('Policy acceptance gate', () => {
   });
 
   it('blocks protected routes until both policy documents are accepted', async () => {
-    await insertAdvertiser();
+    await insertBusiness();
 
     const loginResponse = await app.inject({
       method: 'POST',
       url: '/auth/login',
       payload: {
-        email: 'policy-advertiser@example.com',
+        email: 'policy-business@example.com',
         password: 'Password123!',
       },
     });
@@ -182,13 +182,13 @@ describe('Policy acceptance gate', () => {
   });
 
   it('allows prefixed policy routes to bypass the acceptance gate', async () => {
-    await insertAdvertiser();
+    await insertBusiness();
 
     const loginResponse = await app.inject({
       method: 'POST',
       url: '/api/auth/login',
       payload: {
-        email: 'policy-advertiser@example.com',
+        email: 'policy-business@example.com',
         password: 'Password123!',
       },
     });

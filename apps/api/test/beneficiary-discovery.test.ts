@@ -10,7 +10,7 @@ async function resetDatabase() {
   if (!pool) return;
   await pool.query(`
     TRUNCATE TABLE
-      promoter_profile_reviews,
+      ambassador_profile_reviews,
       chat_offer_group_votes,
       chat_offer_events,
       chat_group_price_overrides,
@@ -44,8 +44,8 @@ async function insertUser(input: {
   fullName: string;
   email: string;
   phone: string;
-  role: 'ADVERTISER' | 'DISTRIBUTOR' | 'DUAL_USER';
-  activeRole?: 'ADVERTISER' | 'DISTRIBUTOR';
+  role: 'BUSINESS' | 'AMBASSADOR' | 'DUAL_USER';
+  activeRole?: 'BUSINESS' | 'AMBASSADOR';
   privateContractRateUgx?: number;
   maxStatusViewers12h?: number;
 }) {
@@ -172,89 +172,89 @@ describe('Beneficiary discovery', () => {
     await pool.end();
   });
 
-  it('finds promoters by name and by phone with or without country code', async () => {
-    const advertiser = await insertUser({
-      fullName: 'Advertiser Search',
-      email: 'advertiser-search@example.com',
+  it('finds ambassadors by name and by phone with or without country code', async () => {
+    const business = await insertUser({
+      fullName: 'Business Search',
+      email: 'business-search@example.com',
       phone: '+256700000001',
-      role: 'ADVERTISER',
-      activeRole: 'ADVERTISER',
+      role: 'BUSINESS',
+      activeRole: 'BUSINESS',
       privateContractRateUgx: 0,
     });
-    const promoter = await insertUser({
+    const ambassador = await insertUser({
       fullName: 'Amina Nansubuga',
       email: 'amina@example.com',
       phone: '+256700123456',
-      role: 'DISTRIBUTOR',
-      activeRole: 'DISTRIBUTOR',
+      role: 'AMBASSADOR',
+      activeRole: 'AMBASSADOR',
       privateContractRateUgx: 8500,
     });
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const byName = await app.inject({
       method: 'GET',
-      url: '/campaigns/distributor-lookup?q=Amina',
+      url: '/campaigns/ambassador-lookup?q=Amina',
       headers: { authorization: `Bearer ${token}` },
     });
     expect(byName.statusCode).toBe(200);
     expect(byName.json()).toMatchObject({
-      distributor: {
-        id: promoter.id,
+      ambassador: {
+        id: ambassador.id,
         full_name: 'Amina Nansubuga',
       },
     });
 
     const byLocalPhone = await app.inject({
       method: 'GET',
-      url: '/campaigns/distributor-lookup?phone=0700123456',
+      url: '/campaigns/ambassador-lookup?phone=0700123456',
       headers: { authorization: `Bearer ${token}` },
     });
     expect(byLocalPhone.statusCode).toBe(200);
     expect(byLocalPhone.json()).toMatchObject({
-      distributor: {
-        id: promoter.id,
+      ambassador: {
+        id: ambassador.id,
         phone: '+256700123456',
       },
     });
 
     const byNationalNumber = await app.inject({
       method: 'GET',
-      url: '/promoters/lookup?phone=700123456',
+      url: '/ambassadors/lookup?phone=700123456',
       headers: { authorization: `Bearer ${token}` },
     });
     expect(byNationalNumber.statusCode).toBe(200);
     expect(byNationalNumber.json()).toMatchObject({
       profile: {
-        id: promoter.id,
+        id: ambassador.id,
         display_name: 'Amina Nansubuga',
       },
     });
   });
 
   it('finds beneficiary groups by group name and member phone variants', async () => {
-    const advertiser = await insertUser({
-      fullName: 'Advertiser Group Search',
-      email: 'advertiser-group@example.com',
+    const business = await insertUser({
+      fullName: 'Business Group Search',
+      email: 'business-group@example.com',
       phone: '+256700000002',
-      role: 'ADVERTISER',
-      activeRole: 'ADVERTISER',
+      role: 'BUSINESS',
+      activeRole: 'BUSINESS',
       privateContractRateUgx: 0,
     });
-    const promoter = await insertUser({
+    const ambassador = await insertUser({
       fullName: 'Daniel Kato',
       email: 'daniel@example.com',
       phone: '+256701234567',
-      role: 'DISTRIBUTOR',
-      activeRole: 'DISTRIBUTOR',
+      role: 'AMBASSADOR',
+      activeRole: 'AMBASSADOR',
       privateContractRateUgx: 9200,
     });
     await insertChatGroup({
       name: 'Kampala Movers',
       description: 'High-response group',
-      createdBy: promoter.id,
-      memberIds: [promoter.id],
+      createdBy: ambassador.id,
+      memberIds: [ambassador.id],
     });
-    const token = app.jwt.sign(buildAuthClaims(advertiser));
+    const token = app.jwt.sign(buildAuthClaims(business));
 
     const byName = await app.inject({
       method: 'GET',

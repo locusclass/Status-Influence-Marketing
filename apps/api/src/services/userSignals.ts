@@ -272,15 +272,15 @@ export async function collectCampaignNotificationUserIds(
     `
     SELECT DISTINCT participant_id
     FROM (
-      SELECT advertiser_id AS participant_id
+      SELECT business_id AS participant_id
       FROM campaigns
       WHERE id = $1
       UNION ALL
-      SELECT assigned_distributor_id AS participant_id
+      SELECT assigned_ambassador_id AS participant_id
       FROM campaigns
       WHERE id = $1
       UNION ALL
-      SELECT distributor_id AS participant_id
+      SELECT ambassador_id AS participant_id
       FROM contracts
       WHERE campaign_id = $1
     ) participants

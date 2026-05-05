@@ -14,14 +14,15 @@ import {
 } from '../services/firebaseStorage.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
-  ACCOUNT_ROLE_ADVERTISER,
-  ACCOUNT_ROLE_DISTRIBUTOR,
+  ACCOUNT_ROLE_BUSINESS,
+  ACCOUNT_ROLE_AMBASSADOR,
   buildAuthClaims,
   buildUserSession,
-  canAccessAdvertiserFeatures,
-  canAccessDistributorFeatures,
+  canAccessBusinessFeatures,
+  canAccessAmbassadorFeatures,
   normalizeAccountRole,
   normalizeActiveRole,
+  normalizeRequestedUserRole,
 } from '../services/roles.js';
 import {
   deleteUserNotification,
@@ -44,13 +45,35 @@ import {
   hasYoEncryptionKey,
 } from '../config.js';
 
-const accountProfileSchema = z.object({
-  full_name: z.string().trim().min(2).max(120),
-  country: z.string().trim().min(2).max(3).optional(),
-  current_advertiser_viewers: z.number().int().min(0).optional(),
-  private_contract_rate_ugx: z.number().int().min(0).optional(),
-  price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
-});
+const roleInputSchema = z
+  .string()
+  .trim()
+  .transform((value, ctx) => {
+    const normalized = normalizeRequestedUserRole(value);
+    if (normalized != null) {
+      return normalized;
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Invalid role.',
+    });
+    return z.NEVER;
+  });
+
+const accountProfileSchema = z
+  .object({
+    full_name: z.string().trim().min(2).max(120),
+    country: z.string().trim().min(2).max(3).optional(),
+    current_business_viewers: z.number().int().min(0).optional(),
+    current_advertiser_viewers: z.number().int().min(0).optional(),
+    private_contract_rate_ugx: z.number().int().min(0).optional(),
+    price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
+  })
+  .transform((body) => ({
+    ...body,
+    current_business_viewers:
+      body.current_business_viewers ?? body.current_advertiser_viewers,
+  }));
 
 const accountPasswordSchema = z.object({
   current_password: z.string().min(8),
@@ -62,11 +85,11 @@ const accountAvatarSchema = z.object({
 });
 
 const accountRoleSchema = z.object({
-  role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+  role: roleInputSchema,
   max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 
-const distributorCapacitySchema = z.object({
+const ambassadorCapacitySchema = z.object({
   max_status_viewers_12h: z.number().int().positive(),
   rate_12h_ugx: z.number().int().min(0).optional(),
   rate_24h_ugx: z.number().int().min(0).optional(),
@@ -383,7 +406,7 @@ async function ensureAccountSchema(client: any) {
   `);
   await client.query(`
     ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
+      ADD COLUMN IF NOT EXISTS active_role TEXT NOT NULL DEFAULT 'AMBASSADOR'
   `);
   await client.query(`
     ALTER TABLE users
@@ -395,7 +418,7 @@ async function ensureAccountSchema(client: any) {
   `);
   await client.query(`
     ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS current_advertiser_viewers INTEGER NOT NULL DEFAULT 0
+      ADD COLUMN IF NOT EXISTS current_business_viewers INTEGER NOT NULL DEFAULT 0
   `);
   await client.query(`
     ALTER TABLE users
@@ -406,14 +429,14 @@ async function ensureAccountSchema(client: any) {
   `);
   await client.query(`
     ALTER TABLE users
-      ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN'))
+      ADD CONSTRAINT users_role_check CHECK (role IN ('BUSINESS', 'AMBASSADOR', 'DUAL_USER', 'ADMIN'))
   `);
   await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_role_check
   `);
   await client.query(`
     ALTER TABLE users
-      ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'))
+      ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN'))
   `);
   await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_price_privacy_mode_check
@@ -426,15 +449,15 @@ async function ensureAccountSchema(client: any) {
     UPDATE users
     SET active_role = CASE
       WHEN role='ADMIN' THEN 'ADMIN'
-      WHEN role='ADVERTISER' THEN 'ADVERTISER'
-      WHEN role='DUAL_USER' AND (active_role IS NULL OR btrim(active_role)='') THEN 'DISTRIBUTOR'
-      ELSE COALESCE(NULLIF(active_role, ''), 'DISTRIBUTOR')
+      WHEN role='BUSINESS' THEN 'BUSINESS'
+      WHEN role='DUAL_USER' AND (active_role IS NULL OR btrim(active_role)='') THEN 'AMBASSADOR'
+      ELSE COALESCE(NULLIF(active_role, ''), 'AMBASSADOR')
     END
     WHERE active_role IS NULL
        OR btrim(active_role)=''
        OR (role='ADMIN' AND active_role<>'ADMIN')
-       OR (role='ADVERTISER' AND active_role NOT IN ('ADVERTISER', 'ADMIN'))
-       OR (role='DISTRIBUTOR' AND active_role NOT IN ('DISTRIBUTOR', 'ADMIN'))
+       OR (role='BUSINESS' AND active_role NOT IN ('BUSINESS', 'ADMIN'))
+       OR (role='AMBASSADOR' AND active_role NOT IN ('AMBASSADOR', 'ADMIN'))
   `);
   await ensureWalletTables(client);
 }
@@ -558,7 +581,7 @@ export async function accountRoutes(app: FastifyInstance) {
           u.preferred_currency AS currency,
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
-          COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+          COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           ${policyAcceptanceSelectSql('u')},
           u.last_login_at,
@@ -590,7 +613,7 @@ export async function accountRoutes(app: FastifyInstance) {
         `,
         [userId]
       );
-      const promoterPlatforms = [
+      const ambassadorPlatforms = [
         {
           platform: 'WHATSAPP_STATUS',
           active: true,
@@ -604,7 +627,7 @@ export async function accountRoutes(app: FastifyInstance) {
           ? {
               ...res.rows[0],
               ...buildPolicyAcceptanceState(res.rows[0]),
-              promoter_platforms: promoterPlatforms,
+              ambassador_platforms: ambassadorPlatforms,
             }
           : null,
       };
@@ -741,7 +764,7 @@ export async function accountRoutes(app: FastifyInstance) {
           ]);
         }
 
-        if (typeof body.current_advertiser_viewers === 'number') {
+        if (typeof body.current_business_viewers === 'number') {
           const roleRes = await client.query(
             `
             SELECT role, active_role
@@ -756,13 +779,13 @@ export async function accountRoutes(app: FastifyInstance) {
             user?.active_role,
             user?.role
           );
-          if (!canAccessAdvertiserFeatures(user?.role) || activeRole !== ACCOUNT_ROLE_ADVERTISER) {
+          if (!canAccessBusinessFeatures(user?.role) || activeRole !== ACCOUNT_ROLE_BUSINESS) {
             reply.code(403);
-            return { error: 'advertiser_profile_required' };
+            return { error: 'business_profile_required' };
           }
           await client.query(
-            'UPDATE users SET current_advertiser_viewers=$2 WHERE id=$1',
-            [userId, Math.max(0, body.current_advertiser_viewers)]
+            'UPDATE users SET current_business_viewers=$2 WHERE id=$1',
+            [userId, Math.max(0, body.current_business_viewers)]
           );
         }
 
@@ -777,9 +800,9 @@ export async function accountRoutes(app: FastifyInstance) {
             [userId]
           );
           const user = roleRes.rows[0];
-          if (!canAccessDistributorFeatures(user?.role)) {
+          if (!canAccessAmbassadorFeatures(user?.role)) {
             reply.code(403);
-            return { error: 'distributor_profile_required' };
+            return { error: 'ambassador_profile_required' };
           }
           await client.query(
             'UPDATE users SET private_contract_rate_ugx=$2 WHERE id=$1',
@@ -1068,13 +1091,10 @@ export async function accountRoutes(app: FastifyInstance) {
     }
   );
 
-  app.patch(
-    '/account/distributor-capacity',
-    { preHandler: [app.authenticate] },
-    async (request, reply) => {
+  const handleAmbassadorCapacityUpdate = async (request: any, reply: any) => {
       const userSub = (request.user as any).sub as string;
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
-      const parsed = distributorCapacitySchema.safeParse(request.body);
+      const parsed = ambassadorCapacitySchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
         return { error: 'validation_failed', issues: parsed.error.issues };
@@ -1109,11 +1129,22 @@ export async function accountRoutes(app: FastifyInstance) {
           user: buildUserSession(user),
         };
       });
-    }
+    };
+
+  app.patch(
+    '/account/ambassador-capacity',
+    { preHandler: [app.authenticate] },
+    handleAmbassadorCapacityUpdate
   );
 
-  // ── Promoter account verification recording ─────────────────────────────────
-  // Promoters submit a WhatsApp status screen recording for admin to review
+  app.patch(
+    '/account/distributor-capacity',
+    { preHandler: [app.authenticate] },
+    handleAmbassadorCapacityUpdate
+  );
+
+  // ── Ambassador account verification recording ─────────────────────────────────
+  // Ambassadors submit a WhatsApp status screen recording for admin to review
   // and set their verified 12h viewer count (max_status_viewers_12h).
   app.post(
     '/account/verification/recording',
@@ -1130,7 +1161,7 @@ export async function accountRoutes(app: FastifyInstance) {
       return withTransaction(async (client) => {
         // One pending submission at a time per user
         const existing = await client.query(
-          `SELECT id FROM promoter_verification_recordings
+          `SELECT id FROM ambassador_verification_recordings
            WHERE user_id=$1 AND status='PENDING' LIMIT 1`,
           [userId]
         );
@@ -1139,7 +1170,7 @@ export async function accountRoutes(app: FastifyInstance) {
           return { error: 'verification_recording_pending' };
         }
         const res = await client.query(
-          `INSERT INTO promoter_verification_recordings (user_id, video_url)
+          `INSERT INTO ambassador_verification_recordings (user_id, video_url)
            VALUES ($1, $2)
            RETURNING id, status, created_at`,
           [userId, body.data.video_url]
@@ -1157,7 +1188,7 @@ export async function accountRoutes(app: FastifyInstance) {
       return withTransaction(async (client) => {
         const res = await client.query(
           `SELECT id, status, approved_viewer_count, admin_note, reviewed_at, created_at
-           FROM promoter_verification_recordings
+           FROM ambassador_verification_recordings
            WHERE user_id=$1
            ORDER BY created_at DESC LIMIT 5`,
           [userId]
@@ -1177,7 +1208,7 @@ export async function accountRoutes(app: FastifyInstance) {
         `
         SELECT id
         FROM campaigns
-        WHERE advertiser_id=$1
+        WHERE business_id=$1
         `,
         [userId]
       );
@@ -1212,7 +1243,7 @@ export async function accountRoutes(app: FastifyInstance) {
         `
         SELECT id, parent_campaign_id
         FROM campaigns
-        WHERE assigned_distributor_id=$1
+        WHERE assigned_ambassador_id=$1
         `,
         [userId]
       );
@@ -1337,7 +1368,7 @@ export async function accountRoutes(app: FastifyInstance) {
       await client.query(
         `
         DELETE FROM contracts
-        WHERE distributor_id=$1 OR campaign_id = ANY($2::uuid[])
+        WHERE ambassador_id=$1 OR campaign_id = ANY($2::uuid[])
         `,
         [userId, campaignIds]
       );
@@ -1351,9 +1382,9 @@ export async function accountRoutes(app: FastifyInstance) {
       await client.query(
         `
         UPDATE campaigns
-        SET assigned_distributor_id = NULL,
+        SET assigned_ambassador_id = NULL,
             assigned_phone = NULL
-        WHERE assigned_distributor_id=$1
+        WHERE assigned_ambassador_id=$1
         `,
         [userId]
       );
@@ -1414,9 +1445,9 @@ export async function accountRoutes(app: FastifyInstance) {
             ? {
                 ...wallet,
                 minimum_withdrawal_amount: MIN_WALLET_WITHDRAW_UGX,
-                wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
+                wallet_mode: activeRole === ACCOUNT_ROLE_BUSINESS ? 'CAMPAIGN_ONLY' : 'STANDARD',
                 wallet_notice:
-                  activeRole === ACCOUNT_ROLE_ADVERTISER
+                  activeRole === ACCOUNT_ROLE_BUSINESS
                     ? 'Use wallet balance for YO Uganda deposits, campaign funding, and withdrawals.'
                     : 'Withdraw from UGX 10,000.',
               }
@@ -1832,12 +1863,12 @@ export async function accountRoutes(app: FastifyInstance) {
       );
       if (userId === 'ariaka-access') {
         return {
-          advertiser_campaigns: [],
-          distributor: { pending_or_review_count: 0 }
+          business_campaigns: [],
+          ambassador: { pending_or_review_count: 0 }
         };
       }
       return withTransaction(async (client) => {
-      if (activeRole === ACCOUNT_ROLE_ADVERTISER && canAccessAdvertiserFeatures(accountRole)) {
+      if (activeRole === ACCOUNT_ROLE_BUSINESS && canAccessBusinessFeatures(accountRole)) {
         const campaignsRes = await client.query(
           `SELECT c.id,
                   c.title,
@@ -1850,15 +1881,15 @@ export async function accountRoutes(app: FastifyInstance) {
              JOIN verification_sessions s ON s.id = p.session_id
              WHERE s.campaign_id = c.id
            ) latest ON true
-           WHERE c.advertiser_id=$1
+           WHERE c.business_id=$1
            ORDER BY c.created_at DESC
            LIMIT 200`,
           [userId]
         );
-        return { advertiser_campaigns: campaignsRes.rows };
+        return { business_campaigns: campaignsRes.rows };
       }
 
-      const distributorRes = await client.query(
+      const ambassadorRes = await client.query(
         `SELECT
            COUNT(*) FILTER (WHERE status='PENDING' OR status='MANUAL_REVIEW')::int AS pending_or_review_count
          FROM proofs
@@ -1866,8 +1897,8 @@ export async function accountRoutes(app: FastifyInstance) {
         [userId]
       );
       return {
-        distributor: {
-          pending_or_review_count: distributorRes.rows[0]?.pending_or_review_count ?? 0
+        ambassador: {
+          pending_or_review_count: ambassadorRes.rows[0]?.pending_or_review_count ?? 0
         }
       };
     });
@@ -1998,7 +2029,7 @@ export async function accountRoutes(app: FastifyInstance) {
     const status = (query?.status ?? '').toString().toUpperCase();
     return withTransaction(async (client) => {
       const params: any[] = [userId];
-      let where = 'WHERE ctr.distributor_id=$1';
+      let where = 'WHERE ctr.ambassador_id=$1';
       if (status) {
         params.push(status);
         where += ` AND ctr.status=$${params.length}`;
@@ -2030,7 +2061,7 @@ export async function accountRoutes(app: FastifyInstance) {
            FROM proofs p
            JOIN verification_sessions s ON s.id = p.session_id
            WHERE s.campaign_id = ctr.campaign_id
-             AND p.user_id = ctr.distributor_id
+             AND p.user_id = ctr.ambassador_id
            ORDER BY p.created_at DESC
            LIMIT 1
          ) p ON TRUE
