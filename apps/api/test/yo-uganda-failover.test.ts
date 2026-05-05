@@ -12,6 +12,7 @@ const YO_ENV_KEYS = [
   'YO_API_URL',
   'YO_API_URL_FALLBACK',
   'YO_FALLBACK_BASE_URL',
+  'YO_AUTHORIZATION',
   'YO_API_USERNAME',
   'YO_API_PASSWORD',
 ] as const;
@@ -69,6 +70,7 @@ describe('YO Uganda failover handling', () => {
     const { initiateMobileMoneyCollection } = await loadService({
       YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
       YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
+      YO_AUTHORIZATION: 'demo-authorization',
       YO_API_USERNAME: 'demo-user',
       YO_API_PASSWORD: 'demo-pass',
     });
@@ -100,6 +102,7 @@ describe('YO Uganda failover handling', () => {
     const { initiateMobileMoneyCollection } = await loadService({
       YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
       YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
+      YO_AUTHORIZATION: 'demo-authorization',
       YO_API_USERNAME: 'demo-user',
       YO_API_PASSWORD: 'demo-pass',
     });
@@ -127,6 +130,7 @@ describe('YO Uganda failover handling', () => {
 
     const { initiateMobileMoneyCollection } = await loadService({
       YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
+      YO_AUTHORIZATION: 'demo-authorization',
       YO_API_USERNAME: 'demo-user',
       YO_API_PASSWORD: 'demo-api-key',
     });
@@ -145,12 +149,12 @@ describe('YO Uganda failover handling', () => {
     expect(body).toContain('Method=acdepositfunds');
     expect(body).toContain('APIUsername=demo-user');
     expect(body).toContain('APIPassword=demo-api-key');
+    expect(body).toContain('Authorization=demo-authorization');
     expect(body).toContain('Amount=1500');
     expect(body).toContain('NonBlocking=TRUE');
     expect(body).toContain('Account=256700000000');
     expect(body).toContain('AccountProviderCode=MTN_UGANDA');
     expect(body).not.toContain('method=');
-    expect(/(?:^|&)Authorization=/.test(body)).toBe(false);
     expect(body).not.toContain('AccountAuthorization=');
     expect(body).not.toContain('PhoneNumber=');
     expect(body).not.toContain('Provider=');

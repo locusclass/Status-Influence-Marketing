@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { getTransactionStatus, initiateMobileMoneyCollection, } from '../services/yoUganda.js';
-import { config, hasYoClientCredentials, YO_API_PASSWORD_MISSING_MESSAGE, YO_API_USERNAME_MISSING_MESSAGE, } from '../config.js';
+import { config, hasYoClientCredentials, YO_AUTHORIZATION_MISSING_MESSAGE, YO_API_PASSWORD_MISSING_MESSAGE, YO_API_USERNAME_MISSING_MESSAGE, } from '../config.js';
 import { isDirectYoTaskUrl } from '@prime/shared';
 const yoProviderReferenceInputKeys = [
     'transaction_id',
@@ -388,7 +388,7 @@ export async function paymentRoutes(app) {
                 proxy_mode: proxyMode,
                 allow_direct_bypass: allowDirectBypass,
                 credentials_configured: false,
-                detail: `${YO_API_USERNAME_MISSING_MESSAGE} and/or ${YO_API_PASSWORD_MISSING_MESSAGE}`,
+                detail: `${YO_API_USERNAME_MISSING_MESSAGE} and/or ${YO_API_PASSWORD_MISSING_MESSAGE} and/or ${YO_AUTHORIZATION_MISSING_MESSAGE}`,
             };
         }
         return {
@@ -399,6 +399,7 @@ export async function paymentRoutes(app) {
             credentials_configured: true,
             api_username_configured: Boolean(config.yo.apiUsername),
             api_password_configured: Boolean(config.yo.apiPassword),
+            authorization_configured: Boolean(config.yo.authorizationCode),
         };
     };
     const webhookInfo = async () => ({

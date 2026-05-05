@@ -229,9 +229,10 @@ async function postYoRequest(
   const bodyKeys = Array.from(formBody.keys());
   const hasApiCredentials =
     bodyKeys.includes('APIUsername') && bodyKeys.includes('APIPassword');
+  const hasAuthorization = bodyKeys.includes('Authorization');
 
   console.info(
-    `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasApiCredentials=${hasApiCredentials}`
+    `[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasApiCredentials=${hasApiCredentials} hasAuthorization=${hasAuthorization}`
   );
 
   const requestBody = proxyMode
@@ -319,6 +320,7 @@ async function yoRequest(
   const combined: Record<string, string | number | boolean | null | undefined> = {
     APIUsername: config.yo.apiUsername,
     APIPassword: config.yo.apiPassword,
+    Authorization: config.yo.authorizationCode,
     ...request,
   };
   for (const [key, value] of Object.entries(combined)) {
@@ -333,6 +335,7 @@ async function yoRequest(
     method: fields.Method,
     hasApiUsername: Boolean(fields.APIUsername),
     hasApiPassword: Boolean(fields.APIPassword),
+    hasAuthorization: Boolean(fields.Authorization),
     amount: fields.Amount,
     account: fields.Account
       ? `***${String(fields.Account).slice(-4)}`

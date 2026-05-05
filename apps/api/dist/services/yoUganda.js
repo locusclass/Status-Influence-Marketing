@@ -166,7 +166,8 @@ async function postYoRequest(endpoint, fields) {
     }
     const bodyKeys = Array.from(formBody.keys());
     const hasApiCredentials = bodyKeys.includes('APIUsername') && bodyKeys.includes('APIPassword');
-    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasApiCredentials=${hasApiCredentials}`);
+    const hasAuthorization = bodyKeys.includes('Authorization');
+    console.info(`[YO] → POST ${endpoint} proxyMode=${proxyMode} bodyKeys=[${bodyKeys.join(',')}] hasApiCredentials=${hasApiCredentials} hasAuthorization=${hasAuthorization}`);
     const requestBody = proxyMode
         ? formBody.toString()
         : buildYoRequestXml(fields);
@@ -242,6 +243,7 @@ async function yoRequest(request) {
     const combined = {
         APIUsername: config.yo.apiUsername,
         APIPassword: config.yo.apiPassword,
+        Authorization: config.yo.authorizationCode,
         ...request,
     };
     for (const [key, value] of Object.entries(combined)) {
@@ -255,6 +257,7 @@ async function yoRequest(request) {
         method: fields.Method,
         hasApiUsername: Boolean(fields.APIUsername),
         hasApiPassword: Boolean(fields.APIPassword),
+        hasAuthorization: Boolean(fields.Authorization),
         amount: fields.Amount,
         account: fields.Account
             ? `***${String(fields.Account).slice(-4)}`

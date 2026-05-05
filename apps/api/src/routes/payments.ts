@@ -10,6 +10,7 @@ import {
 import {
   config,
   hasYoClientCredentials,
+  YO_AUTHORIZATION_MISSING_MESSAGE,
   YO_API_PASSWORD_MISSING_MESSAGE,
   YO_API_USERNAME_MISSING_MESSAGE,
 } from '../config.js';
@@ -527,7 +528,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         proxy_mode: proxyMode,
         allow_direct_bypass: allowDirectBypass,
         credentials_configured: false,
-        detail: `${YO_API_USERNAME_MISSING_MESSAGE} and/or ${YO_API_PASSWORD_MISSING_MESSAGE}`,
+        detail: `${YO_API_USERNAME_MISSING_MESSAGE} and/or ${YO_API_PASSWORD_MISSING_MESSAGE} and/or ${YO_AUTHORIZATION_MISSING_MESSAGE}`,
       };
     }
 
@@ -539,6 +540,7 @@ export async function paymentRoutes(app: FastifyInstance) {
       credentials_configured: true,
       api_username_configured: Boolean(config.yo.apiUsername),
       api_password_configured: Boolean(config.yo.apiPassword),
+      authorization_configured: Boolean(config.yo.authorizationCode),
     };
   };
 
