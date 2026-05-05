@@ -107,6 +107,7 @@ export function buildUserSession(user: Record<string, unknown>) {
   const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
   const currentAdvertiserViewers = Number(user.current_advertiser_viewers ?? 0);
   const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);
+  const privateContractRate24hUgx = Number(user.private_contract_rate_24h_ugx ?? 0);
   const pricePrivacyMode = String(
     user.price_privacy_mode ?? 'NEGOTIABLE'
   )
@@ -153,12 +154,20 @@ export function buildUserSession(user: Record<string, unknown>) {
         ? Math.trunc(privateContractRateUgx)
         : 0
     ),
+    private_contract_rate_24h_ugx: Math.max(
+      0,
+      Number.isFinite(privateContractRate24hUgx)
+        ? Math.trunc(privateContractRate24hUgx)
+        : 0
+    ),
     price_privacy_mode:
       pricePrivacyMode === 'FIXED' ? 'FIXED' : 'NEGOTIABLE',
     last_login_at: user.last_login_at ?? null,
     last_seen_at: user.last_seen_at ?? null,
     is_online: user.is_online === true,
-    requires_distributor_capacity_setup: false,
+    requires_distributor_capacity_setup:
+      canAccessDistributorFeatures(role) &&
+      Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0) === 0,
     ...buildPolicyAcceptanceState(user),
   };
 }

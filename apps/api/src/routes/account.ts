@@ -68,6 +68,8 @@ const accountRoleSchema = z.object({
 
 const distributorCapacitySchema = z.object({
   max_status_viewers_12h: z.number().int().positive(),
+  rate_12h_ugx: z.number().int().min(0).optional(),
+  rate_24h_ugx: z.number().int().min(0).optional(),
 });
 
 const accountWhatsappVerifySchema = z.object({
@@ -1082,11 +1084,18 @@ export async function accountRoutes(app: FastifyInstance) {
         const updated = await client.query(
           `
           UPDATE users
-          SET max_status_viewers_12h=$2
+          SET max_status_viewers_12h=$2,
+              private_contract_rate_ugx    = COALESCE($3, private_contract_rate_ugx),
+              private_contract_rate_24h_ugx = COALESCE($4, private_contract_rate_24h_ugx)
           WHERE id=$1
-          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx, privacy_policy_accepted_version, privacy_policy_accepted_at, platform_policy_accepted_version, platform_policy_accepted_at
+          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx, private_contract_rate_24h_ugx, privacy_policy_accepted_version, privacy_policy_accepted_at, platform_policy_accepted_version, platform_policy_accepted_at
           `,
-          [userId, parsed.data.max_status_viewers_12h]
+          [
+            userId,
+            parsed.data.max_status_viewers_12h,
+            parsed.data.rate_12h_ugx ?? null,
+            parsed.data.rate_24h_ugx ?? null,
+          ]
         );
         const user = updated.rows[0];
         if (!user) {

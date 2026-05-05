@@ -3277,7 +3277,7 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
 
       const adminUserId = (request.user as any).sub as string;
 
-      // Mark recording as approved
+      // Mark recording as approved with 30-day expiry
       await client.query(
         `UPDATE promoter_verification_recordings
          SET status='APPROVED',
@@ -3285,6 +3285,7 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
              admin_note=$3,
              reviewed_by_user_id=$4,
              reviewed_at=now(),
+             expires_at=now() + INTERVAL '30 days',
              updated_at=now()
          WHERE id=$1`,
         [params.id, body.viewer_count, body.admin_note ?? null, adminUserId]
@@ -3311,7 +3312,8 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       );
 
       await logAudit(client, adminUserId, 'APPROVE_USER_VERIFICATION', 'promoter_verification_recording', params.id, { viewer_count: body.viewer_count });
-      return { ok: true, viewer_count: body.viewer_count };
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      return { ok: true, viewer_count: body.viewer_count, expires_at: expiresAt };
     });
   });
 

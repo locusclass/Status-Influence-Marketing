@@ -4203,14 +4203,26 @@ export async function campaignRoutes(app: FastifyInstance) {
       if (!contractRes.rows[0]) {
         return { error: 'campaign_already_claimed' } as any;
       }
+
+      // Credit the distributor's escrow balance so funds reflect immediately
+      const payoutAmount = Number(
+        campaign.payout_amount ??
+          allocatedViews * getPublicContractUnitRate(campaign.media_type)
+      );
+      if (payoutAmount > 0) {
+        await client.query(
+          `UPDATE wallets
+           SET balance_escrow = balance_escrow + $2
+           WHERE user_id = $1`,
+          [authUser, Math.trunc(payoutAmount)]
+        );
+      }
+
       return {
         contract: {
           ...contractRes.rows[0],
           allocated_views: allocatedViews,
-          allocated_value: Number(
-            campaign.payout_amount ??
-              allocatedViews * getPublicContractUnitRate(campaign.media_type)
-          ),
+          allocated_value: payoutAmount,
         },
         campaign: {
           ...campaign,
