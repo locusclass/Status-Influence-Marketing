@@ -1816,7 +1816,7 @@ export async function buildCampaignStatusSummaries(
       SELECT status
       FROM contracts
       WHERE campaign_id = s.campaign_id
-        AND ambassador_id = $2
+        AND distributor_id = $2
       ORDER BY created_at DESC
       LIMIT 1
     ) mc ON TRUE
@@ -1901,7 +1901,7 @@ async function getContractCompletionReadiness(
   );
   const contract = contractRes.rows[0];
   if (!contract) return { error: 'contract_not_found' } as const;
-  if (contract.ambassador_id !== userId) return { error: 'forbidden' } as const;
+  if (contract.distributor_id !== userId) return { error: 'forbidden' } as const;
   if (contract.status !== 'ACTIVE') return { error: 'contract_not_active' } as const;
 
   const escrowRes = await client.query(
@@ -2476,8 +2476,8 @@ export async function campaignRoutes(app: FastifyInstance) {
                   JOIN verification_sessions vs ON vs.id = p.session_id
                   WHERE vs.campaign_id = c.id
                     AND (
-                      ctr.ambassador_id IS NULL
-                      OR p.user_id = ctr.ambassador_id
+                      ctr.distributor_id IS NULL
+                      OR p.user_id = ctr.distributor_id
                     )
                   ORDER BY p.created_at DESC
                   LIMIT 1
@@ -2515,7 +2515,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         active_contract: activeContractRow,
         my_active_contract:
           authUser
-            ? activeContract.rows.find((row: any) => row.ambassador_id === authUser) ?? null
+            ? activeContract.rows.find((row: any) => row.distributor_id === authUser) ?? null
             : null,
         status_summary: await buildCampaignStatusSummary(client, found.id, authUser ?? null),
       };
@@ -4188,7 +4188,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         const activeCountRes = await client.query(
           `SELECT COUNT(*)::int AS count
            FROM contracts
-           WHERE ambassador_id=$1
+           WHERE distributor_id=$1
              AND status='ACTIVE'`,
           [authUser]
         );
@@ -4214,7 +4214,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       const contractRes = await client.query(
         `INSERT INTO contracts (
           campaign_id,
-          ambassador_id,
+          distributor_id,
           status,
           accepted_at,
           post_deadline_at,

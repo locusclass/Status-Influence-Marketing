@@ -1091,6 +1091,7 @@ export async function accountRoutes(app: FastifyInstance) {
             ${canMultiSelect},
             COALESCE(max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
             COALESCE(private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+            COALESCE(private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
             ${policyAcceptanceSelectSql('users')}
           FROM users
           WHERE id=$1
