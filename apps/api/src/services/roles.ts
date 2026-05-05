@@ -166,12 +166,6 @@ export function buildUserSession(user: Record<string, unknown>) {
         ? Math.trunc(currentBusinessViewers)
         : 0
     ),
-    current_advertiser_viewers: Math.max(
-      0,
-      Number.isFinite(currentBusinessViewers)
-        ? Math.trunc(currentBusinessViewers)
-        : 0
-    ),
     private_contract_rate_ugx: Math.max(
       0,
       Number.isFinite(privateContractRateUgx)
@@ -192,9 +186,8 @@ export function buildUserSession(user: Record<string, unknown>) {
     requires_ambassador_capacity_setup:
       canAccessAmbassadorFeatures(role) &&
       Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0) === 0,
-    requires_distributor_capacity_setup:
-      canAccessAmbassadorFeatures(role) &&
-      Math.max(0, Number.isFinite(maxStatusViewers12h) ? Math.trunc(maxStatusViewers12h) : 0) === 0,
     ...buildPolicyAcceptanceState(user),
   };
 }
+
+

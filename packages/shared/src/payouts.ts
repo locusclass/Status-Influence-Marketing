@@ -1,16 +1,16 @@
-export const PROMOTER_PLATFORM_FEE_PERCENT = 15;
+export const AMBASSADOR_PLATFORM_FEE_PERCENT = 15;
 
-export type PromoterPayoutBreakdown = {
+export type AMBASSADORPayoutBreakdown = {
   gross_amount: number;
   platform_fee_percent: number;
   platform_fee_amount: number;
   net_amount: number;
 };
 
-export function calculatePromoterPayoutBreakdown(
+export function calculateAMBASSADORPayoutBreakdown(
   grossAmount: number,
-  feePercent = PROMOTER_PLATFORM_FEE_PERCENT
-): PromoterPayoutBreakdown {
+  feePercent = AMBASSADOR_PLATFORM_FEE_PERCENT
+): AMBASSADORPayoutBreakdown {
   const gross = Math.max(0, Math.round(Number(grossAmount) || 0));
   const normalizedPercent = Math.min(
     100,

@@ -65,14 +65,14 @@ const accountProfileSchema = z
     full_name: z.string().trim().min(2).max(120),
     country: z.string().trim().min(2).max(3).optional(),
     current_business_viewers: z.number().int().min(0).optional(),
-    current_advertiser_viewers: z.number().int().min(0).optional(),
+    current_business_viewers: z.number().int().min(0).optional(),
     private_contract_rate_ugx: z.number().int().min(0).optional(),
     price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
   })
   .transform((body) => ({
     ...body,
     current_business_viewers:
-      body.current_business_viewers ?? body.current_advertiser_viewers,
+      body.current_business_viewers ?? body.current_business_viewers,
   }));
 
 const accountPasswordSchema = z.object({
@@ -1138,7 +1138,7 @@ export async function accountRoutes(app: FastifyInstance) {
   );
 
   app.patch(
-    '/account/distributor-capacity',
+    '/account/ambassador-capacity',
     { preHandler: [app.authenticate] },
     handleAmbassadorCapacityUpdate
   );
