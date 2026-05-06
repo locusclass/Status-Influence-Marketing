@@ -35,6 +35,10 @@ import {
   canAccessAmbassadorFeatures,
   normalizeActiveRole,
 } from '../services/roles.js';
+import {
+  createUserNotifications,
+  ensureUserSignalSchema,
+} from '../services/userSignals.js';
 
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
@@ -835,6 +839,7 @@ async function findAmbassadorById(client: any, ambassadorId: string) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -867,6 +872,7 @@ async function findAmbassadorByPhone(client: any, rawPhone: string) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -932,6 +938,7 @@ async function findAmbassadorBySearch(client: any, rawQuery: string) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -983,6 +990,7 @@ async function listGroupCampaignMembers(client: any, groupId: string) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -4251,6 +4259,20 @@ export async function campaignRoutes(app: FastifyInstance) {
         );
       }
 
+      // Notify the business that an ambassador accepted the contract
+      await ensureUserSignalSchema(client);
+      const ambassadorName = (await client.query(
+        `SELECT COALESCE(full_name, email) AS name FROM users WHERE id=$1 LIMIT 1`,
+        [authUser]
+      )).rows[0]?.name ?? 'An ambassador';
+      await createUserNotifications(client, [campaign.business_id], {
+        category: 'CONTRACT_ACCEPTED',
+        title: 'Contract Accepted',
+        body: `${ambassadorName} has accepted your contract for "${campaign.title ?? 'your campaign'}".`,
+        targetType: 'contract',
+        targetId: contractRes.rows[0].id,
+      });
+
       return {
         contract: {
           ...contractRes.rows[0],
@@ -4353,6 +4375,24 @@ export async function campaignRoutes(app: FastifyInstance) {
           walletRefundedAmount = refund.refunded_amount;
         }
       }
+      // Send notification to the other party
+      const cancelledBy = contract.ambassador_id === authUser ? 'ambassador' : 'business';
+      const notifyUserId = cancelledBy === 'business' ? contract.ambassador_id : contract.business_id;
+      const campaignTitle = (await client.query(
+        'SELECT title FROM campaigns WHERE id=$1 LIMIT 1',
+        [contract.campaign_id]
+      )).rows[0]?.title ?? 'a campaign';
+      await ensureUserSignalSchema(client);
+      await createUserNotifications(client, [notifyUserId], {
+        category: 'CONTRACT_CANCELLED',
+        title: cancelledBy === 'business' ? 'Contract Cancelled' : 'Ambassador Withdrew',
+        body: cancelledBy === 'business'
+          ? `The business has cancelled your contract for "${campaignTitle}". Any funds in escrow have been returned.`
+          : `The ambassador has cancelled their contract for "${campaignTitle}".`,
+        targetType: 'contract',
+        targetId: contract.id,
+      });
+
       return {
         ...updated.rows[0],
         wallet_refunded_amount: walletRefundedAmount,
@@ -4549,6 +4589,127 @@ export async function campaignRoutes(app: FastifyInstance) {
       return result;
     }
     return { campaign: result };
+  });
+
+  // ── List all active ambassadors (for beneficiary picker) ────────────────────
+  app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const role = (request.user as any)?.role as string | undefined;
+    if (!canAccessBusinessFeatures(role)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+    const query = request.query as { limit?: string; offset?: string; q?: string };
+    const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '100', 10) || 100));
+    const offset = Math.max(0, parseInt(query.offset ?? '0', 10) || 0);
+    const searchQ = String(query.q ?? '').trim();
+
+    return withTransaction(async (client) => {
+      const hasFullName = await usersHasColumn(client, 'full_name');
+      const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+
+      const params: any[] = [];
+      let whereExtra = '';
+      if (searchQ) {
+        params.push(`%${searchQ}%`);
+        whereExtra = `AND (${fullNameSelect} ILIKE $${params.length} OR LOWER(u.email) LIKE LOWER($${params.length}) OR u.phone LIKE $${params.length})`;
+      }
+      params.push(limit, offset);
+
+      const res = await client.query(
+        `
+        SELECT
+          u.id,
+          u.public_id,
+          u.phone,
+          u.email,
+          u.status,
+          COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          ${fullNameSelect} AS full_name,
+          COALESCE(p.avatar_url, '') AS avatar_url
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
+          AND u.status = 'ACTIVE'
+          ${whereExtra}
+        ORDER BY ${fullNameSelect} ASC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+        `,
+        params
+      );
+      return { ambassadors: res.rows };
+    });
+  });
+
+  // ── Ambassador declines a private contract invitation ───────────────────────
+  app.post('/contracts/:id/decline', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
+    const role = (request.user as any)?.role as string | undefined;
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    if (!canAccessAmbassadorFeatures(role)) {
+      reply.code(403);
+      return { error: 'forbidden' };
+    }
+
+    return withTransaction(async (client) => {
+      // Find campaign assigned to this ambassador
+      const campaignRes = await client.query(
+        `SELECT c.id, c.title, c.business_id, c.assigned_ambassador_id, c.status, c.execution_mode
+         FROM campaigns c
+         WHERE (c.id::text = $1 OR c.public_id = $1)
+           AND c.assigned_ambassador_id = $2
+           AND c.execution_mode = 'PRIVATE_CONTRACT'
+           AND c.status = 'ACTIVE'
+         LIMIT 1`,
+        [params.id, authUser]
+      );
+
+      const campaign = campaignRes.rows[0];
+      if (!campaign) {
+        reply.code(404);
+        return { error: 'contract_not_found' };
+      }
+
+      // Cancel the campaign for the ambassador
+      await client.query(
+        `UPDATE campaigns SET status='CANCELLED' WHERE id=$1`,
+        [campaign.id]
+      );
+
+      // Mark any active contract as declined
+      await client.query(
+        `UPDATE contracts
+         SET status='CANCELLED', cancelled_at=now(), declined_at=now(), declined_by_user_id=$2
+         WHERE campaign_id=$1 AND distributor_id=$2 AND status='ACTIVE'`,
+        [campaign.id, authUser]
+      );
+
+      // Notify the business
+      const ambassadorName = (await client.query(
+        `SELECT COALESCE(full_name, email) AS name FROM users WHERE id=$1 LIMIT 1`,
+        [authUser]
+      )).rows[0]?.name ?? 'The ambassador';
+
+      await ensureUserSignalSchema(client);
+      await createUserNotifications(client, [campaign.business_id], {
+        category: 'CONTRACT_DECLINED',
+        title: 'Contract Declined',
+        body: `${ambassadorName} has declined your contract for "${campaign.title ?? 'your campaign'}".`,
+        targetType: 'campaign',
+        targetId: campaign.id,
+      });
+
+      return { ok: true };
+    });
   });
 }
 
