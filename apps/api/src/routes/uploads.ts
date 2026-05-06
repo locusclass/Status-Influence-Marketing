@@ -104,7 +104,10 @@ export async function uploadRoutes(app: FastifyInstance) {
       reply.code(400);
       return { error: 'invalid_mime' };
     }
-    const sizeLimit = 200 * 1024 * 1024;
+    const sizeLimit =
+      uploadMime === 'video/mp4'
+        ? Number.POSITIVE_INFINITY
+        : 200 * 1024 * 1024;
     let total = 0;
     const passthrough = new PassThrough();
 

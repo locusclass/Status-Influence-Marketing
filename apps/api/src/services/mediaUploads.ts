@@ -21,6 +21,7 @@ export async function storeMultipartMediaFile(input: {
   prefix: string;
   kind: 'image' | 'video';
   maxBytes?: number;
+  allowedMimeTypes?: string[];
 }) {
   const part = input.part;
   if (!part?.file) {
@@ -31,6 +32,13 @@ export async function storeMultipartMediaFile(input: {
   if (!mimeType.startsWith(`${input.kind}/`)) {
     throw new Error(input.kind === 'image' ? 'invalid_image' : 'invalid_video');
   }
+  if (
+    Array.isArray(input.allowedMimeTypes) &&
+    input.allowedMimeTypes.length > 0 &&
+    !input.allowedMimeTypes.includes(mimeType)
+  ) {
+    throw new Error(input.kind === 'image' ? 'invalid_image' : 'invalid_video');
+  }
 
   const safeName = sanitizeObjectNameSegment(
     String(part.filename ?? input.prefix),
@@ -39,7 +47,12 @@ export async function storeMultipartMediaFile(input: {
   const objectName = `${input.prefix}-${Date.now()}-${Math.random()
     .toString(36)
     .slice(2, 10)}-${safeName}`;
-  const sizeLimit = input.maxBytes ?? 50 * 1024 * 1024;
+  const sizeLimit =
+    typeof input.maxBytes === 'number'
+      ? input.maxBytes > 0
+        ? input.maxBytes
+        : Number.POSITIVE_INFINITY
+      : 50 * 1024 * 1024;
   let totalBytes = 0;
   const passthrough = new PassThrough();
   const uploadStream = part.file as NodeJS.ReadableStream & {

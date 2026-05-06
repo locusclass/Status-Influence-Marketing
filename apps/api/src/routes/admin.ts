@@ -3421,14 +3421,6 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     const limit = Math.min(Number(query?.limit ?? 50), 200);
     const offset = Number(query?.offset ?? 0);
     return withTransaction(async (client) => {
-      // Auto-approve any that have passed their 2-minute deadline
-      await client.query(
-        `UPDATE campaigns
-         SET approval_status='AUTO_APPROVED', approved_at=now()
-         WHERE approval_status='PENDING_APPROVAL'
-           AND approval_deadline IS NOT NULL
-           AND approval_deadline < now()`
-      );
       const res = await client.query(
         `SELECT
            c.id, c.title, c.platform, c.execution_mode, c.delivery_model,
@@ -3548,7 +3540,9 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     const query = request.query as any;
     const limit = Math.min(Number(query?.limit ?? 50), 200);
     const offset = Number(query?.offset ?? 0);
-    const statusFilter = typeof query?.status === 'string' ? query.status : 'SUBMITTED';
+    const rawStatusFilter = typeof query?.status === 'string' ? query.status : 'PENDING';
+    const statusFilter =
+      rawStatusFilter === 'SUBMITTED' ? 'PENDING' : rawStatusFilter;
     return withTransaction(async (client) => {
       const conditions: string[] = [];
       const params: any[] = [];
@@ -3568,10 +3562,15 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
            p.observed_views,
            p.created_at AS submitted_at,
            p.updated_at,
+           p.meta AS proof_meta,
+           p.review_reasons,
            c.id AS campaign_id,
+           c.public_id AS campaign_public_id,
            c.title AS campaign_title,
            c.platform,
            c.media_type,
+           c.media_url,
+           c.media_text,
            c.execution_mode,
            c.delivery_model,
            c.payout_amount,
@@ -3579,13 +3578,20 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
            c.start_date,
            c.end_date,
            c.terms_keep_hours,
+           c.terms_min_views,
+           c.terms_requirement,
            c.visibility,
+           c.execution_meta,
            ambassador.id AS ambassador_id,
            ambassador.full_name AS ambassador_name,
            ambassador.email AS ambassador_email,
            business.id AS business_id,
            business.full_name AS business_name,
-           business.email AS business_email
+           business.email AS business_email,
+           vs.script AS verification_script,
+           vs.challenge_code,
+           vs.challenge_phrase,
+           vs.expires_at AS verification_expires_at
          FROM proofs p
          JOIN verification_sessions vs ON vs.id = p.session_id
          JOIN campaigns c ON c.id = vs.campaign_id
@@ -3664,6 +3670,10 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     const adminUserId = (request.user as any).sub as string;
     const body = request.body as any;
     const reason = (body?.reason ?? '').toString().trim();
+    if (reason.length === 0) {
+      reply.code(400);
+      return { error: 'reason_required' };
+    }
 
     return withTransaction(async (client) => {
       const res = await client.query(
@@ -3692,13 +3702,76 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
          ON CONFLICT DO NOTHING`,
         [
           proof.ambassador_id,
-          reason
-            ? `Your proof for "${proof.campaign_title}" was rejected: ${reason}. Please re-submit.`
-            : `Your proof for "${proof.campaign_title}" was rejected. Please re-submit a clearer recording.`,
+          `Your proof for "${proof.campaign_title}" was rejected: ${reason}. Please re-submit.`,
         ]
       );
 
       await logAudit(client, adminUserId, 'REJECT_CAMPAIGN_COMPLETION', 'proof', params.proofId, { reason });
+      return { ok: true };
+    });
+  });
+
+  app.patch('/admin/campaign-completions/:proofId/request-resubmission', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { proofId: string };
+    const adminUserId = (request.user as any).sub as string;
+    const body = request.body as any;
+    const reason = (body?.reason ?? '').toString().trim();
+
+    return withTransaction(async (client) => {
+      const res = await client.query(
+        `SELECT p.id, p.user_id AS ambassador_id, p.status,
+                c.title AS campaign_title
+         FROM proofs p
+         JOIN verification_sessions vs ON vs.id = p.session_id
+         JOIN campaigns c ON c.id = vs.campaign_id
+         WHERE p.id=$1 LIMIT 1`,
+        [params.proofId]
+      );
+      const proof = res.rows[0];
+      if (!proof) { reply.code(404); return { error: 'proof_not_found' }; }
+
+      await client.query(
+        `UPDATE proofs
+         SET status='REJECTED',
+             decision='REJECTED',
+             meta = COALESCE(meta, '{}'::jsonb) || $2::jsonb,
+             updated_at=now()
+         WHERE id=$1`,
+        [
+          params.proofId,
+          JSON.stringify({
+            admin_review: {
+              action: 'REQUEST_RESUBMISSION',
+              reason: reason || null,
+              reviewed_at: new Date().toISOString(),
+              reviewed_by_user_id: adminUserId,
+            },
+          }),
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'PROOF_RESUBMISSION_REQUESTED',
+                 'Proof needs correction',
+                 $2, now())
+         ON CONFLICT DO NOTHING`,
+        [
+          proof.ambassador_id,
+          reason.length > 0
+            ? `Your proof for "${proof.campaign_title}" needs correction: ${reason}. Please submit a new mp4 screen recording.`
+            : `Your proof for "${proof.campaign_title}" needs correction. Please submit a new mp4 screen recording.`,
+        ]
+      );
+
+      await logAudit(
+        client,
+        adminUserId,
+        'REQUEST_CAMPAIGN_COMPLETION_RESUBMISSION',
+        'proof',
+        params.proofId,
+        { reason: reason.length > 0 ? reason : null }
+      );
       return { ok: true };
     });
   });
@@ -4532,4 +4605,3 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     );
   }
 }
-

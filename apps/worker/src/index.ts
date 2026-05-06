@@ -303,6 +303,21 @@ function getDistributableCampaignBudget(campaign: any) {
 }
 
 function getEscrowCampaignId(campaign: any) {
+  const executionMeta =
+    campaign?.execution_meta && typeof campaign.execution_meta === 'object'
+      ? (campaign.execution_meta as Record<string, unknown>)
+      : null;
+  const contractReissue =
+    executionMeta?.contract_reissue &&
+    typeof executionMeta.contract_reissue === 'object'
+      ? (executionMeta.contract_reissue as Record<string, unknown>)
+      : null;
+  const sourceEscrowCampaignId = String(
+    contractReissue?.source_escrow_campaign_id ?? ''
+  ).trim();
+  if (sourceEscrowCampaignId.length > 0) {
+    return sourceEscrowCampaignId;
+  }
   return String(
     campaign?.bundle_root_campaign_id ??
       campaign?.parent_campaign_id ??
@@ -1796,184 +1811,14 @@ async function compensatePayoutFailure(proofId: string, campaignId: string) {
 }
 
 async function processVerificationJob(job: any) {
-  const proofId = job.payload.proof_id;
-  let tempPath: string | null = null;
-
-  try {
-    const proofRes = await pool.query(
-      'SELECT * FROM proofs WHERE id=$1',
-      [proofId]
-    );
-    const proof = proofRes.rows[0];
-    if (!proof) throw new Error('proof_not_found');
-
-    const sessionRes = await pool.query(
-      'SELECT * FROM verification_sessions WHERE id=$1',
-      [proof.session_id]
-    );
-    const session = sessionRes.rows[0];
-    if (!session) throw new Error('session_not_found');
-
-    const campaignRes = await pool.query(
-      'SELECT * FROM campaigns WHERE id=$1',
-      [session.campaign_id]
-    );
-    const campaign = campaignRes.rows[0];
-    if (!campaign) throw new Error('campaign_not_found');
-
-    const adapter = platformAdapters[campaign.platform];
-    const videoUrl = proof.video_url;
-
-    if (videoUrl.startsWith('/uploads/files/') || videoUrl.startsWith('/api/uploads/files/')) {
-      const base = process.env.API_BASE_URL ?? 'http://localhost:3000';
-      tempPath = await downloadToTemp(`${base}${videoUrl}`);
-    } else if (videoUrl.startsWith('http')) {
-      const parsed = new URL(videoUrl);
-      if (!parsed.pathname.includes('/uploads/files/')) {
-        throw new Error('disallowed_proof_video_url');
-      }
-      tempPath = await downloadToTemp(videoUrl);
-    } else {
-      throw new Error('invalid_proof_video_url');
-    }
-
-    if (!tempPath) throw new Error('temp_path_missing');
-    const tamper = await runTamperChecks(tempPath, adapter?.roi);
-
-    const result = await verifier.verify(tempPath, campaign, {
-      challenge_code: session.challenge_code,
-      challenge_phrase: session.challenge_phrase,
-      expires_at: session.expires_at,
-    });
-
-    const trace = evaluateClientTrace(session.script, proof.meta, Number(tamper?.details?.duration ?? 0));
-    const platformValidation = buildPlatformValidationSummary(campaign, proof, result);
-    const reasons = [
-      ...buildReviewReasons({
-        campaign,
-        tamper,
-        result,
-        script: session.script,
-        clientMeta: proof.meta,
-      }),
-      ...buildPlatformReviewReasons(campaign, platformValidation),
-    ];
-    const finalDecision = deriveFinalProofDecision({
-      campaign,
-      reasons,
-      result,
-      trace,
-      platformValidation,
-    });
-    const settlementRecommendation =
-      finalDecision === 'VERIFIED'
-        ? 'RELEASE'
-        : platformValidation.should_retry_allocation
-          ? 'RETRY_ALLOCATION'
-          : platformValidation.partial_payout_ratio > 0
-            ? 'MANUAL_PARTIAL_REVIEW'
-            : 'HOLD';
-    const verificationReport = {
-      generated_at: new Date().toISOString(),
-      verifier_provider: verifierProvider,
-      ai_decision: result.decision,
-      ai_confidence: result.confidence,
-      challenge_seen: Boolean(result.challenge_seen),
-      observed_views: Number(result.observed_views ?? 0),
-      primary_metric_observed: platformValidation.primary_metric,
-      tamper,
-      python_bot: result.verifier_report ?? null,
-      trace,
-      platform_validation: platformValidation,
-      settlement_recommendation: settlementRecommendation,
-      strict_mode: true,
-    };
-
-    await withTransaction(async (client) => {
-      await client.query(
-        `UPDATE proofs
-         SET decision=$2,
-             observed_views=$3,
-             observed_post_hash=$4,
-             challenge_seen=$5,
-             confidence=$6,
-             review_reasons=$7::jsonb,
-             meta = COALESCE(meta, '{}'::jsonb) || $8::jsonb,
-             status=$2
-         WHERE id=$1`,
-        [
-          proofId,
-          finalDecision,
-          platformValidation.primary_metric,
-          result.observed_post_hash,
-          result.challenge_seen,
-          result.confidence,
-          JSON.stringify(reasons),
-          JSON.stringify({ verification_report: verificationReport }),
-        ]
-      );
-      await upsertContentSubmission(
-        client,
-        campaign,
-        proof,
-        platformValidation,
-        finalDecision
-      );
-      await updateCreatorPerformance(
-        client,
-        campaign,
-        proof,
-        finalDecision,
-        platformValidation
-      );
-
-      const isBusinessProof = proof.user_id === campaign.business_id;
-
-      if (!isBusinessProof) {
-        // Trust-based payout gating is disabled for now; autonomous verification drives settlement.
-      }
-
-      if (finalDecision === 'VERIFIED') {
-        await markContractCompletedForVerifiedProof(client, proofId);
-        await client.query(
-          `INSERT INTO job_queue (job_type, payload, status)
-           VALUES ('PAYOUT_PROOF', $1::jsonb, 'QUEUED')`,
-          [JSON.stringify({ proof_id: proofId })]
-        );
-      } else {
-        await queueRejectedOpenAllocationRetry(
-          client,
-          campaign,
-          proof,
-          platformValidation
-        );
-      }
-    });
-
-    await pool.query(
-      "UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1",
-      [job.id]
-    );
-  } catch (err: any) {
-    const attempts = job.attempts + 1;
-    const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
-    const delay = Math.min(60 * attempts, 300);
-
-    await pool.query(
-      `UPDATE job_queue
-       SET status=$2,
-           attempts=$3,
-           last_error=$4,
-           run_at=now() + ($5 || ' seconds')::interval,
-           updated_at=now()
-       WHERE id=$1`,
-      [job.id, nextStatus, attempts, err?.message ?? 'error', delay]
-    );
-  } finally {
-    if (tempPath && tempPath.includes('gm-video-')) {
-      await removeTemp(tempPath);
-    }
-  }
+  await pool.query(
+    `UPDATE job_queue
+     SET status='DONE',
+         retry_reason='manual_admin_review_required',
+         updated_at=now()
+     WHERE id=$1`,
+    [job.id]
+  );
 }
 
 async function processPayoutJob(job: any) {
