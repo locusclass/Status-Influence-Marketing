@@ -56,6 +56,7 @@ import {
 import {
   hasAdminModuleAccess,
   loadDashboardAccessContext,
+  resolveLiveDashboardAccess,
 } from './services/adminTenant.js';
 import {
   buildPolicyAcceptanceState,
@@ -331,7 +332,7 @@ export function buildServer() {
     // Admin dashboard access is enforced by RBAC and admin-account status.
     // End-user policy acceptance should not block internal dashboard access.
     const access = await withTransaction(async (client) =>
-      loadDashboardAccessContext(client, userId)
+      resolveLiveDashboardAccess(client, request)
     );
     if (!access || access.admin_role === 'USER') {
       return reply.code(403).send({ error: 'forbidden' });

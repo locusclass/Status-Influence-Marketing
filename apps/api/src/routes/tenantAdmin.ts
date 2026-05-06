@@ -9,9 +9,11 @@ import {
   ADMIN_MODULE_MANAGER_PAYOUTS,
   ADMIN_MODULE_OVERVIEW,
   ADMIN_MODULE_USERS,
+  ADMIN_ROLE_ADMIN,
   ADMIN_ROLE_COUNTRY_ADMIN,
   ADMIN_ROLE_DIVISION_ADMIN,
   ADMIN_ROLE_SUPER_ADMIN,
+  LEGACY_COUNTRY_ADMIN_MODULE_KEYS,
 } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import {
@@ -24,6 +26,7 @@ import {
   loadDashboardAccessContext,
   matchesDashboardTenantScope,
   requireRole,
+  resolveLiveDashboardAccess,
   type DashboardAccessContext,
 } from '../services/adminTenant.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
@@ -95,11 +98,7 @@ function parsePaging(query: any) {
 }
 
 async function getLiveAccess(client: any, request: any) {
-  const access = getRequestDashboardAccess(request);
-  if (!access.user_id || access.user_id === 'ariaka-access') {
-    return access;
-  }
-  return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
+  return resolveLiveDashboardAccess(client, request);
 }
 
 type ScopeState = {
@@ -306,21 +305,67 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
           }
         }
 
-        const claims: any = buildAuthClaims(user);
-        claims.country_id = country.id;
-        claims.admin_role = ADMIN_ROLE_COUNTRY_ADMIN;
-
-        const token = app.jwt.sign(claims);
-        return {
-          token,
-          user: {
-            ...buildUserSession(user),
-            admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+          const scopedModules = [
+            ADMIN_MODULE_OVERVIEW,
+            ...LEGACY_COUNTRY_ADMIN_MODULE_KEYS,
+          ];
+          const countryCode =
+            country.code == null ? null : String(country.code);
+          const countryName =
+            country.name == null ? null : String(country.name);
+          const claims: any = {
+            ...buildAuthClaims(user),
+            email: String(user.email ?? ''),
+            admin_role: ADMIN_ROLE_ADMIN,
+            legacy_admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+            admin_status: 'ACTIVE',
+            permissions: scopedModules,
+            module_keys: scopedModules,
             country_id: country.id,
-            country_name: country.name,
-            country_code: country.code,
-          },
-        };
+            division_id: null,
+            country_code: countryCode,
+            country_name: countryName,
+            division_name: null,
+            country_ids: [country.id],
+            division_ids: [],
+            country_scopes: [
+              {
+                id: country.id,
+                code: countryCode,
+                name: countryName,
+              },
+            ],
+            division_scopes: [],
+            dashboard_scope_mode: 'COUNTRY',
+          };
+
+          const token = app.jwt.sign(claims);
+          return {
+            token,
+            user: {
+              ...buildUserSession(user),
+              admin_role: ADMIN_ROLE_ADMIN,
+              legacy_admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+              admin_status: 'ACTIVE',
+              permissions: scopedModules,
+              module_keys: scopedModules,
+              country_id: country.id,
+              division_id: null,
+              country_name: countryName,
+              country_code: countryCode,
+              division_name: null,
+              country_ids: [country.id],
+              division_ids: [],
+              country_scopes: [
+                {
+                  id: country.id,
+                  code: countryCode,
+                  name: countryName,
+                },
+              ],
+              division_scopes: [],
+            },
+          };
       });
     }
   );

@@ -27,6 +27,61 @@ function normalizeAdminStatus(value) {
         return 'ACTIVE';
     return 'NONE';
 }
+function readClaimStringList(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return uniqueStrings(value.map((item) => String(item ?? '').trim()));
+}
+function readClaimCountryScopes(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    const scopes = value
+        .map((item) => {
+        if (!item || typeof item !== 'object') {
+            return null;
+        }
+        const row = item;
+        const id = String(row.id ?? '').trim();
+        if (!id) {
+            return null;
+        }
+        return {
+            id,
+            code: row.code == null ? null : String(row.code),
+            name: row.name == null ? null : String(row.name),
+        };
+    })
+        .filter((item) => Boolean(item));
+    return mergeCountryScopes(scopes, []);
+}
+function readClaimDivisionScopes(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    const scopes = value
+        .map((item) => {
+        if (!item || typeof item !== 'object') {
+            return null;
+        }
+        const row = item;
+        const id = String(row.id ?? '').trim();
+        if (!id) {
+            return null;
+        }
+        return {
+            id,
+            name: row.name == null ? null : String(row.name),
+            type: row.type == null ? null : String(row.type),
+            country_id: row.country_id == null ? null : String(row.country_id),
+            country_code: row.country_code == null ? null : String(row.country_code),
+            country_name: row.country_name == null ? null : String(row.country_name),
+        };
+    })
+        .filter((item) => Boolean(item));
+    return mergeDivisionScopes(scopes, []);
+}
 function uniqueStrings(values) {
     return Array.from(new Set(values
         .map((value) => value?.trim())
@@ -125,19 +180,81 @@ export function resolveAdminRoleFromRecord(user) {
 }
 function mapDashboardAccessFromClaims(claims) {
     const role = normalizeAdminAccountRole(claims.admin_role);
+    const legacyRole = normalizeAdminDashboardRole(claims.legacy_admin_role ?? claims.admin_role);
+    const claimedCountryIds = uniqueStrings([
+        ...readClaimStringList(claims.country_ids),
+        claims.country_id ? String(claims.country_id) : '',
+    ]);
+    const claimedDivisionIds = uniqueStrings([
+        ...readClaimStringList(claims.division_ids),
+        claims.division_id ? String(claims.division_id) : '',
+    ]);
+    let countryScopes = readClaimCountryScopes(claims.country_scopes);
+    if (countryScopes.length === 0 && claimedCountryIds.length > 0) {
+        countryScopes = claimedCountryIds.map((id) => ({
+            id,
+            code: String(claims.country_id ?? '') === id && claims.country_code != null
+                ? String(claims.country_code)
+                : null,
+            name: String(claims.country_id ?? '') === id && claims.country_name != null
+                ? String(claims.country_name)
+                : null,
+        }));
+    }
+    let divisionScopes = readClaimDivisionScopes(claims.division_scopes);
+    if (divisionScopes.length === 0 && claimedDivisionIds.length > 0) {
+        divisionScopes = claimedDivisionIds.map((id) => ({
+            id,
+            name: String(claims.division_id ?? '') === id && claims.division_name != null
+                ? String(claims.division_name)
+                : null,
+            type: null,
+            country_id: claims.country_id == null ? null : String(claims.country_id),
+            country_code: claims.country_code == null ? null : String(claims.country_code),
+            country_name: claims.country_name == null ? null : String(claims.country_name),
+        }));
+    }
+    const claimedModules = sanitizeAssignedModuleKeys(role, [
+        ...readClaimStringList(claims.module_keys),
+        ...readClaimStringList(claims.permissions),
+    ]);
     const modules = role === ADMIN_ROLE_SUPER_ADMIN
         ? Array.from(ALL_ADMIN_MODULE_KEYS)
         : role === ADMIN_ROLE_ADMIN
-            ? [ADMIN_MODULE_OVERVIEW]
+            ? uniqueModules([
+                ADMIN_MODULE_OVERVIEW,
+                ...(claimedModules.length > 0 ? claimedModules : []),
+            ])
             : [];
+    const primaryCountry = countryScopes[0] ??
+        (claims.country_id
+            ? {
+                id: String(claims.country_id),
+                code: claims.country_code ? String(claims.country_code) : null,
+                name: claims.country_name ? String(claims.country_name) : null,
+            }
+            : null);
+    const primaryDivision = divisionScopes[0] ??
+        (claims.division_id
+            ? {
+                id: String(claims.division_id),
+                name: claims.division_name ? String(claims.division_name) : null,
+                type: null,
+                country_id: claims.country_id ? String(claims.country_id) : null,
+                country_code: claims.country_code ? String(claims.country_code) : null,
+                country_name: claims.country_name ? String(claims.country_name) : null,
+            }
+            : null);
     return {
         user_id: String(claims.sub ?? ''),
         email: String(claims.email ?? ''),
         role: String(claims.role ?? ''),
         active_role: String(claims.active_role ?? claims.role ?? ''),
         admin_role: role,
-        legacy_admin_role: normalizeAdminDashboardRole(claims.admin_role),
-        admin_status: role === ADMIN_ROLE_USER ? 'NONE' : 'ACTIVE',
+        legacy_admin_role: legacyRole,
+        admin_status: role === ADMIN_ROLE_USER
+            ? 'NONE'
+            : normalizeAdminStatus(claims.admin_status ?? 'ACTIVE'),
         permissions: modules,
         module_keys: modules,
         admin_user_id: claims.admin_user_id ? String(claims.admin_user_id) : null,
@@ -145,38 +262,19 @@ function mapDashboardAccessFromClaims(claims) {
             ? String(claims.created_by_super_admin_id)
             : null,
         last_login_at: claims.last_login_at ? String(claims.last_login_at) : null,
-        country_id: claims.country_id ? String(claims.country_id) : null,
-        division_id: claims.division_id ? String(claims.division_id) : null,
-        country_code: claims.country_code ? String(claims.country_code) : null,
-        country_name: claims.country_name ? String(claims.country_name) : null,
-        division_name: claims.division_name ? String(claims.division_name) : null,
-        country_ids: claims.country_id ? [String(claims.country_id)] : [],
-        division_ids: claims.division_id ? [String(claims.division_id)] : [],
-        country_scopes: claims.country_id
-            ? [
-                {
-                    id: String(claims.country_id),
-                    code: claims.country_code ? String(claims.country_code) : null,
-                    name: claims.country_name ? String(claims.country_name) : null,
-                },
-            ]
-            : [],
-        division_scopes: claims.division_id
-            ? [
-                {
-                    id: String(claims.division_id),
-                    name: claims.division_name ? String(claims.division_name) : null,
-                    type: null,
-                    country_id: claims.country_id ? String(claims.country_id) : null,
-                    country_code: claims.country_code
-                        ? String(claims.country_code)
-                        : null,
-                    country_name: claims.country_name
-                        ? String(claims.country_name)
-                        : null,
-                },
-            ]
-            : [],
+        country_id: primaryCountry?.id ?? (claims.country_id ? String(claims.country_id) : null),
+        division_id: primaryDivision?.id ??
+            (claims.division_id ? String(claims.division_id) : null),
+        country_code: primaryCountry?.code ??
+            (claims.country_code ? String(claims.country_code) : null),
+        country_name: primaryCountry?.name ??
+            (claims.country_name ? String(claims.country_name) : null),
+        division_name: primaryDivision?.name ??
+            (claims.division_name ? String(claims.division_name) : null),
+        country_ids: uniqueStrings(countryScopes.map((scope) => scope.id)),
+        division_ids: uniqueStrings(divisionScopes.map((scope) => scope.id)),
+        country_scopes: countryScopes,
+        division_scopes: divisionScopes,
     };
 }
 export function mapDashboardAccessRecord(row) {
@@ -386,6 +484,53 @@ export function getRequestDashboardAccess(request) {
     }
     return mapDashboardAccessFromClaims(claims);
 }
+export async function resolveLiveDashboardAccess(client, request) {
+    const cached = request.adminAccess;
+    if (cached) {
+        return cached;
+    }
+    let access = getRequestDashboardAccess(request);
+    if (!access.user_id || access.user_id === EMERGENCY_ADMIN_USER_ID) {
+        return access;
+    }
+    const persisted = await loadDashboardAccessContext(client, access.user_id);
+    const scopeMode = String(request.user?.dashboard_scope_mode ?? '')
+        .trim()
+        .toUpperCase();
+    const hasScopedCountry = access.legacy_admin_role === ADMIN_ROLE_COUNTRY_ADMIN &&
+        (Boolean(access.country_id) || access.country_ids.length > 0);
+    const hasScopedDivision = access.legacy_admin_role === ADMIN_ROLE_DIVISION_ADMIN &&
+        (Boolean(access.division_id) || access.division_ids.length > 0);
+    const looksLikeScopedOverride = scopeMode === 'COUNTRY' ||
+        scopeMode === 'DIVISION' ||
+        (persisted?.admin_role === ADMIN_ROLE_SUPER_ADMIN &&
+            (hasScopedCountry || hasScopedDivision));
+    if (looksLikeScopedOverride) {
+        const fallbackModules = access.legacy_admin_role === ADMIN_ROLE_COUNTRY_ADMIN
+            ? uniqueModules([
+                ADMIN_MODULE_OVERVIEW,
+                ...LEGACY_COUNTRY_ADMIN_MODULE_KEYS,
+            ])
+            : access.legacy_admin_role === ADMIN_ROLE_DIVISION_ADMIN
+                ? uniqueModules([
+                    ADMIN_MODULE_OVERVIEW,
+                    ...LEGACY_TENANT_ADMIN_MODULE_KEYS,
+                ])
+                : access.module_keys;
+        const scopedModules = access.module_keys.length > 1 ? access.module_keys : fallbackModules;
+        access = {
+            ...access,
+            admin_role: access.admin_role === ADMIN_ROLE_SUPER_ADMIN
+                ? ADMIN_ROLE_ADMIN
+                : access.admin_role,
+            admin_status: persisted?.admin_status ?? access.admin_status,
+            permissions: scopedModules,
+            module_keys: scopedModules,
+        };
+        return access;
+    }
+    return persisted ?? access;
+}
 function canSatisfyRole(access, requiredRole) {
     if (access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
         return true;
@@ -415,7 +560,7 @@ export function requireRole(roles) {
         if (!userId) {
             return reply.code(401).send({ error: 'unauthorized' });
         }
-        const access = await withTransaction(async (client) => loadDashboardAccessContext(client, userId));
+        const access = await withTransaction(async (client) => resolveLiveDashboardAccess(client, request));
         if (!access || access.admin_role === ADMIN_ROLE_USER) {
             return reply.code(403).send({ error: 'forbidden' });
         }

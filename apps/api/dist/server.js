@@ -11,7 +11,7 @@ import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolve
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
-import { hasAdminModuleAccess, loadDashboardAccessContext, } from './services/adminTenant.js';
+import { hasAdminModuleAccess, resolveLiveDashboardAccess, } from './services/adminTenant.js';
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
     const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
@@ -245,7 +245,7 @@ export function buildServer() {
         void touchUserPresence(userId).catch(() => { });
         // Admin dashboard access is enforced by RBAC and admin-account status.
         // End-user policy acceptance should not block internal dashboard access.
-        const access = await withTransaction(async (client) => loadDashboardAccessContext(client, userId));
+        const access = await withTransaction(async (client) => resolveLiveDashboardAccess(client, request));
         if (!access || access.admin_role === 'USER') {
             return reply.code(403).send({ error: 'forbidden' });
         }

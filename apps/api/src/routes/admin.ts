@@ -59,6 +59,7 @@ import {
   matchesDashboardTenantScope,
   replaceAdminModuleAssignments,
   replaceAdminScopeAssignments,
+  resolveLiveDashboardAccess,
   type AdminAccountStatus,
   type DashboardAccessContext,
 } from '../services/adminTenant.js';
@@ -286,11 +287,7 @@ function verifyEmergencyPhrase(input: string) {
 }
 
 async function getLiveDashboardAccess(client: any, request: any) {
-  const access = getRequestDashboardAccess(request);
-  if (!access.user_id || access.user_id === 'ariaka-access') {
-    return access;
-  }
-  return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
+  return resolveLiveDashboardAccess(client, request);
 }
 
 async function requireSuperDashboardAccess(
@@ -4535,5 +4532,4 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     );
   }
 }
-
 

@@ -11,7 +11,7 @@ import { verifyTransaction } from '../services/yoUganda.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
-import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, getRequestDashboardAccess, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, } from '../services/adminTenant.js';
+import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, resolveLiveDashboardAccess, } from '../services/adminTenant.js';
 import { collectCampaignNotificationUserIds, createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 const UpdateUserRoleSchema = z.object({
@@ -173,11 +173,7 @@ function verifyEmergencyPhrase(input) {
     return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 async function getLiveDashboardAccess(client, request) {
-    const access = getRequestDashboardAccess(request);
-    if (!access.user_id || access.user_id === 'ariaka-access') {
-        return access;
-    }
-    return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
+    return resolveLiveDashboardAccess(client, request);
 }
 async function requireSuperDashboardAccess(client, request, reply) {
     const access = await getLiveDashboardAccess(client, request);
