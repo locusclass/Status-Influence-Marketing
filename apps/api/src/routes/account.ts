@@ -12,6 +12,10 @@ import {
   deleteFromFirebaseStorage,
   extractFirebaseObjectNameFromUrl,
 } from '../services/firebaseStorage.js';
+import {
+  resolveMediaUploadError,
+  storeMultipartMediaFile,
+} from '../services/mediaUploads.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
   ACCOUNT_ROLE_BUSINESS,
@@ -879,12 +883,36 @@ export async function accountRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const userSub = (request.user as any).sub as string;
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
-      const parsed = accountAvatarSchema.safeParse(request.body);
-      if (!parsed.success) {
-        reply.code(400);
-        return { error: 'validation_failed', issues: parsed.error.issues };
+      const isMultipart = String(request.headers['content-type'] ?? '')
+        .toLowerCase()
+        .includes('multipart/form-data');
+      let avatarUrl = '';
+      if (isMultipart) {
+        try {
+          const part = await request.file();
+          const uploaded = await storeMultipartMediaFile({
+            part,
+            prefix: 'avatar',
+            kind: 'image',
+            maxBytes: 10 * 1024 * 1024,
+          });
+          avatarUrl = uploaded.fileUrl;
+        } catch (error) {
+          const handled = resolveMediaUploadError(error);
+          if (handled) {
+            reply.code(handled.statusCode);
+            return handled.payload;
+          }
+          throw error;
+        }
+      } else {
+        const parsed = accountAvatarSchema.safeParse(request.body);
+        if (!parsed.success) {
+          reply.code(400);
+          return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        avatarUrl = parsed.data.avatar_url;
       }
-      const body = parsed.data;
       return withTransaction(async (client) => {
         await client.query(
           `
@@ -895,9 +923,9 @@ export async function accountRoutes(app: FastifyInstance) {
             avatar_url = EXCLUDED.avatar_url,
             updated_at = NOW()
           `,
-          [userId, body.avatar_url]
+          [userId, avatarUrl]
         );
-        return { ok: true };
+        return { ok: true, avatar_url: avatarUrl };
       });
     }
   );
@@ -1197,12 +1225,50 @@ export async function accountRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate] },
     async (request, reply) => {
       const userId = (request.user as any).sub as string;
-      const body = z
-        .object({ video_url: z.string().url().max(2048) })
-        .safeParse(request.body);
-      if (!body.success) {
-        reply.code(400);
-        return { error: 'validation_failed', issues: body.error.issues };
+      const isMultipart = String(request.headers['content-type'] ?? '')
+        .toLowerCase()
+        .includes('multipart/form-data');
+
+      let videoUrl = '';
+      if (isMultipart) {
+        const pending = await withTransaction(async (client) => {
+          const existing = await client.query(
+            `SELECT id FROM ambassador_verification_recordings
+             WHERE user_id=$1 AND status='PENDING' LIMIT 1`,
+            [userId]
+          );
+          return existing.rows[0] ?? null;
+        });
+        if (pending) {
+          reply.code(409);
+          return { error: 'verification_recording_pending' };
+        }
+        try {
+          const part = await request.file();
+          const uploaded = await storeMultipartMediaFile({
+            part,
+            prefix: 'verification',
+            kind: 'video',
+            maxBytes: 50 * 1024 * 1024,
+          });
+          videoUrl = uploaded.fileUrl;
+        } catch (error) {
+          const handled = resolveMediaUploadError(error);
+          if (handled) {
+            reply.code(handled.statusCode);
+            return handled.payload;
+          }
+          throw error;
+        }
+      } else {
+        const body = z
+          .object({ video_url: z.string().url().max(2048) })
+          .safeParse(request.body);
+        if (!body.success) {
+          reply.code(400);
+          return { error: 'validation_failed', issues: body.error.issues };
+        }
+        videoUrl = body.data.video_url;
       }
       return withTransaction(async (client) => {
         // One pending submission at a time per user
@@ -1219,9 +1285,9 @@ export async function accountRoutes(app: FastifyInstance) {
           `INSERT INTO ambassador_verification_recordings (user_id, video_url)
            VALUES ($1, $2)
            RETURNING id, status, created_at`,
-          [userId, body.data.video_url]
+          [userId, videoUrl]
         );
-        return { recording: res.rows[0] };
+        return { recording: res.rows[0], video_url: videoUrl };
       });
     }
   );

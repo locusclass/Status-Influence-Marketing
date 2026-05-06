@@ -6,6 +6,7 @@ import { ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER,
 import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_GROUP_ROOM, CHAT_OFFER_RESPONSE_ACCEPT, CHAT_OFFER_RESPONSE_COUNTER, CHAT_OFFER_RESPONSE_REJECT, CHAT_OFFER_STATUS_ACCEPTED, CHAT_OFFER_STATUS_COUNTERED, CHAT_OFFER_STATUS_PENDING, CHAT_OFFER_STATUS_REJECTED, ensureChatSchema, } from '../services/chat.js';
 import { ensureAmbassadorReviewsSchema, listAmbassadorReviews, loadLatestCompletedContractForReview, loadAmbassadorReviewSummaryMap, } from '../services/ambassadorReviews.js';
 import { buildPhoneLookupVariants, splitSearchTerms, } from '../services/contactLookup.js';
+import { resolveMediaUploadError, storeMultipartMediaFile, } from '../services/mediaUploads.js';
 import { createUserNotifications } from '../services/userSignals.js';
 const groupDealThreadSchema = z.object({
     media_url: z.string().url().optional(),
@@ -41,20 +42,21 @@ const updateTypingSchema = z.object({
     draft_text: z.string().max(4000).default(''),
     is_typing: z.boolean().optional(),
 });
-const createGroupSchema = z.object({
+const createGroupPayloadSchema = z.object({
     name: z.string().trim().min(2).max(80),
     description: z.string().trim().max(400).default(''),
     logo_url: z.string().trim().max(1024).default(''),
     public_price_ugx: z.number().int().min(0).default(0),
     invitee_ids: z.array(z.string().uuid()).max(50).default([]),
 });
-const updateGroupSchema = z
-    .object({
+const createGroupSchema = createGroupPayloadSchema;
+const updateGroupPayloadSchema = z.object({
     name: z.string().trim().min(2).max(80).optional(),
     description: z.string().trim().max(400).optional(),
     logo_url: z.string().trim().max(1024).optional(),
     public_price_ugx: z.number().int().min(0).optional(),
-})
+});
+const updateGroupSchema = updateGroupPayloadSchema
     .refine((value) => typeof value.name === 'string' ||
     typeof value.description === 'string' ||
     typeof value.logo_url === 'string' ||
@@ -405,6 +407,55 @@ function normalizeMediaUrls(value) {
 }
 function primaryMediaUrl(value) {
     return normalizeMediaUrls(value)[0] ?? null;
+}
+function isMultipartRequest(request) {
+    return String(request.headers['content-type'] ?? '')
+        .toLowerCase()
+        .includes('multipart/form-data');
+}
+async function parseGroupMultipartPayload(request) {
+    const fields = {};
+    let logoFile = null;
+    for await (const part of request.parts()) {
+        if (part.type === 'file') {
+            if (part.fieldname === 'logo_file' && !logoFile) {
+                logoFile = part;
+            }
+            else {
+                part.file.resume();
+            }
+            continue;
+        }
+        const value = String(part.value ?? '').trim();
+        switch (part.fieldname) {
+            case 'name':
+            case 'description':
+            case 'logo_url':
+                fields[part.fieldname] = value;
+                break;
+            case 'public_price_ugx':
+                if (value.length > 0) {
+                    fields.public_price_ugx = Number.parseInt(value, 10);
+                }
+                break;
+            case 'invitee_ids':
+                if (value.length === 0) {
+                    fields.invitee_ids = [];
+                    break;
+                }
+                try {
+                    const parsed = JSON.parse(value);
+                    fields.invitee_ids = Array.isArray(parsed) ? parsed : [];
+                }
+                catch {
+                    fields.invitee_ids = [];
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return { fields, logoFile };
 }
 async function applyAmbassadorReviewSummary(client, summary) {
     if (!summary)
@@ -2032,12 +2083,47 @@ export async function chatRoutes(app) {
             reply.code(403);
             return { error: 'ambassador_group_only' };
         }
-        const parsed = createGroupSchema.safeParse(request.body);
-        if (!parsed.success) {
-            reply.code(400);
-            return { error: 'validation_failed', issues: parsed.error.issues };
+        let logoFile = null;
+        let createData;
+        if (isMultipartRequest(request)) {
+            const multipart = await parseGroupMultipartPayload(request);
+            logoFile = multipart.logoFile;
+            const parsed = createGroupPayloadSchema.safeParse(multipart.fields);
+            if (!parsed.success) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: parsed.error.issues };
+            }
+            createData = parsed.data;
         }
-        const inviteeIds = Array.from(new Set(parsed.data.invitee_ids
+        else {
+            const parsed = createGroupSchema.safeParse(request.body);
+            if (!parsed.success) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: parsed.error.issues };
+            }
+            createData = parsed.data;
+        }
+        let logoUrl = createData.logo_url;
+        if (logoFile) {
+            try {
+                const uploaded = await storeMultipartMediaFile({
+                    part: logoFile,
+                    prefix: 'chat-group-logo',
+                    kind: 'image',
+                    maxBytes: 10 * 1024 * 1024,
+                });
+                logoUrl = uploaded.fileUrl;
+            }
+            catch (error) {
+                const handled = resolveMediaUploadError(error);
+                if (handled) {
+                    reply.code(handled.statusCode);
+                    return handled.payload;
+                }
+                throw error;
+            }
+        }
+        const inviteeIds = Array.from(new Set(createData.invitee_ids
             .map((value) => String(value ?? '').trim())
             .filter((value) => value && value !== userId)));
         const result = await withTransaction(async (client) => {
@@ -2053,7 +2139,7 @@ export async function chatRoutes(app) {
         INSERT INTO chat_threads (kind, title, created_by, media_url, media_type)
       VALUES ($1, $2, $3, $4, $5)
         RETURNING *
-        `, [CHAT_THREAD_KIND_GROUP_ROOM, parsed.data.name, userId]);
+        `, [CHAT_THREAD_KIND_GROUP_ROOM, createData.name, userId]);
             const thread = threadRes.rows[0];
             const groupPublicId = `grp-${uuid().replace(/-/g, '').slice(0, 12)}`;
             const groupRes = await client.query(`
@@ -2072,10 +2158,10 @@ export async function chatRoutes(app) {
         `, [
                 groupPublicId,
                 thread.id,
-                parsed.data.name,
-                parsed.data.description,
-                parsed.data.logo_url,
-                parsed.data.public_price_ugx,
+                createData.name,
+                createData.description,
+                logoUrl,
+                createData.public_price_ugx,
                 userId,
             ]);
             const group = groupRes.rows[0];
@@ -2167,10 +2253,61 @@ export async function chatRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        const parsed = updateGroupSchema.safeParse(request.body);
-        if (!parsed.success) {
-            reply.code(400);
-            return { error: 'validation_failed', issues: parsed.error.issues };
+        let logoFile = null;
+        let updateData;
+        if (isMultipartRequest(request)) {
+            const multipart = await parseGroupMultipartPayload(request);
+            logoFile = multipart.logoFile;
+            const parsed = updateGroupPayloadSchema.safeParse(multipart.fields);
+            if (!parsed.success) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: parsed.error.issues };
+            }
+            updateData = parsed.data;
+            if (!logoFile &&
+                typeof updateData.name !== 'string' &&
+                typeof updateData.description !== 'string' &&
+                typeof updateData.logo_url !== 'string' &&
+                typeof updateData.public_price_ugx !== 'number') {
+                reply.code(400);
+                return {
+                    error: 'validation_failed',
+                    issues: [
+                        {
+                            path: ['name'],
+                            message: 'At least one group field must be provided.',
+                        },
+                    ],
+                };
+            }
+        }
+        else {
+            const parsed = updateGroupSchema.safeParse(request.body);
+            if (!parsed.success) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: parsed.error.issues };
+            }
+            updateData = parsed.data;
+        }
+        let uploadedLogoUrl;
+        if (logoFile) {
+            try {
+                const uploaded = await storeMultipartMediaFile({
+                    part: logoFile,
+                    prefix: 'chat-group-logo',
+                    kind: 'image',
+                    maxBytes: 10 * 1024 * 1024,
+                });
+                uploadedLogoUrl = uploaded.fileUrl;
+            }
+            catch (error) {
+                const handled = resolveMediaUploadError(error);
+                if (handled) {
+                    reply.code(handled.statusCode);
+                    return handled.payload;
+                }
+                throw error;
+            }
         }
         const result = await withTransaction(async (client) => {
             await ensureChatSchema(client);
@@ -2184,21 +2321,25 @@ export async function chatRoutes(app) {
             const updates = [];
             const values = [params.id];
             let valueIndex = values.length + 1;
-            if (typeof parsed.data.name === 'string') {
+            if (typeof updateData.name === 'string') {
                 updates.push(`name = $${valueIndex++}`);
-                values.push(parsed.data.name);
+                values.push(updateData.name);
             }
-            if (typeof parsed.data.description === 'string') {
+            if (typeof updateData.description === 'string') {
                 updates.push(`description = $${valueIndex++}`);
-                values.push(parsed.data.description);
+                values.push(updateData.description);
             }
-            if (typeof parsed.data.logo_url === 'string') {
+            if (typeof uploadedLogoUrl === 'string') {
                 updates.push(`logo_url = $${valueIndex++}`);
-                values.push(parsed.data.logo_url);
+                values.push(uploadedLogoUrl);
             }
-            if (typeof parsed.data.public_price_ugx === 'number') {
+            else if (typeof updateData.logo_url === 'string') {
+                updates.push(`logo_url = $${valueIndex++}`);
+                values.push(updateData.logo_url);
+            }
+            if (typeof updateData.public_price_ugx === 'number') {
                 updates.push(`public_price_ugx = $${valueIndex++}`);
-                values.push(parsed.data.public_price_ugx);
+                values.push(updateData.public_price_ugx);
             }
             updates.push('updated_at = NOW()');
             const updateRes = await client.query(`

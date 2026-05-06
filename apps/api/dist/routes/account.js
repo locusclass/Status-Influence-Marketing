@@ -6,6 +6,7 @@ import { requestPayout, } from '../services/yoUganda.js';
 import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '../services/firebaseStorage.js';
+import { resolveMediaUploadError, storeMultipartMediaFile, } from '../services/mediaUploads.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { ACCOUNT_ROLE_BUSINESS, buildAuthClaims, buildUserSession, canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeAccountRole, normalizeActiveRole, normalizeRequestedUserRole, } from '../services/roles.js';
 import { deleteUserNotification, ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
@@ -687,12 +688,38 @@ export async function accountRoutes(app) {
     app.patch('/account/avatar', { preHandler: [app.authenticate] }, async (request, reply) => {
         const userSub = request.user.sub;
         const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
-        const parsed = accountAvatarSchema.safeParse(request.body);
-        if (!parsed.success) {
-            reply.code(400);
-            return { error: 'validation_failed', issues: parsed.error.issues };
+        const isMultipart = String(request.headers['content-type'] ?? '')
+            .toLowerCase()
+            .includes('multipart/form-data');
+        let avatarUrl = '';
+        if (isMultipart) {
+            try {
+                const part = await request.file();
+                const uploaded = await storeMultipartMediaFile({
+                    part,
+                    prefix: 'avatar',
+                    kind: 'image',
+                    maxBytes: 10 * 1024 * 1024,
+                });
+                avatarUrl = uploaded.fileUrl;
+            }
+            catch (error) {
+                const handled = resolveMediaUploadError(error);
+                if (handled) {
+                    reply.code(handled.statusCode);
+                    return handled.payload;
+                }
+                throw error;
+            }
         }
-        const body = parsed.data;
+        else {
+            const parsed = accountAvatarSchema.safeParse(request.body);
+            if (!parsed.success) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: parsed.error.issues };
+            }
+            avatarUrl = parsed.data.avatar_url;
+        }
         return withTransaction(async (client) => {
             await client.query(`
           INSERT INTO user_profiles (user_id, avatar_url, updated_at)
@@ -701,8 +728,8 @@ export async function accountRoutes(app) {
           DO UPDATE SET
             avatar_url = EXCLUDED.avatar_url,
             updated_at = NOW()
-          `, [userId, body.avatar_url]);
-            return { ok: true };
+          `, [userId, avatarUrl]);
+            return { ok: true, avatar_url: avatarUrl };
         });
     });
     app.patch('/account/whatsapp/verify', { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -928,12 +955,48 @@ export async function accountRoutes(app) {
     // and set their verified 12h viewer count (max_status_viewers_12h).
     app.post('/account/verification/recording', { preHandler: [app.authenticate] }, async (request, reply) => {
         const userId = request.user.sub;
-        const body = z
-            .object({ video_url: z.string().url().max(2048) })
-            .safeParse(request.body);
-        if (!body.success) {
-            reply.code(400);
-            return { error: 'validation_failed', issues: body.error.issues };
+        const isMultipart = String(request.headers['content-type'] ?? '')
+            .toLowerCase()
+            .includes('multipart/form-data');
+        let videoUrl = '';
+        if (isMultipart) {
+            const pending = await withTransaction(async (client) => {
+                const existing = await client.query(`SELECT id FROM ambassador_verification_recordings
+             WHERE user_id=$1 AND status='PENDING' LIMIT 1`, [userId]);
+                return existing.rows[0] ?? null;
+            });
+            if (pending) {
+                reply.code(409);
+                return { error: 'verification_recording_pending' };
+            }
+            try {
+                const part = await request.file();
+                const uploaded = await storeMultipartMediaFile({
+                    part,
+                    prefix: 'verification',
+                    kind: 'video',
+                    maxBytes: 50 * 1024 * 1024,
+                });
+                videoUrl = uploaded.fileUrl;
+            }
+            catch (error) {
+                const handled = resolveMediaUploadError(error);
+                if (handled) {
+                    reply.code(handled.statusCode);
+                    return handled.payload;
+                }
+                throw error;
+            }
+        }
+        else {
+            const body = z
+                .object({ video_url: z.string().url().max(2048) })
+                .safeParse(request.body);
+            if (!body.success) {
+                reply.code(400);
+                return { error: 'validation_failed', issues: body.error.issues };
+            }
+            videoUrl = body.data.video_url;
         }
         return withTransaction(async (client) => {
             // One pending submission at a time per user
@@ -945,8 +1008,8 @@ export async function accountRoutes(app) {
             }
             const res = await client.query(`INSERT INTO ambassador_verification_recordings (user_id, video_url)
            VALUES ($1, $2)
-           RETURNING id, status, created_at`, [userId, body.data.video_url]);
-            return { recording: res.rows[0] };
+           RETURNING id, status, created_at`, [userId, videoUrl]);
+            return { recording: res.rows[0], video_url: videoUrl };
         });
     });
     app.get('/account/verification/recording', { preHandler: [app.authenticate] }, async (request) => {
