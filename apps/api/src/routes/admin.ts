@@ -2480,12 +2480,23 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       });
       idx = state.idx;
 
-      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const res = await client.query(
-        `
-        SELECT
-          u.*,
-          p.avatar_url,
+      
+        const access = getRequestDashboardAccess(request);
+        if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN && access.country_id) {
+          conditions.push(`u.country_id = ${idx}`);
+          params.push(access.country_id);
+          idx++;
+        } else if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN && access.division_id) {
+          conditions.push(`u.division_id = ${idx}`);
+          params.push(access.division_id);
+          idx++;
+        }
+        const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+        const res = await client.query(
+          `
+          SELECT
+            u.*,
+            p.avatar_url,
         CASE
           WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
             THEN TRUE
@@ -2976,12 +2987,12 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`c.created_at >= $${idx}`);
+        conditions.push(`created_at >= ${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`c.created_at <= $${idx}`);
+        conditions.push(`created_at <= ${idx}`);
         params.push(range.to);
         idx++;
       }
