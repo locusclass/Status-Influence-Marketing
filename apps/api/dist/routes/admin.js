@@ -2674,7 +2674,7 @@ export async function adminRoutes(app) {
                 return { error: 'already_reviewed' };
             }
             const adminUserId = request.user.sub;
-            // Mark recording as approved with 30-day expiry
+            // Mark recording as approved; approval valid 30 days, video purged 24h after review
             await client.query(`UPDATE ambassador_verification_recordings
          SET status='APPROVED',
              approved_viewer_count=$2,
@@ -2682,6 +2682,7 @@ export async function adminRoutes(app) {
              reviewed_by_user_id=$4,
              reviewed_at=now(),
              expires_at=now() + INTERVAL '30 days',
+             video_expires_at=now() + INTERVAL '24 hours',
              updated_at=now()
          WHERE id=$1`, [params.id, body.viewer_count, body.admin_note ?? null, adminUserId]);
             // Apply the verified viewer count to the user's account
@@ -2720,6 +2721,7 @@ export async function adminRoutes(app) {
              admin_note=$2,
              reviewed_by_user_id=$3,
              reviewed_at=now(),
+             video_expires_at=now() + INTERVAL '24 hours',
              updated_at=now()
          WHERE id=$1`, [params.id, note, adminUserId]);
             await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
@@ -2898,10 +2900,15 @@ export async function adminRoutes(app) {
            c.id AS campaign_id,
            c.title AS campaign_title,
            c.platform,
-           c.payout_amount,
-           c.budget_total,
+           c.media_type,
            c.execution_mode,
            c.delivery_model,
+           c.payout_amount,
+           c.budget_total,
+           c.start_date,
+           c.end_date,
+           c.terms_keep_hours,
+           c.visibility,
            ambassador.id AS ambassador_id,
            ambassador.full_name AS ambassador_name,
            ambassador.email AS ambassador_email,
@@ -2960,6 +2967,39 @@ export async function adminRoutes(app) {
                 `A proof for your campaign "${proof.campaign_title}" has been verified and the ambassador has been paid.`,
             ]);
             await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN_COMPLETION', 'proof', params.proofId, {});
+            return { ok: true };
+        });
+    });
+    app.patch('/admin/campaign-completions/:proofId/reject', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const adminUserId = request.user.sub;
+        const body = request.body;
+        const reason = (body?.reason ?? '').toString().trim();
+        return withTransaction(async (client) => {
+            const res = await client.query(`SELECT p.id, p.user_id AS ambassador_id, p.status,
+                c.title AS campaign_title, c.business_id
+         FROM proofs p
+         JOIN verification_sessions vs ON vs.id = p.session_id
+         JOIN campaigns c ON c.id = vs.campaign_id
+         WHERE p.id=$1 LIMIT 1`, [params.proofId]);
+            const proof = res.rows[0];
+            if (!proof) {
+                reply.code(404);
+                return { error: 'proof_not_found' };
+            }
+            await client.query(`UPDATE proofs SET status='REJECTED', decision='REJECTED', updated_at=now() WHERE id=$1`, [params.proofId]);
+            // Notify ambassador
+            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
+         VALUES (gen_random_uuid(), $1, 'PROOF_REJECTED',
+                 'Campaign proof rejected',
+                 $2, now())
+         ON CONFLICT DO NOTHING`, [
+                proof.ambassador_id,
+                reason
+                    ? `Your proof for "${proof.campaign_title}" was rejected: ${reason}. Please re-submit.`
+                    : `Your proof for "${proof.campaign_title}" was rejected. Please re-submit a clearer recording.`,
+            ]);
+            await logAudit(client, adminUserId, 'REJECT_CAMPAIGN_COMPLETION', 'proof', params.proofId, { reason });
             return { ok: true };
         });
     });

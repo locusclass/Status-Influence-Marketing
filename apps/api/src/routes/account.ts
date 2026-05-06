@@ -67,6 +67,7 @@ const accountProfileSchema = z
     current_advertiser_viewers: z.number().int().min(0).optional(),
     current_business_viewers: z.number().int().min(0).optional(),
     private_contract_rate_ugx: z.number().int().min(0).optional(),
+    private_contract_rate_24h_ugx: z.number().int().min(0).optional(),
     price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
   })
   .transform((body) => ({
@@ -418,6 +419,10 @@ async function ensureAccountSchema(client: any) {
   `);
   await client.query(`
     ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS private_contract_rate_24h_ugx INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE users
       ADD COLUMN IF NOT EXISTS current_business_viewers INTEGER NOT NULL DEFAULT 0
   `);
   await client.query(`
@@ -605,6 +610,7 @@ export async function accountRoutes(app: FastifyInstance) {
           u.preferred_currency AS currency,
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
           COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           ${policyAcceptanceSelectSql('u')},
@@ -831,6 +837,27 @@ export async function accountRoutes(app: FastifyInstance) {
           await client.query(
             'UPDATE users SET private_contract_rate_ugx=$2 WHERE id=$1',
             [userId, Math.max(0, body.private_contract_rate_ugx)]
+          );
+        }
+
+        if (typeof body.private_contract_rate_24h_ugx === 'number') {
+          const roleRes = await client.query(
+            `
+            SELECT role
+            FROM users
+            WHERE id=$1
+            LIMIT 1
+            `,
+            [userId]
+          );
+          const user = roleRes.rows[0];
+          if (!canAccessAmbassadorFeatures(user?.role)) {
+            reply.code(403);
+            return { error: 'ambassador_profile_required' };
+          }
+          await client.query(
+            'UPDATE users SET private_contract_rate_24h_ugx=$2 WHERE id=$1',
+            [userId, Math.max(0, body.private_contract_rate_24h_ugx)]
           );
         }
 

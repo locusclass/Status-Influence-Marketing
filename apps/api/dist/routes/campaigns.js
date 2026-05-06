@@ -10,6 +10,7 @@ import { ensureChatSchema } from '../services/chat.js';
 import { buildPhoneLookupVariants, normalizePhoneSearchInput, splitSearchTerms, } from '../services/contactLookup.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeActiveRole, } from '../services/roles.js';
+import { createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
@@ -416,9 +417,13 @@ async function ensureCampaignColumns(client) {
     await client.query(`
     DO $$ BEGIN
       IF to_regclass('public.campaigns') IS NOT NULL THEN
-        ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
-        ALTER TABLE campaigns
-          ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+        BEGIN
+          ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
+          ALTER TABLE campaigns
+            ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
       END IF;
     END $$;
   `);
@@ -538,6 +543,7 @@ async function findAmbassadorById(client, ambassadorId) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -566,6 +572,7 @@ async function findAmbassadorByPhone(client, rawPhone) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -619,6 +626,7 @@ async function findAmbassadorBySearch(client, rawQuery) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -665,6 +673,7 @@ async function listGroupCampaignMembers(client, groupId) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
@@ -1264,7 +1273,7 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
       SELECT status
       FROM contracts
       WHERE campaign_id = s.campaign_id
-        AND ambassador_id = $2
+        AND distributor_id = $2
       ORDER BY created_at DESC
       LIMIT 1
     ) mc ON TRUE
@@ -1307,7 +1316,7 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
             is_available: campaignStatus === 'ACTIVE' &&
                 fundingConfirmed &&
                 isConfirmedEscrowFundingStatus(escrowStatus) &&
-                latestContractStatus === 'UNCLAIMED',
+                (latestContractStatus === 'UNCLAIMED' || latestContractStatus === 'CANCELLED'),
         });
     }
     return result;
@@ -1326,7 +1335,7 @@ async function getContractCompletionReadiness(client, contractId, userId) {
     const contract = contractRes.rows[0];
     if (!contract)
         return { error: 'contract_not_found' };
-    if (contract.ambassador_id !== userId)
+    if (contract.distributor_id !== userId)
         return { error: 'forbidden' };
     if (contract.status !== 'ACTIVE')
         return { error: 'contract_not_active' };
@@ -1406,7 +1415,12 @@ export async function campaignRoutes(app) {
         }
     });
     app.addHook('preHandler', async () => {
-        await ensureCampaignRoutesSchema();
+        try {
+            await ensureCampaignRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'campaign routes schema check failed — proceeding');
+        }
     });
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();
@@ -1680,7 +1694,7 @@ export async function campaignRoutes(app) {
         `, [...params, authUser ?? '', limit, offset]);
             const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), authUser ?? null);
             const campaignsWithStatus = res.rows.map((row) => ({
-                ...row,
+                ...withCampaignMediaUrls(row),
                 status_summary: statusSummaries.get(String(row.id)) ?? {
                     campaign_status: String(row.status ?? 'ACTIVE'),
                     escrow_status: 'PENDING',
@@ -1756,6 +1770,7 @@ export async function campaignRoutes(app) {
                   c.id AS campaign_id,
                   c.public_id AS campaign_public_id,
                   c.title AS campaign_title,
+                  c.platform,
                   c.assigned_phone,
                   c.assigned_ambassador_id,
                   ctr.id AS contract_id,
@@ -1781,8 +1796,8 @@ export async function campaignRoutes(app) {
                   JOIN verification_sessions vs ON vs.id = p.session_id
                   WHERE vs.campaign_id = c.id
                     AND (
-                      ctr.ambassador_id IS NULL
-                      OR p.user_id = ctr.ambassador_id
+                      ctr.distributor_id IS NULL
+                      OR p.user_id = ctr.distributor_id
                     )
                   ORDER BY p.created_at DESC
                   LIMIT 1
@@ -1813,7 +1828,7 @@ export async function campaignRoutes(app) {
                 managed_contracts: managedContracts,
                 active_contract: activeContractRow,
                 my_active_contract: authUser
-                    ? activeContract.rows.find((row) => row.ambassador_id === authUser) ?? null
+                    ? activeContract.rows.find((row) => row.distributor_id === authUser) ?? null
                     : null,
                 status_summary: await buildCampaignStatusSummary(client, found.id, authUser ?? null),
             };
@@ -3105,7 +3120,7 @@ export async function campaignRoutes(app) {
             if (!user.can_multi_contract) {
                 const activeCountRes = await client.query(`SELECT COUNT(*)::int AS count
            FROM contracts
-           WHERE ambassador_id=$1
+           WHERE distributor_id=$1
              AND status='ACTIVE'`, [authUser]);
                 const activeCount = activeCountRes.rows[0]?.count ?? 0;
                 if (activeCount > 0) {
@@ -3123,7 +3138,7 @@ export async function campaignRoutes(app) {
             const allocatedViews = Math.max(1, Number(campaign.impression_target ?? 0));
             const contractRes = await client.query(`INSERT INTO contracts (
           campaign_id,
-          ambassador_id,
+          distributor_id,
           status,
           accepted_at,
           post_deadline_at,
@@ -3151,6 +3166,16 @@ export async function campaignRoutes(app) {
            SET balance_escrow = balance_escrow + $2
            WHERE user_id = $1`, [authUser, Math.trunc(payoutAmount)]);
             }
+            // Notify the business that an ambassador accepted the contract
+            await ensureUserSignalSchema(client);
+            const ambassadorName = (await client.query(`SELECT COALESCE(full_name, email) AS name FROM users WHERE id=$1 LIMIT 1`, [authUser])).rows[0]?.name ?? 'An ambassador';
+            await createUserNotifications(client, [campaign.business_id], {
+                category: 'CONTRACT_ACCEPTED',
+                title: 'Contract Accepted',
+                body: `${ambassadorName} has accepted your contract for "${campaign.title ?? 'your campaign'}".`,
+                targetType: 'contract',
+                targetId: contractRes.rows[0].id,
+            });
             return {
                 contract: {
                     ...contractRes.rows[0],
@@ -3228,6 +3253,20 @@ export async function campaignRoutes(app) {
                     walletRefundedAmount = refund.refunded_amount;
                 }
             }
+            // Send notification to the other party
+            const cancelledBy = contract.ambassador_id === authUser ? 'ambassador' : 'business';
+            const notifyUserId = cancelledBy === 'business' ? contract.ambassador_id : contract.business_id;
+            const campaignTitle = (await client.query('SELECT title FROM campaigns WHERE id=$1 LIMIT 1', [contract.campaign_id])).rows[0]?.title ?? 'a campaign';
+            await ensureUserSignalSchema(client);
+            await createUserNotifications(client, [notifyUserId], {
+                category: 'CONTRACT_CANCELLED',
+                title: cancelledBy === 'business' ? 'Contract Cancelled' : 'Ambassador Withdrew',
+                body: cancelledBy === 'business'
+                    ? `The business has cancelled your contract for "${campaignTitle}". Any funds in escrow have been returned.`
+                    : `The ambassador has cancelled their contract for "${campaignTitle}".`,
+                targetType: 'contract',
+                targetId: contract.id,
+            });
             return {
                 ...updated.rows[0],
                 wallet_refunded_amount: walletRefundedAmount,
@@ -3378,5 +3417,99 @@ export async function campaignRoutes(app) {
             return result;
         }
         return { campaign: result };
+    });
+    // ── List all active ambassadors (for beneficiary picker) ────────────────────
+    app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const role = request.user?.role;
+        if (!canAccessBusinessFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        const query = request.query;
+        const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '100', 10) || 100));
+        const offset = Math.max(0, parseInt(query.offset ?? '0', 10) || 0);
+        const searchQ = String(query.q ?? '').trim();
+        return withTransaction(async (client) => {
+            const hasFullName = await usersHasColumn(client, 'full_name');
+            const fullNameSelect = hasFullName
+                ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+                : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+            const params = [];
+            let whereExtra = '';
+            if (searchQ) {
+                params.push(`%${searchQ}%`);
+                whereExtra = `AND (${fullNameSelect} ILIKE $${params.length} OR LOWER(u.email) LIKE LOWER($${params.length}) OR u.phone LIKE $${params.length})`;
+            }
+            params.push(limit, offset);
+            const res = await client.query(`
+        SELECT
+          u.id,
+          u.public_id,
+          u.phone,
+          u.email,
+          u.status,
+          COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          ${fullNameSelect} AS full_name,
+          COALESCE(p.avatar_url, '') AS avatar_url
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
+          AND u.status = 'ACTIVE'
+          ${whereExtra}
+        ORDER BY ${fullNameSelect} ASC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+        `, params);
+            return { ambassadors: res.rows };
+        });
+    });
+    // ── Ambassador declines a private contract invitation ───────────────────────
+    app.post('/contracts/:id/decline', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const params = request.params;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
+        const role = request.user?.role;
+        if (!authUser) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (!canAccessAmbassadorFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        return withTransaction(async (client) => {
+            // Find campaign assigned to this ambassador
+            const campaignRes = await client.query(`SELECT c.id, c.title, c.business_id, c.assigned_ambassador_id, c.status, c.execution_mode
+         FROM campaigns c
+         WHERE (c.id::text = $1 OR c.public_id = $1)
+           AND c.assigned_ambassador_id = $2
+           AND c.execution_mode = 'PRIVATE_CONTRACT'
+           AND c.status = 'ACTIVE'
+         LIMIT 1`, [params.id, authUser]);
+            const campaign = campaignRes.rows[0];
+            if (!campaign) {
+                reply.code(404);
+                return { error: 'contract_not_found' };
+            }
+            // Cancel the campaign for the ambassador
+            await client.query(`UPDATE campaigns SET status='CANCELLED' WHERE id=$1`, [campaign.id]);
+            // Mark any active contract as declined
+            await client.query(`UPDATE contracts
+         SET status='CANCELLED', cancelled_at=now(), declined_at=now(), declined_by_user_id=$2
+         WHERE campaign_id=$1 AND distributor_id=$2 AND status='ACTIVE'`, [campaign.id, authUser]);
+            // Notify the business
+            const ambassadorName = (await client.query(`SELECT COALESCE(full_name, email) AS name FROM users WHERE id=$1 LIMIT 1`, [authUser])).rows[0]?.name ?? 'The ambassador';
+            await ensureUserSignalSchema(client);
+            await createUserNotifications(client, [campaign.business_id], {
+                category: 'CONTRACT_DECLINED',
+                title: 'Contract Declined',
+                body: `${ambassadorName} has declined your contract for "${campaign.title ?? 'your campaign'}".`,
+                targetType: 'campaign',
+                targetId: campaign.id,
+            });
+            return { ok: true };
+        });
     });
 }
