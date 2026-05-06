@@ -23,6 +23,62 @@ async function ensureCampaignDraftsTable(client: any) {
     CREATE INDEX IF NOT EXISTS campaign_creation_drafts_updated_at_idx
       ON campaign_creation_drafts (updated_at DESC)
   `);
+  await client.query(`
+    ALTER TABLE campaign_creation_drafts
+      ADD COLUMN IF NOT EXISTS advertiser_id UUID
+  `);
+  await client.query(`
+    ALTER TABLE campaign_creation_drafts
+      ADD COLUMN IF NOT EXISTS business_id UUID
+  `);
+  await client.query(`
+    UPDATE campaign_creation_drafts
+    SET business_id = COALESCE(business_id, advertiser_id),
+        advertiser_id = COALESCE(advertiser_id, business_id)
+    WHERE business_id IS NULL
+       OR advertiser_id IS NULL
+       OR business_id IS DISTINCT FROM advertiser_id
+  `);
+  await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS campaign_creation_drafts_business_id_key
+      ON campaign_creation_drafts (business_id)
+  `);
+  await client.query(`
+    CREATE OR REPLACE FUNCTION sync_campaign_creation_draft_owner_columns()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      resolved_owner UUID;
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.business_id IS DISTINCT FROM OLD.business_id THEN
+          resolved_owner := NEW.business_id;
+        ELSIF NEW.advertiser_id IS DISTINCT FROM OLD.advertiser_id THEN
+          resolved_owner := NEW.advertiser_id;
+        ELSE
+          resolved_owner := COALESCE(NEW.business_id, NEW.advertiser_id);
+        END IF;
+      ELSE
+        resolved_owner := COALESCE(NEW.business_id, NEW.advertiser_id);
+      END IF;
+
+      NEW.business_id := resolved_owner;
+      NEW.advertiser_id := resolved_owner;
+      RETURN NEW;
+    END;
+    $$;
+  `);
+  await client.query(`
+    DROP TRIGGER IF EXISTS campaign_creation_drafts_sync_owner_columns
+    ON campaign_creation_drafts
+  `);
+  await client.query(`
+    CREATE TRIGGER campaign_creation_drafts_sync_owner_columns
+    BEFORE INSERT OR UPDATE ON campaign_creation_drafts
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_campaign_creation_draft_owner_columns()
+  `);
 }
 
 function normalizeDraftPayload(rawDraft: Record<string, unknown>, savedAt: string) {

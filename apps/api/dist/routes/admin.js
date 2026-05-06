@@ -568,6 +568,127 @@ async function ensureCampaignDraftsTable(client) {
     CREATE INDEX IF NOT EXISTS campaign_creation_drafts_updated_at_idx
       ON campaign_creation_drafts (updated_at DESC)
   `);
+    await client.query(`
+    ALTER TABLE campaign_creation_drafts
+      ADD COLUMN IF NOT EXISTS advertiser_id UUID
+  `);
+    await client.query(`
+    ALTER TABLE campaign_creation_drafts
+      ADD COLUMN IF NOT EXISTS business_id UUID
+  `);
+    await client.query(`
+    UPDATE campaign_creation_drafts
+    SET business_id = COALESCE(business_id, advertiser_id),
+        advertiser_id = COALESCE(advertiser_id, business_id)
+    WHERE business_id IS NULL
+       OR advertiser_id IS NULL
+       OR business_id IS DISTINCT FROM advertiser_id
+  `);
+    await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS campaign_creation_drafts_business_id_key
+      ON campaign_creation_drafts (business_id)
+  `);
+    await client.query(`
+    CREATE OR REPLACE FUNCTION sync_campaign_creation_draft_owner_columns()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      resolved_owner UUID;
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.business_id IS DISTINCT FROM OLD.business_id THEN
+          resolved_owner := NEW.business_id;
+        ELSIF NEW.advertiser_id IS DISTINCT FROM OLD.advertiser_id THEN
+          resolved_owner := NEW.advertiser_id;
+        ELSE
+          resolved_owner := COALESCE(NEW.business_id, NEW.advertiser_id);
+        END IF;
+      ELSE
+        resolved_owner := COALESCE(NEW.business_id, NEW.advertiser_id);
+      END IF;
+
+      NEW.business_id := resolved_owner;
+      NEW.advertiser_id := resolved_owner;
+      RETURN NEW;
+    END;
+    $$;
+  `);
+    await client.query(`
+    DROP TRIGGER IF EXISTS campaign_creation_drafts_sync_owner_columns
+    ON campaign_creation_drafts
+  `);
+    await client.query(`
+    CREATE TRIGGER campaign_creation_drafts_sync_owner_columns
+    BEFORE INSERT OR UPDATE ON campaign_creation_drafts
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_campaign_creation_draft_owner_columns()
+  `);
+}
+async function ensureContractParticipantColumns(client) {
+    await client.query(`
+    ALTER TABLE contracts
+      ADD COLUMN IF NOT EXISTS ambassador_id UUID
+  `);
+    await client.query(`
+    ALTER TABLE contracts
+      ADD COLUMN IF NOT EXISTS distributor_id UUID
+  `);
+    await client.query(`
+    UPDATE contracts
+    SET ambassador_id = COALESCE(ambassador_id, distributor_id),
+        distributor_id = COALESCE(distributor_id, ambassador_id)
+    WHERE ambassador_id IS NULL
+       OR distributor_id IS NULL
+       OR ambassador_id IS DISTINCT FROM distributor_id
+  `);
+    await client.query(`
+    CREATE OR REPLACE FUNCTION sync_contract_participant_columns()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      resolved_participant UUID;
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.ambassador_id IS DISTINCT FROM OLD.ambassador_id THEN
+          resolved_participant := NEW.ambassador_id;
+        ELSIF NEW.distributor_id IS DISTINCT FROM OLD.distributor_id THEN
+          resolved_participant := NEW.distributor_id;
+        ELSE
+          resolved_participant := COALESCE(NEW.ambassador_id, NEW.distributor_id);
+        END IF;
+      ELSE
+        resolved_participant := COALESCE(NEW.ambassador_id, NEW.distributor_id);
+      END IF;
+
+      NEW.ambassador_id := resolved_participant;
+      NEW.distributor_id := resolved_participant;
+      RETURN NEW;
+    END;
+    $$;
+  `);
+    await client.query(`
+    DROP TRIGGER IF EXISTS contracts_sync_participant_columns
+    ON contracts
+  `);
+    await client.query(`
+    CREATE TRIGGER contracts_sync_participant_columns
+    BEFORE INSERT OR UPDATE ON contracts
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_contract_participant_columns()
+  `);
+}
+async function ensureProofReviewColumns(client) {
+    await client.query(`
+    ALTER TABLE proofs
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  `);
+    await client.query(`
+    UPDATE proofs
+    SET updated_at = COALESCE(updated_at, created_at, NOW())
+    WHERE updated_at IS NULL
+  `);
 }
 async function logAudit(client, actorId, action, targetType, targetId, meta) {
     await recordAdminAudit(client, {
@@ -608,6 +729,36 @@ function summarizeCampaignAdminChanges(input) {
 export async function adminRoutes(app) {
     const jobRepo = new JobRepo();
     const paymentRepo = new PaymentRepo();
+    let schemaReadyPromise = null;
+    const ensureAdminRoutesSchema = () => {
+        if (!schemaReadyPromise) {
+            schemaReadyPromise = withTransaction(async (client) => {
+                await ensurePublicIdColumns(client);
+                await ensureUserSignalSchema(client);
+                await ensureCampaignDraftsTable(client);
+                await ensureContractParticipantColumns(client);
+                await ensureProofReviewColumns(client);
+            }).catch((error) => {
+                schemaReadyPromise = null;
+                throw error;
+            });
+        }
+        return schemaReadyPromise;
+    };
+    app.addHook('onListen', async () => {
+        if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+            return;
+        }
+        try {
+            await ensureAdminRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'startup warmup failed for admin schema');
+        }
+    });
+    app.addHook('preHandler', async () => {
+        await ensureAdminRoutesSchema();
+    });
     app.post('/admin/access', async (request, reply) => {
         const body = AdminAccessSchema.parse(request.body);
         if (!config.adminAccessPhrase.trim()) {
