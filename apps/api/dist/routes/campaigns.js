@@ -162,7 +162,30 @@ function getCampaignBundleId(campaign) {
     const value = String(campaign?.campaign_bundle_id ?? '').trim();
     return value.length > 0 ? value : null;
 }
+function buildEscrowCampaignIdSql(campaignAlias) {
+    return `
+    COALESCE(
+      NULLIF(${campaignAlias}.execution_meta #>> '{contract_reissue,source_escrow_campaign_id}', ''),
+      COALESCE(
+        ${campaignAlias}.bundle_root_campaign_id,
+        ${campaignAlias}.parent_campaign_id,
+        ${campaignAlias}.id
+      )::text
+    )
+  `;
+}
 function getEscrowCampaignId(campaign) {
+    const executionMeta = campaign?.execution_meta && typeof campaign.execution_meta === 'object'
+        ? campaign.execution_meta
+        : null;
+    const contractReissue = executionMeta?.contract_reissue &&
+        typeof executionMeta.contract_reissue === 'object'
+        ? executionMeta.contract_reissue
+        : null;
+    const sourceEscrowCampaignId = String(contractReissue?.source_escrow_campaign_id ?? '').trim();
+    if (sourceEscrowCampaignId.length > 0) {
+        return sourceEscrowCampaignId;
+    }
     return String(campaign?.bundle_root_campaign_id ??
         campaign?.parent_campaign_id ??
         campaign?.id ??
@@ -195,11 +218,7 @@ function buildConfirmedEscrowEvidenceSql(campaignAlias, escrowAlias) {
           AND (
             wt.reference =
               'ESCROW_FUND:' ||
-              COALESCE(
-                ${campaignAlias}.bundle_root_campaign_id,
-                ${campaignAlias}.parent_campaign_id,
-                ${campaignAlias}.id
-              )::text
+              ${buildEscrowCampaignIdSql(campaignAlias)}
             OR (
               ${campaignAlias}.campaign_bundle_id IS NOT NULL
               AND wt.reference =
@@ -217,16 +236,125 @@ async function hasConfirmedEscrowFunding(client, campaignId) {
       SELECT 1
       FROM campaigns c
       LEFT JOIN escrow_ledger e
-        ON e.campaign_id = COALESCE(
-          c.bundle_root_campaign_id,
-          c.parent_campaign_id,
-          c.id
-        )
+        ON e.campaign_id::text = ${buildEscrowCampaignIdSql('c')}
       WHERE c.id = $1
         AND ${buildConfirmedEscrowEvidenceSql('c', 'e')}
     ) AS funding_confirmed
     `, [campaignId]);
     return fundingRes.rows[0]?.funding_confirmed === true;
+}
+async function ensureCampaignDraftsTable(client) {
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_drafts (
+      id UUID PRIMARY KEY,
+      business_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      payload JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaign_creation_drafts_updated_at_idx
+      ON campaign_creation_drafts (updated_at DESC)
+  `);
+}
+function extractContractReissueMeta(executionMeta) {
+    if (!executionMeta || typeof executionMeta !== 'object') {
+        return null;
+    }
+    const raw = executionMeta.contract_reissue;
+    if (!raw || typeof raw !== 'object') {
+        return null;
+    }
+    const value = raw;
+    const sourceCampaignId = String(value.source_campaign_id ?? '').trim();
+    const sourceEscrowCampaignId = String(value.source_escrow_campaign_id ?? '').trim();
+    if (sourceCampaignId.length === 0 || sourceEscrowCampaignId.length === 0) {
+        return null;
+    }
+    return {
+        sourceCampaignId,
+        sourceEscrowCampaignId,
+    };
+}
+async function tryReuseDeclinedPrivateContractFunding(input) {
+    const reissue = extractContractReissueMeta(input.executionMeta);
+    if (!reissue) {
+        return null;
+    }
+    const sourceRes = await input.client.query(`
+    SELECT
+      c.id,
+      c.business_id,
+      c.execution_mode,
+      c.visibility,
+      e.id AS escrow_id,
+      e.status AS escrow_status,
+      COALESCE(e.amount_total, 0)::int AS amount_total,
+      COALESCE(e.amount_available, 0)::int AS amount_available
+    FROM campaigns c
+    LEFT JOIN escrow_ledger e
+      ON e.campaign_id::text = $2
+    WHERE c.id = $1
+      AND c.business_id = $3
+    LIMIT 1
+    `, [
+        reissue.sourceCampaignId,
+        reissue.sourceEscrowCampaignId,
+        input.businessId,
+    ]);
+    const source = sourceRes.rows[0];
+    if (!source) {
+        return null;
+    }
+    if (source.execution_mode !== 'PRIVATE_CONTRACT' ||
+        source.visibility !== 'PRIVATE' ||
+        !source.escrow_id ||
+        !isConfirmedEscrowFundingStatus(source.escrow_status)) {
+        return null;
+    }
+    const requiredAmount = Math.max(0, Math.round(input.requiredAmount));
+    if (requiredAmount <= 0 || Number(source.amount_available ?? 0) < requiredAmount) {
+        return null;
+    }
+    const latestFundingTxnRes = await input.client.query(`
+    SELECT id, merchant_reference, raw_payload
+    FROM pesapal_transactions
+    WHERE escrow_id = $1
+      AND type = 'FUNDING'
+    ORDER BY
+      CASE WHEN status = 'COMPLETED' THEN 0 ELSE 1 END,
+      created_at DESC
+    LIMIT 1
+    `, [source.escrow_id]);
+    const latestFundingTxn = latestFundingTxnRes.rows[0];
+    if (latestFundingTxn) {
+        const rawPayload = latestFundingTxn.raw_payload &&
+            typeof latestFundingTxn.raw_payload === 'object'
+            ? { ...latestFundingTxn.raw_payload }
+            : {};
+        const previousReissues = Array.isArray(rawPayload.reissued_campaign_ids)
+            ? rawPayload.reissued_campaign_ids
+                .map((value) => String(value ?? '').trim())
+                .filter((value) => value.length > 0)
+            : [];
+        const nextReissues = Array.from(new Set([...previousReissues, input.rootCampaignId]));
+        rawPayload.reissued_campaign_ids = nextReissues;
+        rawPayload.last_reissued_campaign_id = input.rootCampaignId;
+        rawPayload.last_reissue_source_campaign_id = reissue.sourceCampaignId;
+        rawPayload.last_reused_amount_ugx = requiredAmount;
+        rawPayload.last_reused_at = new Date().toISOString();
+        await input.client.query(`
+      UPDATE pesapal_transactions
+      SET raw_payload = $2::jsonb
+      WHERE id = $1
+      `, [latestFundingTxn.id, JSON.stringify(rawPayload)]);
+    }
+    return {
+        escrowCampaignId: reissue.sourceEscrowCampaignId,
+        escrowId: source.escrow_id,
+        amountAvailable: Number(source.amount_available ?? 0),
+    };
 }
 function normalizePlatformList(values) {
     return Array.from(new Set(values
@@ -545,6 +673,7 @@ async function findAmbassadorById(client, ambassadorId) {
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
@@ -574,6 +703,7 @@ async function findAmbassadorByPhone(client, rawPhone) {
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
@@ -628,6 +758,7 @@ async function findAmbassadorBySearch(client, rawQuery) {
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
@@ -1228,7 +1359,7 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
         c.id AS campaign_id,
         c.parent_campaign_id,
         c.bundle_root_campaign_id,
-        COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id,
+        ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id,
         c.campaign_bundle_id,
         c.status AS campaign_status,
         (c.parent_campaign_id IS NULL) AS is_root
@@ -1257,7 +1388,7 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
       lp.status AS latest_proof_status,
       lp.decision AS latest_proof_decision
     FROM scope s
-    LEFT JOIN escrow_ledger e ON e.campaign_id = s.escrow_campaign_id
+    LEFT JOIN escrow_ledger e ON e.campaign_id::text = s.escrow_campaign_id
     LEFT JOIN LATERAL (
       SELECT status
       FROM contracts
@@ -1326,7 +1457,7 @@ async function getContractCompletionReadiness(client, contractId, userId) {
     SELECT
       ctr.*,
       c.platform,
-      COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id
+      ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
     WHERE ctr.id=$1
@@ -1375,7 +1506,7 @@ async function getContractForBusinessAction(client, contractId, businessId, role
       c.parent_campaign_id,
       c.platform,
       c.budget_total,
-      COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id
+      ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
     WHERE ctr.id=$1
@@ -1684,7 +1815,7 @@ export async function campaignRoutes(app) {
           SELECT c2.id
           FROM campaigns c2
           LEFT JOIN escrow_ledger e
-            ON e.campaign_id = COALESCE(c2.bundle_root_campaign_id, c2.parent_campaign_id, c2.id)
+            ON e.campaign_id::text = ${buildEscrowCampaignIdSql('c2')}
           WHERE (${buildConfirmedEscrowEvidenceSql('c2', 'e')})
              OR c2.business_id = $${idx}
         )
@@ -2227,7 +2358,34 @@ export async function campaignRoutes(app) {
                         per_allocation_target: perAllocationTarget,
                     }));
                 }
-                await paymentRepo.createEscrow(client, bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''), bundleId ? totalEscrowAmount : Number(createdRootCampaigns[0]?.budget_total ?? 0));
+                const singleRootCampaign = createdRootCampaigns[0];
+                const privateBeneficiaryCount = Array.isArray(singleRootCampaign?.execution_meta?.private_beneficiaries)
+                    ? singleRootCampaign.execution_meta.private_beneficiaries.length
+                    : 0;
+                const reusedFunding = !bundleId &&
+                    createdRootCampaigns.length === 1 &&
+                    singleRootCampaign &&
+                    privateBeneficiaryCount <= 1
+                    ? await tryReuseDeclinedPrivateContractFunding({
+                        client,
+                        businessId: authUser,
+                        rootCampaignId: String(singleRootCampaign.id),
+                        requiredAmount: Number(singleRootCampaign.budget_total ?? 0),
+                        executionMeta: singleRootCampaign.execution_meta,
+                    })
+                    : null;
+                if (reusedFunding) {
+                    createdRootCampaigns[0] = {
+                        ...createdRootCampaigns[0],
+                        funding_reused: true,
+                        funding_reused_from_escrow_campaign_id: reusedFunding.escrowCampaignId,
+                    };
+                }
+                else {
+                    await paymentRepo.createEscrow(client, bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''), bundleId
+                        ? totalEscrowAmount
+                        : Number(createdRootCampaigns[0]?.budget_total ?? 0));
+                }
                 // Set approval status based on admin_settings
                 const settingRes = await client.query(`SELECT value FROM admin_settings WHERE key='campaign_approval_mode' LIMIT 1`);
                 const approvalMode = settingRes.rows[0]?.value ?? 'MANUAL';
@@ -2243,7 +2401,8 @@ export async function campaignRoutes(app) {
                 else {
                     await client.query(`UPDATE campaigns
              SET approval_status='PENDING_APPROVAL',
-                 approval_deadline=now() + INTERVAL '2 minutes'
+                 approval_deadline=NULL,
+                 approved_at=NULL
              WHERE bundle_root_campaign_id=$1 OR id=$1`, [approvalRoot]);
                     for (const c of createdRootCampaigns) {
                         c.approval_status = 'PENDING_APPROVAL';
@@ -2685,15 +2844,6 @@ export async function campaignRoutes(app) {
                 reply.code(404);
                 return { error: 'campaign_not_found' };
             }
-            // Auto-approve if deadline has passed
-            if (campaign.approval_status === 'PENDING_APPROVAL') {
-                const deadline = campaign.approval_deadline ? new Date(campaign.approval_deadline) : null;
-                if (deadline && deadline < new Date()) {
-                    await client.query(`UPDATE campaigns SET approval_status='AUTO_APPROVED', approved_at=now() WHERE id=$1`, [params.id]);
-                    campaign.approval_status = 'AUTO_APPROVED';
-                    campaign.approved_at = new Date().toISOString();
-                }
-            }
             return {
                 campaign_id: campaign.id,
                 approval_status: campaign.approval_status,
@@ -2755,6 +2905,16 @@ export async function campaignRoutes(app) {
             if (!escrow) {
                 reply.code(404);
                 return { error: 'escrow_not_found' };
+            }
+            if (isConfirmedEscrowFundingStatus(escrow.status)) {
+                return {
+                    fund_source: fundSource,
+                    funded: true,
+                    already_funded: true,
+                    bundle,
+                    owner_campaign: ownerCampaign,
+                    escrow,
+                };
             }
             if (body.amount !== escrow.amount_total) {
                 reply.code(400);
@@ -2931,17 +3091,9 @@ export async function campaignRoutes(app) {
                 reply.code(403);
                 return { error: 'not_campaign_business' };
             }
-            // Auto-approve if deadline passed; block if still pending
             if (campaign.approval_status === 'PENDING_APPROVAL') {
-                const deadline = campaign.approval_deadline ? new Date(campaign.approval_deadline) : null;
-                if (deadline && deadline < new Date()) {
-                    await client.query(`UPDATE campaigns SET approval_status='AUTO_APPROVED', approved_at=now() WHERE id=$1`, [params.id]);
-                    campaign.approval_status = 'AUTO_APPROVED';
-                }
-                else {
-                    reply.code(400);
-                    return { error: 'campaign_pending_approval' };
-                }
+                reply.code(400);
+                return { error: 'campaign_pending_approval' };
             }
             const bundleId = getCampaignBundleId(campaign);
             const escrowOwnerId = getEscrowCampaignId(campaign);
@@ -2949,6 +3101,15 @@ export async function campaignRoutes(app) {
             if (!escrow) {
                 reply.code(404);
                 return { error: 'escrow_not_found' };
+            }
+            if (isConfirmedEscrowFundingStatus(escrow.status)) {
+                return {
+                    fund_source: fundSource,
+                    funded: true,
+                    already_funded: true,
+                    campaign,
+                    escrow,
+                };
             }
             if (body.amount !== escrow.amount_total) {
                 reply.code(400);
@@ -3112,20 +3273,6 @@ export async function campaignRoutes(app) {
             const fundingConfirmed = await hasConfirmedEscrowFunding(client, body.campaign_id);
             if (!fundingConfirmed) {
                 return { error: 'campaign_not_funded' };
-            }
-            const userRes = await client.query('SELECT can_multi_contract FROM users WHERE id=$1', [authUser]);
-            const user = userRes.rows[0];
-            if (!user)
-                return { error: 'user_not_found' };
-            if (!user.can_multi_contract) {
-                const activeCountRes = await client.query(`SELECT COUNT(*)::int AS count
-           FROM contracts
-           WHERE distributor_id=$1
-             AND status='ACTIVE'`, [authUser]);
-                const activeCount = activeCountRes.rows[0]?.count ?? 0;
-                if (activeCount > 0) {
-                    return { error: 'ambassador_active_contract_exists' };
-                }
             }
             const activeCampaignContractRes = await client.query(`SELECT id
          FROM contracts
@@ -3452,12 +3599,14 @@ export async function campaignRoutes(app) {
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
           COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
           ${fullNameSelect} AS full_name,
           COALESCE(p.avatar_url, '') AS avatar_url
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
         WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
           AND u.status = 'ACTIVE'
+          AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'
           ${whereExtra}
         ORDER BY ${fullNameSelect} ASC
         LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -3481,7 +3630,30 @@ export async function campaignRoutes(app) {
         }
         return withTransaction(async (client) => {
             // Find campaign assigned to this ambassador
-            const campaignRes = await client.query(`SELECT c.id, c.title, c.business_id, c.assigned_ambassador_id, c.status, c.execution_mode
+            const campaignRes = await client.query(`SELECT
+           c.id,
+           c.public_id,
+           c.title,
+           c.business_id,
+           c.assigned_ambassador_id,
+           c.assigned_phone,
+           c.status,
+           c.execution_mode,
+           c.platform,
+           c.media_type,
+           c.media_url,
+           c.media_text,
+           c.start_date,
+           c.end_date,
+           c.terms_keep_hours,
+           c.terms_min_views,
+           c.terms_requirement,
+           c.payout_amount,
+           c.budget_total,
+           c.impression_target,
+           c.execution_meta,
+           c.parent_campaign_id,
+           c.bundle_root_campaign_id
          FROM campaigns c
          WHERE (c.id::text = $1 OR c.public_id = $1)
            AND c.assigned_ambassador_id = $2
@@ -3499,13 +3671,113 @@ export async function campaignRoutes(app) {
             await client.query(`UPDATE contracts
          SET status='CANCELLED', cancelled_at=now(), declined_at=now(), declined_by_user_id=$2
          WHERE campaign_id=$1 AND distributor_id=$2 AND status='ACTIVE'`, [campaign.id, authUser]);
-            // Notify the business
-            const ambassadorName = (await client.query(`SELECT COALESCE(full_name, email) AS name FROM users WHERE id=$1 LIMIT 1`, [authUser])).rows[0]?.name ?? 'The ambassador';
+            const ambassadorRes = await client.query(`
+        SELECT
+          COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email) AS name,
+          COALESCE(p.avatar_url, '') AS avatar_url,
+          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        WHERE u.id=$1
+        LIMIT 1
+        `, [authUser]);
+            const ambassador = ambassadorRes.rows[0] ?? {};
+            const ambassadorName = String(ambassador.name ?? 'The ambassador');
+            const executionMeta = campaign.execution_meta && typeof campaign.execution_meta === 'object'
+                ? { ...campaign.execution_meta }
+                : {};
+            const savedAt = new Date().toISOString();
+            const platformKey = String(campaign.platform ?? ACTIVE_CAMPAIGN_PLATFORM)
+                .trim()
+                .toUpperCase() || ACTIVE_CAMPAIGN_PLATFORM;
+            const keepHours = Math.max(1, Number(campaign.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS) || 24);
+            const selectedRate = Math.max(0, Number(campaign.budget_total ?? campaign.payout_amount ?? 0));
+            const beneficiary = {
+                id: authUser,
+                phone: String(campaign.assigned_phone ?? '').trim(),
+                name: ambassadorName,
+                avatar_url: String(ambassador.avatar_url ?? '').trim(),
+                private_contract_rate_ugx: Number(ambassador.private_contract_rate_ugx ?? selectedRate),
+                private_contract_rate_24h_ugx: Number(ambassador.private_contract_rate_24h_ugx ?? 0),
+                price_privacy_mode: String(ambassador.price_privacy_mode ?? 'NEGOTIABLE').toUpperCase(),
+                selected_rate_ugx: selectedRate,
+            };
+            const draftPayload = {
+                version: 1,
+                saved_at: savedAt,
+                server_updated_at: savedAt,
+                title: String(campaign.title ?? '').trim(),
+                step: 1,
+                active_platform: platformKey,
+                selected_platforms: [platformKey],
+                platform_drafts: {
+                    [platformKey]: {
+                        mode: 'PRIVATE_CONTRACT',
+                        mediaType: String(campaign.media_type ?? 'VIDEO').trim().toUpperCase(),
+                        termsRequirement: String(campaign.terms_requirement ?? 'DURATION').trim().toUpperCase(),
+                        mediaUrls: campaign.media_url ? [campaign.media_url] : [],
+                        mediaNames: [],
+                        mediaPaths: [],
+                        mediaMimes: [],
+                        budgetValue: selectedRate,
+                        viewersValue: Math.max(0, Number(campaign.impression_target ?? 0) || 0),
+                        hoursValue: keepHours,
+                        customHours: keepHours.toString(),
+                        payout: selectedRate.toString(),
+                        budget: selectedRate.toString(),
+                        start: campaign.start_date
+                            ? new Date(campaign.start_date).toISOString()
+                            : savedAt,
+                        end: campaign.end_date
+                            ? new Date(campaign.end_date).toISOString()
+                            : new Date(Date.now() + PRIVATE_CONTRACT_WINDOW_HOURS * 60 * 60 * 1000).toISOString(),
+                        counterpartyContact: String(campaign.assigned_phone ?? '').trim(),
+                        target: '',
+                        unitPrice: selectedRate.toString(),
+                        keepHours: keepHours.toString(),
+                        minViews: campaign.terms_min_views == null
+                            ? ''
+                            : String(campaign.terms_min_views),
+                        creativeBrief: String(campaign.media_text ?? ''),
+                        engagementThreshold: String(executionMeta.engagement_threshold ?? '4.0'),
+                        creatorScoreFloor: String(executionMeta.creator_score_floor ?? '70'),
+                        burstWindowMinutes: String(executionMeta.burst_window_minutes ?? '15'),
+                        confirmedBeneficiaries: [beneficiary],
+                        burstMode: Boolean(executionMeta.burst_mode),
+                        xActionType: String(executionMeta.x_action_type ??
+                            'ORIGINAL_TWEET'),
+                        reissueMeta: {
+                            source_campaign_id: campaign.id,
+                            source_campaign_public_id: String(campaign.public_id ?? '').trim(),
+                            source_escrow_campaign_id: getEscrowCampaignId(campaign),
+                            reusable_funding_amount_ugx: selectedRate,
+                            previously_funded: true,
+                        },
+                    },
+                },
+            };
+            await ensureCampaignDraftsTable(client);
+            await client.query(`
+        INSERT INTO campaign_creation_drafts (
+          id,
+          business_id,
+          payload,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+        ON CONFLICT (business_id)
+        DO UPDATE SET
+          payload = EXCLUDED.payload,
+          updated_at = NOW()
+        `, [uuid(), campaign.business_id, JSON.stringify(draftPayload)]);
             await ensureUserSignalSchema(client);
             await createUserNotifications(client, [campaign.business_id], {
                 category: 'CONTRACT_DECLINED',
                 title: 'Contract Declined',
-                body: `${ambassadorName} has declined your contract for "${campaign.title ?? 'your campaign'}".`,
+                body: `${ambassadorName} has declined your contract for "${campaign.title ?? 'your campaign'}". The contract has been returned to drafts and its prior funding will be reused when you reassign it.`,
                 targetType: 'campaign',
                 targetId: campaign.id,
             });

@@ -20,6 +20,8 @@ import {
   ADMIN_MODULE_WALLETS,
   ADMIN_MODULE_WITHDRAWALS,
   ADMIN_ROLE_ADMIN,
+  ADMIN_ROLE_COUNTRY_ADMIN,
+  ADMIN_ROLE_DIVISION_ADMIN,
   ADMIN_ROLE_SUPER_ADMIN,
   ASSIGNABLE_ADMIN_MODULE_KEYS,
   adminModuleDefinitions,
@@ -2481,13 +2483,13 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
       idx = state.idx;
 
       
-        const access = getRequestDashboardAccess(request);
+        
         if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN && access.country_id) {
-          conditions.push(`u.country_id = ${idx}`);
+          conditions.push(`u.country_id = $${idx}`);
           params.push(access.country_id);
           idx++;
         } else if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN && access.division_id) {
-          conditions.push(`u.division_id = ${idx}`);
+          conditions.push(`u.division_id = $${idx}`);
           params.push(access.division_id);
           idx++;
         }
@@ -2987,12 +2989,12 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
         idx++;
       }
       if (range.from) {
-        conditions.push(`created_at >= ${idx}`);
+        conditions.push(`created_at >= $${idx}`);
         params.push(range.from);
         idx++;
       }
       if (range.to) {
-        conditions.push(`created_at <= ${idx}`);
+        conditions.push(`created_at <= $${idx}`);
         params.push(range.to);
         idx++;
       }

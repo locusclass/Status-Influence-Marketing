@@ -35,6 +35,7 @@ const accountProfileSchema = z
     private_contract_rate_ugx: z.number().int().min(0).optional(),
     private_contract_rate_24h_ugx: z.number().int().min(0).optional(),
     price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
+    beneficiary_listing_mode: z.enum(['LISTED', 'DIRECT_ONLY']).optional(),
 })
     .transform((body) => ({
     ...body,
@@ -62,8 +63,8 @@ const accountWhatsappVerifySchema = z.object({
 const accountPolicyAcceptanceSchema = z.object({
     privacy_policy_version: z.string().trim().min(1),
     platform_policy_version: z.string().trim().min(1),
-    accept_privacy_policy: z.literal(true),
-    accept_platform_policy: z.literal(true),
+    accept_privacy_policy: z.boolean().optional(),
+    accept_platform_policy: z.boolean().optional(),
 });
 const accountNotificationUpdateSchema = z.object({
     read: z.boolean(),
@@ -79,7 +80,7 @@ const walletDepositSchema = z.object({
     cancel_url: z.string().trim().min(1).optional(),
     network: z.enum(['MTN', 'AIRTEL']).optional(),
 });
-const MIN_WALLET_WITHDRAW_UGX = 10_000;
+const MIN_WALLET_WITHDRAW_UGX = 1;
 async function getVerifiedEngagements24h(client, userId, platform) {
     const params = [userId];
     const platformFilter = platform && platform.trim().length > 0
@@ -336,6 +337,10 @@ async function ensureAccountSchema(client) {
       ADD COLUMN IF NOT EXISTS price_privacy_mode TEXT NOT NULL DEFAULT 'NEGOTIABLE'
   `);
     await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS beneficiary_listing_mode TEXT NOT NULL DEFAULT 'LISTED'
+  `);
+    await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check
   `);
     await client.query(`
@@ -355,6 +360,13 @@ async function ensureAccountSchema(client) {
     await client.query(`
     ALTER TABLE users
       ADD CONSTRAINT users_price_privacy_mode_check CHECK (price_privacy_mode IN ('NEGOTIABLE', 'FIXED'))
+  `);
+    await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_beneficiary_listing_mode_check
+  `);
+    await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_beneficiary_listing_mode_check CHECK (beneficiary_listing_mode IN ('LISTED', 'DIRECT_ONLY'))
   `);
     await client.query(`
     UPDATE users
@@ -487,6 +499,7 @@ export async function accountRoutes(app) {
           COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
           COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
           ${policyAcceptanceSelectSql('u')},
           u.last_login_at,
           u.last_seen_at,
@@ -681,6 +694,9 @@ export async function accountRoutes(app) {
             }
             if (typeof body.price_privacy_mode === 'string') {
                 await client.query('UPDATE users SET price_privacy_mode=$2 WHERE id=$1', [userId, body.price_privacy_mode]);
+            }
+            if (typeof body.beneficiary_listing_mode === 'string') {
+                await client.query('UPDATE users SET beneficiary_listing_mode=$2 WHERE id=$1', [userId, body.beneficiary_listing_mode]);
             }
             return { ok: true };
         });
@@ -975,7 +991,8 @@ export async function accountRoutes(app) {
                     part,
                     prefix: 'verification',
                     kind: 'video',
-                    maxBytes: 50 * 1024 * 1024,
+                    maxBytes: 0,
+                    allowedMimeTypes: ['video/mp4'],
                 });
                 videoUrl = uploaded.fileUrl;
             }
@@ -990,7 +1007,24 @@ export async function accountRoutes(app) {
         }
         else {
             const body = z
-                .object({ video_url: z.string().url().max(2048) })
+                .object({
+                video_url: z
+                    .string()
+                    .url()
+                    .max(2048)
+                    .refine((value) => {
+                    try {
+                        const parsed = new URL(value);
+                        return (parsed.pathname.includes('/uploads/files/') &&
+                            String(parsed.searchParams.get('mime') ?? '')
+                                .trim()
+                                .toLowerCase() === 'video/mp4');
+                    }
+                    catch {
+                        return false;
+                    }
+                }, 'video_url must point to an uploaded mp4 file'),
+            })
                 .safeParse(request.body);
             if (!body.success) {
                 reply.code(400);
@@ -1180,7 +1214,7 @@ export async function accountRoutes(app) {
                         wallet_mode: activeRole === ACCOUNT_ROLE_BUSINESS ? 'CAMPAIGN_ONLY' : 'STANDARD',
                         wallet_notice: activeRole === ACCOUNT_ROLE_BUSINESS
                             ? 'Use wallet balance for YO Uganda deposits, campaign funding, and withdrawals.'
-                            : 'Withdraw from UGX 10,000.',
+                            : 'Withdraw any available wallet balance from UGX 1 upward.',
                     }
                     : wallet,
                 txns: txnsRes.rows,
@@ -1336,13 +1370,6 @@ export async function accountRoutes(app) {
                 return { error: 'missing_mobile_money_network' };
             }
             const amount = parsed.data.amount;
-            if (amount < MIN_WALLET_WITHDRAW_UGX) {
-                reply.code(400);
-                return {
-                    error: 'minimum_withdrawal_not_met',
-                    detail: `Minimum withdrawal amount is UGX ${MIN_WALLET_WITHDRAW_UGX}.`,
-                };
-            }
             const lockedWalletRes = await client.query(`SELECT * FROM wallets WHERE id=$1 FOR UPDATE`, [wallet.id]);
             const lockedWallet = lockedWalletRes.rows[0];
             const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);

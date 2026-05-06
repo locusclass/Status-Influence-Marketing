@@ -1,7 +1,6 @@
 import { CreateVerificationSessionSchema, PlatformAdapterSchema, SubmitProofSchema, } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
-import { JobRepo } from '../repositories/jobRepo.js';
 import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from '../utils.js';
 import { randomInt } from 'crypto';
 import { config } from '../config.js';
@@ -148,15 +147,15 @@ function hasDeadlinePassed(raw) {
 function isAllowedProofVideoUrl(value) {
     if (value.startsWith('/uploads/files/') || value.startsWith('/api/uploads/files/')) {
         const parsed = new URL(value, 'http://local.test');
-        const mime = String(parsed.searchParams.get('mime') ?? '');
-        return mime.startsWith('video/');
+        const mime = String(parsed.searchParams.get('mime') ?? '').trim().toLowerCase();
+        return mime === 'video/mp4';
     }
     try {
         const parsed = new URL(value);
         if (!parsed.pathname.includes('/uploads/files/'))
             return false;
-        const mime = String(parsed.searchParams.get('mime') ?? '');
-        if (!mime.startsWith('video/'))
+        const mime = String(parsed.searchParams.get('mime') ?? '').trim().toLowerCase();
+        if (mime !== 'video/mp4')
             return false;
         if (!config.apiBaseUrl)
             return true;
@@ -207,7 +206,6 @@ export async function verificationRoutes(app) {
         await ensureVerificationRoutesSchema();
     });
     const verificationRepo = new VerificationRepo();
-    const jobRepo = new JobRepo();
     app.post('/verification/sessions', { preHandler: [app.authenticate] }, async (request, reply) => {
         const body = CreateVerificationSessionSchema.parse(request.body);
         const authUser = request.user?.sub;
@@ -362,7 +360,6 @@ export async function verificationRoutes(app) {
                 meta: body.client_meta ?? null
             });
             await verificationRepo.insertDeviceFingerprint(client, authUser, fingerprintHash);
-            await jobRepo.enqueue(client, 'VERIFY_PROOF', { proof_id: created.id });
             return created;
         });
         if (proof.error) {
