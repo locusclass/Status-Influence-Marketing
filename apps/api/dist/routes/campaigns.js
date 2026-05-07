@@ -231,6 +231,7 @@ function buildConfirmedEscrowEvidenceSql(campaignAlias, escrowAlias) {
   `;
 }
 async function hasConfirmedEscrowFunding(client, campaignId) {
+    await ensureCampaignExecutionMetaColumn(client);
     const fundingRes = await client.query(`
     SELECT EXISTS (
       SELECT 1
@@ -312,6 +313,12 @@ async function ensureCampaignDraftsTable(client) {
     BEFORE INSERT OR UPDATE ON campaign_creation_drafts
     FOR EACH ROW
     EXECUTE FUNCTION sync_campaign_creation_draft_owner_columns()
+  `);
+}
+async function ensureCampaignExecutionMetaColumn(client) {
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS execution_meta JSONB
   `);
 }
 function extractContractReissueMeta(executionMeta) {
@@ -1460,6 +1467,7 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
     if (campaignIds.length === 0) {
         return new Map();
     }
+    await ensureCampaignExecutionMetaColumn(client);
     const statusRes = await client.query(`
     WITH
     scope AS (
@@ -1468,6 +1476,7 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
         c.id AS campaign_id,
         c.parent_campaign_id,
         c.bundle_root_campaign_id,
+        c.execution_meta,
         ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id,
         c.campaign_bundle_id,
         c.status AS campaign_status,
