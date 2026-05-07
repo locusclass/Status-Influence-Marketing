@@ -39,6 +39,10 @@ import {
   createUserNotifications,
   ensureUserSignalSchema,
 } from '../services/userSignals.js';
+import {
+  buildActiveViewerVerificationJoin,
+  buildViewerVerificationFields,
+} from '../services/viewerVerification.js';
 
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
@@ -1122,11 +1126,13 @@ async function findAmbassadorById(client: any, ambassadorId: string) {
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
     WHERE (u.id::text = $1 OR COALESCE(NULLIF(u.public_id, ''), '') = $1)
       AND u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
@@ -1156,11 +1162,13 @@ async function findAmbassadorByPhone(client: any, rawPhone: string) {
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
     WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($1::text[])
       AND u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
@@ -1223,11 +1231,13 @@ async function findAmbassadorBySearch(client: any, rawQuery: string) {
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
     WHERE u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
       AND (
         LOWER(${fullNameSelect}) = LOWER($1)
@@ -4924,10 +4934,12 @@ export async function campaignRoutes(app: FastifyInstance) {
           COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${buildViewerVerificationFields()},
           ${fullNameSelect} AS full_name,
           COALESCE(p.avatar_url, '') AS avatar_url
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${buildActiveViewerVerificationJoin('u')}
         WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
           AND u.status = 'ACTIVE'
           AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'

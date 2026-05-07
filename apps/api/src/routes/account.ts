@@ -48,6 +48,10 @@ import {
   hasYoClientCredentials,
   hasYoEncryptionKey,
 } from '../config.js';
+import {
+  buildActiveViewerVerificationJoin,
+  buildViewerVerificationFields,
+} from '../services/viewerVerification.js';
 
 const roleInputSchema = z
   .string()
@@ -630,6 +634,7 @@ export async function accountRoutes(app: FastifyInstance) {
           COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${buildViewerVerificationFields()},
           ${policyAcceptanceSelectSql('u')},
           u.last_login_at,
           u.last_seen_at,
@@ -646,6 +651,7 @@ export async function accountRoutes(app: FastifyInstance) {
         LEFT JOIN user_profiles p ON p.user_id = u.id
         LEFT JOIN countries country_meta ON country_meta.id = u.country_id
         LEFT JOIN divisions division_meta ON division_meta.id = u.division_id
+        ${buildActiveViewerVerificationJoin('u')}
         LEFT JOIN LATERAL (
           SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS engagements_24h
           FROM proofs pr

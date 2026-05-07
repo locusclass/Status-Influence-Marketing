@@ -82,6 +82,28 @@ import {
   releaseAdminOperationTaskClaim,
   resolveAdminOperationTaskByEntity,
 } from '../services/adminOperations.js';
+import {
+  ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS,
+  ADMIN_HANDLER_JAZ_ROOM_KEY,
+  cleanupAdminHandlerJaz,
+  createAdminHandlerJazMessage,
+  createAdminHandlerJazSignalEvent,
+  deactivateAdminHandlerJazPresence,
+  ensureAdminHandlerJazSchema,
+  listAdminHandlerJazMessages,
+  listAdminHandlerJazParticipants,
+  listAdminHandlerJazSignalEvents,
+  loadAdminHandlerJazIdentity,
+  maxLiveCursor,
+  parseLiveCursor,
+  timestampText,
+  upsertAdminHandlerJazIdentity,
+  upsertAdminHandlerJazPresence,
+} from '../services/adminHandlerJaz.js';
+import {
+  resolveMediaUploadError,
+  storeMultipartAttachmentFile,
+} from '../services/mediaUploads.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z
@@ -116,6 +138,43 @@ const UpdateUserContractPrivilegeSchema = z.object({
 
 const ResetPasswordSchema = z.object({
   password: z.string().min(8)
+});
+
+const HandlerJazIdentitySchema = z.object({
+  handle: z.string().trim().min(2).max(32),
+});
+
+const HandlerJazPresenceSchema = z.object({
+  handle: z.string().trim().min(2).max(32).optional(),
+  current_pane: z.string().trim().min(1).max(64).optional(),
+  is_room_open: z.boolean().optional(),
+  is_minimized: z.boolean().optional(),
+  in_call: z.boolean().optional(),
+  call_mode: z.enum(['NONE', 'AUDIO', 'VIDEO']).optional(),
+  screen_share_active: z.boolean().optional(),
+  call_session_id: z.string().trim().max(128).optional().nullable(),
+});
+
+const HandlerJazMessageSchema = z.object({
+  body: z.string().trim().max(4000).default(''),
+  attachment_url: z.string().trim().max(2048).optional(),
+  attachment_name: z.string().trim().max(255).optional(),
+  attachment_mime_type: z.string().trim().max(255).optional(),
+}).refine(
+  (value) =>
+    value.body.trim().length > 0 ||
+    (typeof value.attachment_url === 'string' &&
+      value.attachment_url.trim().length > 0),
+  {
+    message: 'A message body or attachment is required.',
+    path: ['body'],
+  }
+);
+
+const HandlerJazSignalSchema = z.object({
+  event_type: z.string().trim().min(2).max(80),
+  target_user_id: z.string().uuid().optional().nullable(),
+  payload: z.record(z.string(), z.unknown()).default({}),
 });
 
 const UpdateProofSchema = z.object({
@@ -1054,6 +1113,115 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
   return labels.length > 0 ? labels.join(', ') : 'campaign settings';
 }
 
+function resolveAdminRequestUserId(request: any) {
+  const authSub = String((request.user as any)?.sub ?? '').trim();
+  return authSub === 'ariaka-access'
+    ? '00000000-0000-0000-0000-000000000000'
+    : authSub;
+}
+
+function buildDefaultHandlerJazHandle(access: DashboardAccessContext) {
+  const rawAccess = access as DashboardAccessContext & {
+    full_name?: string;
+    phone?: string;
+  };
+  const seeds = [
+    rawAccess.full_name,
+    access.email,
+    rawAccess.phone,
+    access.user_id,
+  ]
+    .map((value) => String(value ?? '').trim())
+    .filter((value) => value.length > 0);
+  const base = seeds[0] ?? 'handler';
+  const normalized = base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24);
+  if (normalized.length >= 2) {
+    return normalized;
+  }
+  return `handler_${String(access.user_id ?? 'admin').slice(0, 6)}`;
+}
+
+async function resolveHandlerJazHandle(
+  client: any,
+  access: DashboardAccessContext,
+  overrideHandle?: string | null,
+  options: {
+    allowFallbackDefault?: boolean;
+  } = {}
+) {
+  const explicit = String(overrideHandle ?? '').trim();
+  if (explicit.length >= 2) {
+    const saved = await upsertAdminHandlerJazIdentity(client, {
+      userId: access.user_id,
+      handle: explicit,
+    });
+    return String(saved.handle ?? explicit);
+  }
+  const existing = await loadAdminHandlerJazIdentity(client, access.user_id);
+  if (existing?.handle) {
+    return String(existing.handle);
+  }
+  if (options.allowFallbackDefault === true) {
+    return buildDefaultHandlerJazHandle(access);
+  }
+  return null;
+}
+
+async function loadHandlerJazSnapshot(
+  client: any,
+  access: DashboardAccessContext,
+  cursor?: string | null
+) {
+  const rawAccess = access as DashboardAccessContext & {
+    full_name?: string;
+    phone?: string;
+  };
+  await cleanupAdminHandlerJaz(client);
+  const participants = await listAdminHandlerJazParticipants(client);
+  const messages = await listAdminHandlerJazMessages(client, {
+    since: cursor ?? null,
+  });
+  const signals = await listAdminHandlerJazSignalEvents(client, access.user_id, {
+    since: cursor ?? null,
+  });
+  const meIdentity = await loadAdminHandlerJazIdentity(client, access.user_id);
+  const availableCount = participants.where((item: any) => item.is_available === true).length;
+  const activeCallCount = participants.where((item: any) => item.in_call === true).length;
+  const nextCursor = maxLiveCursor([
+    ...messages.map((item: any) => item.created_at),
+    ...signals.map((item: any) => item.created_at),
+    ...participants.map((item: any) => item.updated_at),
+  ]);
+
+  return {
+    room: {
+      key: ADMIN_HANDLER_JAZ_ROOM_KEY,
+      message_ttl_hours: ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS,
+      available_count: availableCount,
+      active_call_count: activeCallCount,
+    },
+    me: {
+      user_id: access.user_id,
+      display_name:
+        String(rawAccess.full_name ?? '').trim() ||
+        String(access.email ?? '').trim() ||
+        String(rawAccess.phone ?? '').trim() ||
+        'Admin',
+      handle:
+        String(meIdentity?.handle ?? '').trim() || buildDefaultHandlerJazHandle(access),
+      has_identity: Boolean(String(meIdentity?.handle ?? '').trim()),
+    },
+    participants,
+    messages,
+    signals,
+    cursor: nextCursor,
+  };
+}
+
 export async function adminRoutes(app: FastifyInstance) {
   const jobRepo = new JobRepo();
   const paymentRepo = new PaymentRepo();
@@ -1067,6 +1235,7 @@ export async function adminRoutes(app: FastifyInstance) {
         await ensureContractParticipantColumns(client);
         await ensureProofReviewColumns(client);
         await ensureAdminOperationsSchema(client);
+        await ensureAdminHandlerJazSchema(client);
       }).catch((error) => {
         schemaReadyPromise = null;
         throw error;
@@ -3463,6 +3632,8 @@ export async function adminRoutes(app: FastifyInstance) {
            pvr.approved_viewer_count,
            pvr.admin_note,
            pvr.reviewed_at,
+           pvr.expires_at,
+           pvr.video_expires_at,
            pvr.created_at,
            u.full_name AS user_name,
            u.email     AS user_email,
@@ -3500,7 +3671,11 @@ export async function adminRoutes(app: FastifyInstance) {
         reply.code(404);
         return { error: 'verification_not_found' };
       }
-      if (rec.status !== 'PENDING') {
+      const isExpiredApproved =
+        rec.status === 'APPROVED' &&
+        rec.expires_at != null &&
+        new Date(rec.expires_at).getTime() < Date.now();
+      if (rec.status !== 'PENDING' && !isExpiredApproved) {
         reply.code(409);
         return { error: 'already_reviewed' };
       }
@@ -3528,19 +3703,18 @@ export async function adminRoutes(app: FastifyInstance) {
         [rec.resolved_user_id, body.viewer_count]
       );
 
-      // Notify the user
-      await client.query(
-        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'ACCOUNT_VERIFIED',
-                 'Viewer count verified',
-                 $2,
-                 now())
-         ON CONFLICT DO NOTHING`,
-        [
-          rec.resolved_user_id,
-          `Your WhatsApp status viewer count has been set to ${body.viewer_count} views. You can now accept campaigns.`,
-        ]
-      );
+      await createUserNotifications(client, [rec.resolved_user_id], {
+        category: 'ACCOUNT_VERIFICATION',
+        title: 'Viewer count verified',
+        body: `Your WhatsApp status viewer count was approved at ${body.viewer_count} views. This verification stays active until ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}.`,
+        actorId: adminUserId,
+        targetType: 'AMBASSADOR_VERIFICATION',
+        targetId: params.id,
+        meta: {
+          viewer_count: body.viewer_count,
+          verification_status: 'APPROVED',
+        },
+      });
 
       await logAudit(client, adminUserId, 'APPROVE_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { viewer_count: body.viewer_count });
       await resolveAdminOperationTaskByEntity(
@@ -3583,20 +3757,20 @@ export async function adminRoutes(app: FastifyInstance) {
          WHERE id=$1`,
         [params.id, note, adminUserId]
       );
-      await client.query(
-        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'ACCOUNT_VERIFICATION_REJECTED',
-                 'Verification recording rejected',
-                 $2,
-                 now())
-         ON CONFLICT DO NOTHING`,
-        [
-          rec.user_id,
-          note
-            ? `Your verification recording was rejected: ${note}. Please re-submit a clearer recording.`
-            : 'Your verification recording was rejected. Please re-submit a clearer recording showing your viewer list.',
-        ]
-      );
+      await createUserNotifications(client, [rec.user_id], {
+        category: 'ACCOUNT_VERIFICATION',
+        title: 'Verification recording rejected',
+        body: note
+          ? `Your verification recording was rejected: ${note}. Please re-submit a clearer recording.`
+          : 'Your verification recording was rejected. Please re-submit a clearer recording showing your viewer list.',
+        actorId: adminUserId,
+        targetType: 'AMBASSADOR_VERIFICATION',
+        targetId: params.id,
+        meta: {
+          verification_status: 'REJECTED',
+          admin_note: note,
+        },
+      });
       await logAudit(client, adminUserId, 'REJECT_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { admin_note: note });
       await resolveAdminOperationTaskByEntity(
         client,
@@ -3604,6 +3778,241 @@ export async function adminRoutes(app: FastifyInstance) {
         params.id,
         adminUserId
       );
+      return { ok: true };
+    });
+  });
+
+  // ── Handler's Jaz admin collaboration room ────────────────────────────────
+
+  app.get('/admin/handler-jaz/room', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      await ensureAdminHandlerJazSchema(client);
+      return loadHandlerJazSnapshot(client, access);
+    });
+  });
+
+  app.get('/admin/handler-jaz/live', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const query = (request.query ?? {}) as { cursor?: string };
+    const cursor = parseLiveCursor(query.cursor);
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      await ensureAdminHandlerJazSchema(client);
+      return loadHandlerJazSnapshot(client, access, cursor);
+    });
+  });
+
+  app.post('/admin/handler-jaz/identity', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const parsed = HandlerJazIdentitySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      const identity = await upsertAdminHandlerJazIdentity(client, {
+        userId: access.user_id,
+        handle: parsed.data.handle,
+      });
+      await upsertAdminHandlerJazPresence(client, {
+        userId: access.user_id,
+        handle: parsed.data.handle,
+        currentPane: 'HANDLER_JAZ',
+        isRoomOpen: true,
+      });
+      return {
+        identity: {
+          user_id: String(identity.user_id ?? access.user_id),
+          handle: String(identity.handle ?? parsed.data.handle),
+          updated_at: timestampText(identity.updated_at),
+        },
+      };
+    });
+  });
+
+  app.post('/admin/handler-jaz/presence', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const parsed = HandlerJazPresenceSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      const handle = await resolveHandlerJazHandle(client, access, parsed.data.handle);
+      if (!handle) {
+        reply.code(409);
+        return { error: 'handler_jaz_identity_required' };
+      }
+      const presence = await upsertAdminHandlerJazPresence(client, {
+        userId: access.user_id,
+        handle,
+        currentPane: parsed.data.current_pane,
+        isRoomOpen: parsed.data.is_room_open,
+        isMinimized: parsed.data.is_minimized,
+        inCall: parsed.data.in_call,
+        callMode: parsed.data.call_mode,
+        screenShareActive: parsed.data.screen_share_active,
+        callSessionId: parsed.data.call_session_id,
+      });
+      const snapshot = await loadHandlerJazSnapshot(client, access);
+      return {
+        presence: {
+          user_id: String(presence.user_id ?? access.user_id),
+          handle: String(presence.handle ?? handle),
+          current_pane: String(presence.current_pane ?? 'OVERVIEW'),
+          in_call: presence.in_call === true,
+          call_mode: String(presence.call_mode ?? 'NONE'),
+          screen_share_active: presence.screen_share_active === true,
+          updated_at: timestampText(presence.updated_at),
+          last_seen_at: timestampText(presence.last_seen_at),
+        },
+        room: snapshot.room,
+        participants: snapshot.participants,
+        cursor: snapshot.cursor,
+      };
+    });
+  });
+
+  app.post('/admin/handler-jaz/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const isMultipart = String(request.headers['content-type'] ?? '')
+      .toLowerCase()
+      .includes('multipart/form-data');
+
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+
+      let payload: any = {};
+      let attachmentUrl: string | null = null;
+      let attachmentName: string | null = null;
+      let attachmentMimeType: string | null = null;
+
+      if (isMultipart) {
+        const fields: Record<string, string> = {};
+        try {
+          for await (const part of request.parts()) {
+            if (part.type === 'file' && attachmentUrl == null) {
+              const uploaded = await storeMultipartAttachmentFile({
+                part,
+                prefix: 'handler-jaz-attachment',
+                maxBytes: 50 * 1024 * 1024,
+              });
+              attachmentUrl = uploaded.fileUrl;
+              attachmentName = uploaded.fileName;
+              attachmentMimeType = uploaded.mimeType;
+            } else if (part.type === 'field') {
+              fields[part.fieldname] = String(part.value ?? '');
+            }
+          }
+        } catch (error) {
+          const handled = resolveMediaUploadError(error);
+          if (handled) {
+            reply.code(handled.statusCode);
+            return handled.payload;
+          }
+          throw error;
+        }
+        payload = {
+          body: fields.body ?? '',
+          attachment_url: attachmentUrl ?? undefined,
+          attachment_name: attachmentName ?? fields.attachment_name,
+          attachment_mime_type: attachmentMimeType ?? fields.attachment_mime_type,
+        };
+      } else {
+        payload = request.body ?? {};
+      }
+
+      const parsed = HandlerJazMessageSchema.safeParse(payload);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+
+      const handle = await resolveHandlerJazHandle(client, access, null);
+      if (!handle) {
+        reply.code(409);
+        return { error: 'handler_jaz_identity_required' };
+      }
+
+      await upsertAdminHandlerJazPresence(client, {
+        userId: access.user_id,
+        handle,
+        currentPane: 'HANDLER_JAZ',
+        isRoomOpen: true,
+      });
+      const message = await createAdminHandlerJazMessage(client, {
+        senderUserId: access.user_id,
+        senderHandle: handle,
+        body: parsed.data.body,
+        attachmentUrl: parsed.data.attachment_url,
+        attachmentName: parsed.data.attachment_name,
+        attachmentMimeType: parsed.data.attachment_mime_type,
+      });
+      return { message };
+    });
+  });
+
+  app.post('/admin/handler-jaz/signals', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const parsed = HandlerJazSignalSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: 'validation_failed', issues: parsed.error.issues };
+    }
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      const handle = await resolveHandlerJazHandle(client, access, null);
+      if (!handle) {
+        reply.code(409);
+        return { error: 'handler_jaz_identity_required' };
+      }
+      await upsertAdminHandlerJazPresence(client, {
+        userId: access.user_id,
+        handle,
+        currentPane: 'HANDLER_JAZ',
+        isRoomOpen: true,
+      });
+      const signal = await createAdminHandlerJazSignalEvent(client, {
+        senderUserId: access.user_id,
+        senderHandle: handle,
+        eventType: parsed.data.event_type,
+        targetUserId: parsed.data.target_user_id,
+        payload: parsed.data.payload,
+      });
+      return { signal };
+    });
+  });
+
+  app.post('/admin/handler-jaz/leave', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    return withTransaction(async (client) => {
+      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+      if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      await deactivateAdminHandlerJazPresence(client, access.user_id);
       return { ok: true };
     });
   });
