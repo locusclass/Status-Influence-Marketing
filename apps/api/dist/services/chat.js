@@ -182,8 +182,6 @@ export async function ensureChatSchema(client) {
       status TEXT NOT NULL DEFAULT '${CHAT_OFFER_STATUS_PENDING}',
       responded_by UUID REFERENCES users(id) ON DELETE SET NULL,
       responded_at TIMESTAMPTZ,
-      media_url TEXT,
-      media_type TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
