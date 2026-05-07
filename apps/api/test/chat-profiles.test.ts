@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildAuthClaims } from '../src/services/roles.js';
+import {
+  CURRENT_PLATFORM_POLICY_VERSION,
+  CURRENT_PRIVACY_POLICY_VERSION,
+  ensurePolicyAcceptanceColumns,
+} from '../src/services/policies.js';
 import { applySchema, getTestPool } from './db.js';
 
 const pool = getTestPool();
@@ -8,36 +13,21 @@ let app: any;
 
 async function resetDatabase() {
   if (!pool) return;
-  await pool.query(`
-    TRUNCATE TABLE
-      ambassador_profile_reviews,
-      chat_offer_group_votes,
-      chat_offer_events,
-      chat_group_price_overrides,
-      chat_group_deal_threads,
-      chat_group_memberships,
-      chat_groups,
-      chat_typing_states,
-      chat_messages,
-      chat_thread_members,
-      chat_threads,
-      proofs,
-      verification_sessions,
-      payouts,
-      earnings_ledger,
-      escrow_ledger,
-      contracts,
-      campaigns,
-      wallet_txns,
-      wallets,
-      division_admins,
-      country_admins,
-      divisions,
-      users,
-      countries
-    CASCADE
+  const tablesRes = await pool.query(`
+    SELECT tablename
+    FROM pg_tables
+    WHERE schemaname = 'public'
+    ORDER BY tablename
   `);
+  const tables = tablesRes.rows
+    .map((row: any) => String(row.tablename ?? '').trim())
+    .filter((name: string) => name.length > 0);
+  if (tables.length > 0) {
+    const quoted = tables.map((name: string) => `"${name}"`).join(', ');
+    await pool.query(`TRUNCATE TABLE ${quoted} RESTART IDENTITY CASCADE`);
+  }
   await applySchema(pool);
+  await ensurePolicyAcceptanceColumns(pool);
 }
 
 async function insertUser(input: {
@@ -71,6 +61,20 @@ async function insertUser(input: {
     ]
   );
   return result.rows[0];
+}
+
+async function acceptRequiredPolicies(userId: string) {
+  await pool!.query(
+    `
+    UPDATE users
+    SET privacy_policy_accepted_version = $2,
+        privacy_policy_accepted_at = NOW(),
+        platform_policy_accepted_version = $3,
+        platform_policy_accepted_at = NOW()
+    WHERE id = $1
+    `,
+    [userId, CURRENT_PRIVACY_POLICY_VERSION, CURRENT_PLATFORM_POLICY_VERSION]
+  );
 }
 
 async function insertCompletedContract(businessId: string, ambassadorId: string) {
@@ -182,11 +186,12 @@ describe('Chat ambassador profiles', () => {
       activeRole: 'AMBASSADOR',
     });
     await insertCompletedContract(business.id, ambassador.id);
+    await acceptRequiredPolicies(String(business.id));
     const token = app.jwt.sign(buildAuthClaims(business));
 
     const profileResponse = await app.inject({
       method: 'GET',
-      url: `/chat/profiles/${ambassador.id}`,
+      url: `/api/chat/profiles/${ambassador.id}`,
       headers: { authorization: `Bearer ${token}` },
     });
 
@@ -203,7 +208,7 @@ describe('Chat ambassador profiles', () => {
 
     const reviewResponse = await app.inject({
       method: 'POST',
-      url: `/chat/profiles/${ambassador.id}/reviews`,
+      url: `/api/chat/profiles/${ambassador.id}/reviews`,
       headers: { authorization: `Bearer ${token}` },
       payload: {
         rating: 5,
@@ -223,7 +228,7 @@ describe('Chat ambassador profiles', () => {
 
     const refreshedProfile = await app.inject({
       method: 'GET',
-      url: `/chat/profiles/${ambassador.id}`,
+      url: `/api/chat/profiles/${ambassador.id}`,
       headers: { authorization: `Bearer ${token}` },
     });
 
@@ -258,11 +263,12 @@ describe('Chat ambassador profiles', () => {
       role: 'AMBASSADOR',
       activeRole: 'AMBASSADOR',
     });
+    await acceptRequiredPolicies(String(business.id));
     const token = app.jwt.sign(buildAuthClaims(business));
 
     const response = await app.inject({
       method: 'POST',
-      url: '/campaigns',
+      url: '/api/campaigns',
       headers: { authorization: `Bearer ${token}` },
       payload: buildPrivateCampaignPayload(ambassador.id),
     });
@@ -274,3 +280,7 @@ describe('Chat ambassador profiles', () => {
     });
   });
 });
+
+
+
+

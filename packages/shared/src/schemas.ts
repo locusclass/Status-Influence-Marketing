@@ -35,6 +35,7 @@ export const CampaignBundleItemSchema = z
     end_date: z.string(),
     media_type: MediaTypeSchema,
     media_url: z.string().url().optional(),
+    media_urls: z.array(z.string().url()).max(8).optional(),
     media_text: z.string().trim().min(3).max(4000).optional(),
     execution_meta: z.record(z.any()).optional(),
     impression_target: z.number().int().min(1).optional(),
@@ -46,7 +47,12 @@ export const CampaignBundleItemSchema = z
   })
   .superRefine((value, ctx) => {
     const hasMediaUrl =
-      typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+      (typeof value.media_url === 'string' &&
+        value.media_url.trim().length > 0) ||
+      (Array.isArray(value.media_urls) &&
+        value.media_urls.some(
+          (entry) => String(entry ?? '').trim().length > 0
+        ));
     const hasMediaText =
       typeof value.media_text === 'string' &&
       value.media_text.trim().length > 0;
@@ -78,6 +84,7 @@ export const CreateCampaignSchema = z
     end_date: z.string().optional(),
     media_type: MediaTypeSchema.optional(),
     media_url: z.string().url().optional(),
+    media_urls: z.array(z.string().url()).max(8).optional(),
     media_text: z.string().trim().min(3).max(4000).optional(),
     execution_meta: z.record(z.any()).optional(),
     impression_target: z.number().int().min(1).optional(),
@@ -95,7 +102,12 @@ export const CreateCampaignSchema = z
     const hasTitle =
       typeof value.title === 'string' && value.title.trim().length > 0;
     const hasMediaUrl =
-      typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+      (typeof value.media_url === 'string' &&
+        value.media_url.trim().length > 0) ||
+      (Array.isArray(value.media_urls) &&
+        value.media_urls.some(
+          (entry) => String(entry ?? '').trim().length > 0
+        ));
     const hasMediaText =
       typeof value.media_text === 'string' &&
       value.media_text.trim().length > 0;
@@ -205,3 +217,5 @@ export const TrustScoreEventSchema = z.object({
   event_type: z.enum(['VERIFIED', 'REJECTED', 'MANUAL_REVIEW']),
   delta: z.number().int()
 });
+
+

@@ -104,6 +104,8 @@ import {
   resolveMediaUploadError,
   storeMultipartAttachmentFile,
 } from '../services/mediaUploads.js';
+import { ensureUserProfilesTable } from '../services/userProfiles.js';
+import { ensureViewerVerificationSchema } from '../services/viewerVerification.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z
@@ -1189,8 +1191,8 @@ async function loadHandlerJazSnapshot(
     since: cursor ?? null,
   });
   const meIdentity = await loadAdminHandlerJazIdentity(client, access.user_id);
-  const availableCount = participants.where((item: any) => item.is_available === true).length;
-  const activeCallCount = participants.where((item: any) => item.in_call === true).length;
+  const availableCount = participants.filter((item: any) => item.is_available === true).length;
+  const activeCallCount = participants.filter((item: any) => item.in_call === true).length;
   const nextCursor = maxLiveCursor([
     ...messages.map((item: any) => item.created_at),
     ...signals.map((item: any) => item.created_at),
@@ -1236,6 +1238,8 @@ export async function adminRoutes(app: FastifyInstance) {
         await ensureProofReviewColumns(client);
         await ensureAdminOperationsSchema(client);
         await ensureAdminHandlerJazSchema(client);
+        await ensureUserProfilesTable(client);
+        await ensureViewerVerificationSchema(client);
       }).catch((error) => {
         schemaReadyPromise = null;
         throw error;
@@ -3712,7 +3716,10 @@ export async function adminRoutes(app: FastifyInstance) {
         targetId: params.id,
         meta: {
           viewer_count: body.viewer_count,
+          verified_viewer_count: body.viewer_count,
           verification_status: 'APPROVED',
+          verification_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+          admin_note: body.admin_note ?? null,
         },
       });
 
@@ -3769,6 +3776,7 @@ export async function adminRoutes(app: FastifyInstance) {
         meta: {
           verification_status: 'REJECTED',
           admin_note: note,
+          requires_resubmission: true,
         },
       });
       await logAudit(client, adminUserId, 'REJECT_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { admin_note: note });
@@ -5526,3 +5534,7 @@ export async function adminRoutes(app: FastifyInstance) {
     );
   }
 }
+
+
+
+

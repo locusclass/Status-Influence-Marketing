@@ -48,6 +48,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     end_date: z.ZodString;
     media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
     media_url: z.ZodOptional<z.ZodString>;
+    media_urls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     media_text: z.ZodOptional<z.ZodString>;
     execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
     impression_target: z.ZodOptional<z.ZodNumber>;
@@ -72,6 +73,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_user_ids?: string[] | undefined;
     beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -96,6 +98,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_user_ids?: string[] | undefined;
     beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -120,6 +123,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_user_ids?: string[] | undefined;
     beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -144,6 +148,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     beneficiary_user_ids?: string[] | undefined;
     beneficiary_group_id?: string | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -173,6 +178,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         end_date: z.ZodString;
         media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
         media_url: z.ZodOptional<z.ZodString>;
+        media_urls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         media_text: z.ZodOptional<z.ZodString>;
         execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
         impression_target: z.ZodOptional<z.ZodNumber>;
@@ -197,6 +203,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -221,6 +228,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -245,6 +253,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -269,6 +278,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -291,6 +301,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     end_date: z.ZodOptional<z.ZodString>;
     media_type: z.ZodOptional<z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>>;
     media_url: z.ZodOptional<z.ZodString>;
+    media_urls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     media_text: z.ZodOptional<z.ZodString>;
     execution_meta: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
     impression_target: z.ZodOptional<z.ZodNumber>;
@@ -315,6 +326,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -340,6 +352,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -365,6 +378,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -390,6 +404,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -415,6 +430,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -440,6 +456,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;
@@ -465,6 +482,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     end_date?: string | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
+    media_urls?: string[] | undefined;
     media_text?: string | undefined;
     execution_meta?: Record<string, any> | undefined;
     impression_target?: number | undefined;
@@ -490,6 +508,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         beneficiary_user_ids?: string[] | undefined;
         beneficiary_group_id?: string | undefined;
         media_url?: string | undefined;
+        media_urls?: string[] | undefined;
         media_text?: string | undefined;
         execution_meta?: Record<string, any> | undefined;
         impression_target?: number | undefined;

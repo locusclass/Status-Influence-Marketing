@@ -12,6 +12,7 @@ import { ACCOUNT_ROLE_BUSINESS, buildAuthClaims, buildUserSession, canAccessBusi
 import { deleteUserNotification, ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
 import { buildCurrentPolicyDocuments, buildPolicyAcceptanceState, CURRENT_PLATFORM_POLICY_VERSION, CURRENT_PRIVACY_POLICY_VERSION, ensurePolicyAcceptanceColumns, policyAcceptanceSelectSql, } from '../services/policies.js';
 import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
+import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, ensureViewerVerificationSchema, } from '../services/viewerVerification.js';
 const roleInputSchema = z
     .string()
     .trim()
@@ -296,6 +297,7 @@ async function ensureAccountSchema(client) {
     await ensureUserSignalSchema(client);
     await ensureWhatsappColumns(client);
     await ensureUserProfilesTable(client);
+    await ensureViewerVerificationSchema(client);
     await client.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
@@ -500,6 +502,7 @@ export async function accountRoutes(app) {
           COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${buildViewerVerificationFields()},
           ${policyAcceptanceSelectSql('u')},
           u.last_login_at,
           u.last_seen_at,
@@ -516,6 +519,7 @@ export async function accountRoutes(app) {
         LEFT JOIN user_profiles p ON p.user_id = u.id
         LEFT JOIN countries country_meta ON country_meta.id = u.country_id
         LEFT JOIN divisions division_meta ON division_meta.id = u.division_id
+        ${buildActiveViewerVerificationJoin('u')}
         LEFT JOIN LATERAL (
           SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS engagements_24h
           FROM proofs pr
@@ -1061,6 +1065,7 @@ export async function accountRoutes(app) {
         const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
         const deletion = await withTransaction(async (client) => {
             await ensureUserProfilesTable(client);
+            await ensureViewerVerificationSchema(client);
             const rootCampaignRes = await client.query(`
         SELECT id
         FROM campaigns

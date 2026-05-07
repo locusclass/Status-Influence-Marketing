@@ -1,3 +1,5 @@
+import { ensureUserProfilesTable } from './userProfiles.js';
+
 export const ADMIN_HANDLER_JAZ_ROOM_KEY = 'HANDLER_JAZ';
 export const ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS = 24;
 export const ADMIN_HANDLER_JAZ_SIGNAL_TTL_MINUTES = 20;
@@ -6,6 +8,7 @@ export const ADMIN_HANDLER_JAZ_PRESENCE_WINDOW_SECONDS = 45;
 type PresenceMode = 'NONE' | 'AUDIO' | 'VIDEO';
 
 export async function ensureAdminHandlerJazSchema(client: any) {
+  await ensureUserProfilesTable(client);
   await client.query(`
     CREATE TABLE IF NOT EXISTS admin_handler_jaz_identities (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -502,3 +505,4 @@ function normalizePresenceMode(value: unknown): PresenceMode {
   }
   return 'NONE';
 }
+

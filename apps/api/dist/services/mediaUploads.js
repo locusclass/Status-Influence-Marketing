@@ -60,6 +60,49 @@ export async function storeMultipartMediaFile(input) {
         fileUrl: buildStoredUploadUrl(objectName, mimeType),
     };
 }
+export async function storeMultipartAttachmentFile(input) {
+    const part = input.part;
+    if (!part?.file) {
+        throw new Error('missing_file');
+    }
+    const mimeType = String(part.mimetype ?? '').trim().toLowerCase() ||
+        'application/octet-stream';
+    const safeName = sanitizeObjectNameSegment(String(part.filename ?? input.prefix), input.prefix);
+    const objectName = `${input.prefix}-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}-${safeName}`;
+    const sizeLimit = typeof input.maxBytes === 'number'
+        ? input.maxBytes > 0
+            ? input.maxBytes
+            : Number.POSITIVE_INFINITY
+        : 50 * 1024 * 1024;
+    let totalBytes = 0;
+    const passthrough = new PassThrough();
+    const uploadStream = part.file;
+    uploadStream.on('data', (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > sizeLimit) {
+            uploadStream.destroy(new Error('file_too_large'));
+        }
+    });
+    const uploadPromise = uploadToFirebaseStorage({
+        objectName,
+        mimeType,
+        body: passthrough,
+    });
+    uploadStream.on('error', (error) => {
+        passthrough.destroy(error);
+    });
+    uploadStream.pipe(passthrough);
+    await uploadPromise;
+    return {
+        objectName,
+        mimeType,
+        sizeBytes: totalBytes,
+        fileName: safeName,
+        fileUrl: buildStoredUploadUrl(objectName, mimeType),
+    };
+}
 export function resolveMediaUploadError(error) {
     const message = String(error?.message ?? '');
     if (message === 'missing_file') {

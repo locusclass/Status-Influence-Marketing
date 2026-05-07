@@ -51,6 +51,7 @@ import {
 import {
   buildActiveViewerVerificationJoin,
   buildViewerVerificationFields,
+  ensureViewerVerificationSchema,
 } from '../services/viewerVerification.js';
 
 const roleInputSchema = z
@@ -398,6 +399,7 @@ async function ensureAccountSchema(client: any) {
   await ensureUserSignalSchema(client);
   await ensureWhatsappColumns(client);
   await ensureUserProfilesTable(client);
+  await ensureViewerVerificationSchema(client);
   await client.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
@@ -1359,6 +1361,7 @@ export async function accountRoutes(app: FastifyInstance) {
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const deletion = await withTransaction(async (client) => {
       await ensureUserProfilesTable(client);
+  await ensureViewerVerificationSchema(client);
 
       const rootCampaignRes = await client.query(
         `
@@ -2253,3 +2256,6 @@ export async function accountRoutes(app: FastifyInstance) {
     });
   });
 }
+
+
+

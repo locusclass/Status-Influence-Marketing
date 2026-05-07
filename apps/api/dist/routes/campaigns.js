@@ -11,6 +11,8 @@ import { buildPhoneLookupVariants, normalizePhoneSearchInput, splitSearchTerms, 
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeActiveRole, } from '../services/roles.js';
 import { createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
+import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, ensureViewerVerificationSchema, } from '../services/viewerVerification.js';
+import { ensureUserProfilesTable } from '../services/userProfiles.js';
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
@@ -651,6 +653,26 @@ async function ensureCampaignColumns(client) {
       ADD COLUMN IF NOT EXISTS campaign_burst_mode BOOLEAN NOT NULL DEFAULT FALSE
   `);
     await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'APPROVED'
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approval_deadline TIMESTAMPTZ
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approved_by_user_id UUID REFERENCES users(id)
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_approval_status_idx
+    ON campaigns (approval_status, approval_deadline)
+  `);
+    await client.query(`
     CREATE INDEX IF NOT EXISTS campaigns_campaign_bundle_id_idx
     ON campaigns (campaign_bundle_id)
   `);
@@ -790,11 +812,13 @@ async function findAmbassadorById(client, ambassadorId) {
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
     WHERE (u.id::text = $1 OR COALESCE(NULLIF(u.public_id, ''), '') = $1)
       AND u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
@@ -820,11 +844,13 @@ async function findAmbassadorByPhone(client, rawPhone) {
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
     WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($1::text[])
       AND u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
@@ -875,11 +901,13 @@ async function findAmbassadorBySearch(client, rawQuery) {
       COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
       COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
     WHERE u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
       AND (
         LOWER(${fullNameSelect}) = LOWER($1)
@@ -1645,6 +1673,8 @@ export async function campaignRoutes(app) {
             schemaReadyPromise = withTransaction(async (client) => {
                 await ensureCampaignColumns(client);
                 await ensureChatSchema(client);
+                await ensureUserProfilesTable(client);
+                await ensureViewerVerificationSchema(client);
             }).catch((error) => {
                 schemaReadyPromise = null;
                 throw error;
@@ -3718,10 +3748,12 @@ export async function campaignRoutes(app) {
           COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
           COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
           COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${buildViewerVerificationFields()},
           ${fullNameSelect} AS full_name,
           COALESCE(p.avatar_url, '') AS avatar_url
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${buildActiveViewerVerificationJoin('u')}
         WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
           AND u.status = 'ACTIVE'
           AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'

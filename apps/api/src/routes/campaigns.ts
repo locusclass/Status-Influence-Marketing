@@ -42,7 +42,9 @@ import {
 import {
   buildActiveViewerVerificationJoin,
   buildViewerVerificationFields,
+  ensureViewerVerificationSchema,
 } from '../services/viewerVerification.js';
+import { ensureUserProfilesTable } from '../services/userProfiles.js';
 
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
@@ -934,6 +936,26 @@ async function ensureCampaignColumns(client: any) {
   await client.query(`
     ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS campaign_burst_mode BOOLEAN NOT NULL DEFAULT FALSE
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'APPROVED'
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approval_deadline TIMESTAMPTZ
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ
+  `);
+  await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approved_by_user_id UUID REFERENCES users(id)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_approval_status_idx
+    ON campaigns (approval_status, approval_deadline)
   `);
   await client.query(`
     CREATE INDEX IF NOT EXISTS campaigns_campaign_bundle_id_idx
@@ -2284,6 +2306,8 @@ export async function campaignRoutes(app: FastifyInstance) {
       schemaReadyPromise = withTransaction(async (client) => {
         await ensureCampaignColumns(client);
         await ensureChatSchema(client);
+        await ensureUserProfilesTable(client);
+        await ensureViewerVerificationSchema(client);
       }).catch((error) => {
         schemaReadyPromise = null;
         throw error;
@@ -5177,5 +5201,9 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
   });
 }
+
+
+
+
 
 

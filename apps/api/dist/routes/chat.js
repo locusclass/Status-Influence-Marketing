@@ -8,6 +8,7 @@ import { ensureAmbassadorReviewsSchema, listAmbassadorReviews, loadLatestComplet
 import { buildPhoneLookupVariants, splitSearchTerms, } from '../services/contactLookup.js';
 import { resolveMediaUploadError, storeMultipartMediaFile, } from '../services/mediaUploads.js';
 import { createUserNotifications } from '../services/userSignals.js';
+import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, } from '../services/viewerVerification.js';
 const groupDealThreadSchema = z.object({
     media_url: z.string().url().optional(),
     media_urls: z.array(z.string().url()).min(1).max(8).optional(),
@@ -256,6 +257,10 @@ function serializeUserSummary(row) {
         last_seen_at: timestampText(row?.last_seen_at),
         profile_type: 'USER',
         verified_views_24h: toInt(row?.verified_views_24h),
+        viewer_count_verified: row?.viewer_count_verified === true,
+        verified_viewer_count: toInt(row?.verified_viewer_count),
+        viewer_count_verified_at: timestampText(row?.viewer_count_verified_at),
+        viewer_count_verification_expires_at: timestampText(row?.viewer_count_verification_expires_at),
         max_status_viewers_12h: toInt(row?.max_status_viewers_12h),
         current_business_viewers: toInt(row?.current_business_viewers),
         private_contract_rate_ugx: toInt(row?.private_contract_rate_ugx),
@@ -304,8 +309,10 @@ async function loadUserSummary(client, userId) {
       COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
       COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      ${buildViewerVerificationFields()},
       COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
     FROM users u
+    ${buildActiveViewerVerificationJoin('u')}
     LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(COALESCE(p.observed_views, 0)), 0)::int AS views_24h
       FROM proofs p
