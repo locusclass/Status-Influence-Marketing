@@ -2,6 +2,7 @@ import { PoolClient } from 'pg';
 import {
   ADMIN_MODULE_ADMIN_MANAGEMENT,
   ADMIN_MODULE_OVERVIEW,
+  ADMIN_MODULE_OPERATIONS,
   ADMIN_ROLE_ADMIN,
   ADMIN_ROLE_COUNTRY_ADMIN,
   ADMIN_ROLE_DIVISION_ADMIN,
@@ -191,7 +192,11 @@ function sanitizeAssignedModuleKeys(
 
   for (const raw of moduleKeys) {
     const normalized = normalizeAdminModuleKey(raw);
-    if (!normalized || normalized === ADMIN_MODULE_OVERVIEW) {
+    if (
+      !normalized ||
+      normalized === ADMIN_MODULE_OVERVIEW ||
+      normalized === ADMIN_MODULE_OPERATIONS
+    ) {
       continue;
     }
     if (
@@ -242,7 +247,7 @@ function visibleModulesForAccess(
   }
 
   const base = storedModules.length > 0 ? storedModules : modulesForLegacyRole(legacyRole);
-  return uniqueModules([ADMIN_MODULE_OVERVIEW, ...base]);
+  return uniqueModules([ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ...base]);
 }
 
 function roleForLegacyScope(user: Record<string, unknown>) {

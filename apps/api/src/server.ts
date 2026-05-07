@@ -19,6 +19,7 @@ import {
   ADMIN_MODULE_JOBS,
   ADMIN_MODULE_MANAGER_PAYOUTS,
   ADMIN_MODULE_OVERVIEW,
+  ADMIN_MODULE_OPERATIONS,
   ADMIN_MODULE_PAYOUT_REQUESTS,
   ADMIN_MODULE_PROOFS,
   ADMIN_MODULE_RISK,
@@ -77,6 +78,7 @@ export function buildServer() {
     const normalized = path.startsWith('/api/') ? path.slice(4) : path;
 
     if (normalized === '/admin/overview') return ADMIN_MODULE_OVERVIEW;
+    if (normalized.startsWith('/admin/operations')) return ADMIN_MODULE_OPERATIONS;
     if (normalized.startsWith('/admin/audit')) return ADMIN_MODULE_AUDIT_LOGS;
     if (normalized.startsWith('/admin/finance')) return ADMIN_MODULE_FINANCE;
     if (normalized.startsWith('/admin/verification-sessions')) {

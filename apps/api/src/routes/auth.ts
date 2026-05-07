@@ -55,6 +55,7 @@ const loginSchema = z.object({
 
 const googleAuthSchema = z.object({
   id_token: z.string().min(20),
+  auth_flow: z.enum(['SIGN_IN', 'SIGN_UP']).default('SIGN_IN'),
   role: publicRoleSchema,
   phone: z.string().trim().min(7).max(20).optional(),
   country: z.string().min(2),
@@ -147,20 +148,6 @@ function buildSyntheticPassword(sub: string, email: string) {
     .update(`prime_status_google::${sub}::${email}`)
     .digest('hex');
   return `Gp!${seed.substring(0, 18)}a9`;
-}
-
-function buildSyntheticGooglePhone(sub: string) {
-  const digits = sub.replace(/\D/g, '');
-  if (digits.length > 0) {
-    return `+999${digits.padStart(12, '0').slice(-12)}`;
-  }
-
-  const hash = crypto
-    .createHash('sha256')
-    .update(`prime_status_google_phone::${sub}`)
-    .digest('hex')
-    .replace(/\D/g, '');
-  return `+999${hash.padStart(12, '0').slice(-12)}`;
 }
 
 function isAdminSessionUser(user: Record<string, unknown> | null | undefined) {
@@ -396,24 +383,15 @@ export async function authRoutes(app: FastifyInstance) {
       await ensurePublicIdColumns(client);
       const existing = await userRepo.findByEmail(client, email);
       const typedPhone = body.phone?.trim() ?? '';
+      const isGoogleSignUp = body.auth_flow === 'SIGN_UP';
+      const hasRealTypedPhone =
+        typedPhone.length >= 7 && !typedPhone.startsWith('+999');
       if (existing) {
-        const existingAmbassadorCapacity = currentAmbassadorCapacity(existing);
-        if (typedPhone && typedPhone !== String(existing.phone ?? '').trim()) {
-          const phoneOwner = await client.query(
-            `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
-            [typedPhone]
-          );
-          const ownerId = String(phoneOwner.rows[0]?.id ?? '');
-          if (ownerId && ownerId !== String(existing.id)) {
-            reply.code(400);
-            return { error: 'phone_taken' } as any;
-          }
-
-          await client.query(
-            `UPDATE users SET phone=$2 WHERE id=$1`,
-            [existing.id, typedPhone]
-          );
+        if (isGoogleSignUp) {
+          reply.code(409);
+          return { error: 'google_account_exists' } as any;
         }
+        const existingAmbassadorCapacity = currentAmbassadorCapacity(existing);
 
         await upsertSocialProfile(client, existing.id, fullName, photoUrl);
         if (String(existing.role ?? '').trim().toUpperCase() !== body.role) {
@@ -457,10 +435,17 @@ export async function authRoutes(app: FastifyInstance) {
         return refreshed ?? existing;
       }
 
-      const typedOrSyntheticPhone = typedPhone || buildSyntheticGooglePhone(sub);
+      if (!isGoogleSignUp) {
+        reply.code(404);
+        return { error: 'google_account_not_registered' } as any;
+      }
+      if (!hasRealTypedPhone) {
+        reply.code(400);
+        return { error: 'phone_required' } as any;
+      }
       const phoneOwner = await client.query(
         `SELECT id FROM users WHERE phone=$1 LIMIT 1`,
-        [typedOrSyntheticPhone]
+        [typedPhone]
       );
       if (phoneOwner.rows[0]) {
         reply.code(400);
@@ -472,7 +457,7 @@ export async function authRoutes(app: FastifyInstance) {
         client,
         fullName,
         email,
-        typedOrSyntheticPhone,
+        typedPhone,
         hashPassword(syntheticPassword),
         body.role,
         countryData.iso2,

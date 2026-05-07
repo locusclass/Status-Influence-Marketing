@@ -71,6 +71,17 @@ import {
   ensureUserSignalSchema,
 } from '../services/userSignals.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
+import {
+  acknowledgeAdminOperationTask,
+  claimAdminOperationTask,
+  createAdminOperationMessage,
+  ensureAdminOperationsSchema,
+  loadAdminOperationTaskState,
+  loadAdminOperationsSnapshot,
+  loadVisibleAdminOperationTask,
+  releaseAdminOperationTaskClaim,
+  resolveAdminOperationTaskByEntity,
+} from '../services/adminOperations.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z
@@ -236,6 +247,30 @@ const AdminListQuerySchema = z.object({
   limit: z.string().optional(),
   offset: z.string().optional(),
 });
+
+const AdminOperationsTaskActionSchema = z.object({
+  minutes: z.number().int().min(1).max(120).optional(),
+});
+
+const AdminOperationsMessageSchema = z.object({
+  body: z.string().trim().min(1).max(2000),
+});
+
+const AdminSettingsPatchSchema = z
+  .object({
+    campaign_approval_mode: z.enum(['AUTO', 'MANUAL']).optional(),
+    operations_sla_minutes: z.number().int().min(5).max(120).optional(),
+    operations_ack_minutes: z.number().int().min(1).max(120).optional(),
+  })
+  .refine(
+    (value) =>
+      value.campaign_approval_mode !== undefined ||
+      value.operations_sla_minutes !== undefined ||
+      value.operations_ack_minutes !== undefined,
+    {
+      message: 'at least one field is required',
+    }
+  );
 
 type FilterState = {
   conditions: string[];
@@ -454,6 +489,17 @@ function parseNumberRange(min?: string, max?: string) {
     min: Number.isFinite(minValue) ? minValue : null,
     max: Number.isFinite(maxValue) ? maxValue : null,
   };
+}
+
+function parseBooleanFlag(value: unknown, fallback = true) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+    return false;
+  }
+  return fallback;
 }
 
 type AdminCountryRow = {
@@ -1020,6 +1066,7 @@ export async function adminRoutes(app: FastifyInstance) {
         await ensureCampaignDraftsTable(client);
         await ensureContractParticipantColumns(client);
         await ensureProofReviewColumns(client);
+        await ensureAdminOperationsSchema(client);
       }).catch((error) => {
         schemaReadyPromise = null;
         throw error;
@@ -3496,6 +3543,12 @@ export async function adminRoutes(app: FastifyInstance) {
       );
 
       await logAudit(client, adminUserId, 'APPROVE_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { viewer_count: body.viewer_count });
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'AMBASSADOR_VERIFICATION',
+        params.id,
+        adminUserId
+      );
       const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       return { ok: true, viewer_count: body.viewer_count, expires_at: expiresAt };
     });
@@ -3545,7 +3598,186 @@ export async function adminRoutes(app: FastifyInstance) {
         ]
       );
       await logAudit(client, adminUserId, 'REJECT_USER_VERIFICATION', 'ambassador_verification_recording', params.id, { admin_note: note });
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'AMBASSADOR_VERIFICATION',
+        params.id,
+        adminUserId
+      );
       return { ok: true };
+    });
+  });
+
+  // ── Admin operations command center ────────────────────────────────────────
+
+  app.get('/admin/operations/live', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      return loadAdminOperationsSnapshot(client, access, {
+        includeMessages: parseBooleanFlag(query?.include_messages, true),
+        includeWorkforce: parseBooleanFlag(query?.include_workforce, true),
+        includeAudit: parseBooleanFlag(query?.include_audit, true),
+        notificationLimit: Number(query?.notification_limit ?? 12),
+        messageLimit: Number(query?.message_limit ?? 40),
+        operatorLimit: Number(query?.operator_limit ?? 24),
+        auditLimit: Number(query?.audit_limit ?? 20),
+      });
+    });
+  });
+
+  app.post('/admin/operations/tasks/:taskKey/claim', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { taskKey: string };
+    const body = AdminOperationsTaskActionSchema.safeParse(request.body ?? {});
+    if (!body.success) {
+      reply.code(400);
+      return { error: 'invalid_body', issues: body.error.issues };
+    }
+
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const snapshot = await loadAdminOperationsSnapshot(client, access, {
+        includeMessages: false,
+        includeWorkforce: false,
+        includeAudit: false,
+      });
+      const task = snapshot.tasks.find((item) => item.task_key === params.taskKey);
+      if (!task || task.actionable !== true) {
+        reply.code(404);
+        return { error: 'task_not_found' };
+      }
+
+      const slaMinutes = Math.min(
+        Math.max(Number(snapshot.settings.operations_sla_minutes ?? 10), 1),
+        120
+      );
+      const defaultAckMinutes = Math.min(
+        Math.max(Number(snapshot.settings.operations_ack_minutes ?? 5), 1),
+        slaMinutes
+      );
+      const ackMinutes = Math.min(
+        Math.max(body.data.minutes ?? defaultAckMinutes, 1),
+        slaMinutes
+      );
+      const actorId = String((request.user as any).sub ?? '');
+
+      await claimAdminOperationTask(client, actorId, {
+        task_key: task.task_key,
+        entity_type: task.entity_type,
+        entity_id: task.entity_id,
+        category: task.category,
+        target_section: task.target_section,
+      }, ackMinutes);
+
+      await logAudit(client, actorId, 'CLAIM_ADMIN_OPERATION_TASK', 'admin_operation_task', task.task_key, {
+        entity_type: task.entity_type,
+        entity_id: task.entity_id,
+        category: task.category,
+        ack_minutes: ackMinutes,
+      });
+
+      return { ok: true };
+    });
+  });
+
+  app.post('/admin/operations/tasks/:taskKey/acknowledge', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { taskKey: string };
+    const body = AdminOperationsTaskActionSchema.safeParse(request.body ?? {});
+    if (!body.success) {
+      reply.code(400);
+      return { error: 'invalid_body', issues: body.error.issues };
+    }
+
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const snapshot = await loadAdminOperationsSnapshot(client, access, {
+        includeMessages: false,
+        includeWorkforce: false,
+        includeAudit: false,
+      });
+      const task = snapshot.tasks.find((item) => item.task_key === params.taskKey);
+      if (!task || task.actionable !== true) {
+        reply.code(404);
+        return { error: 'task_not_found' };
+      }
+
+      const slaMinutes = Math.min(
+        Math.max(Number(snapshot.settings.operations_sla_minutes ?? 10), 1),
+        120
+      );
+      const defaultAckMinutes = Math.min(
+        Math.max(Number(snapshot.settings.operations_ack_minutes ?? 5), 1),
+        slaMinutes
+      );
+      const ackMinutes = Math.min(
+        Math.max(body.data.minutes ?? defaultAckMinutes, 1),
+        slaMinutes
+      );
+      const actorId = String((request.user as any).sub ?? '');
+
+      await acknowledgeAdminOperationTask(client, actorId, {
+        task_key: task.task_key,
+        entity_type: task.entity_type,
+        entity_id: task.entity_id,
+        category: task.category,
+        target_section: task.target_section,
+      }, ackMinutes);
+
+      await logAudit(client, actorId, 'ACKNOWLEDGE_ADMIN_OPERATION_TASK', 'admin_operation_task', task.task_key, {
+        entity_type: task.entity_type,
+        entity_id: task.entity_id,
+        category: task.category,
+        ack_minutes: ackMinutes,
+      });
+
+      return { ok: true };
+    });
+  });
+
+  app.post('/admin/operations/tasks/:taskKey/release', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { taskKey: string };
+
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      const actorId = String((request.user as any).sub ?? '');
+      const currentState = await loadAdminOperationTaskState(client, params.taskKey);
+      if (!currentState) {
+        reply.code(404);
+        return { error: 'task_not_found' };
+      }
+      if (
+        currentState.claimed_by_user_id &&
+        currentState.claimed_by_user_id !== actorId &&
+        !isSuperDashboardAccess(access)
+      ) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+
+      await releaseAdminOperationTaskClaim(client, params.taskKey);
+      await logAudit(client, actorId, 'RELEASE_ADMIN_OPERATION_TASK', 'admin_operation_task', params.taskKey, {});
+      return { ok: true };
+    });
+  });
+
+  app.post('/admin/operations/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const body = AdminOperationsMessageSchema.safeParse(request.body ?? {});
+    if (!body.success) {
+      reply.code(400);
+      return { error: 'invalid_body', issues: body.error.issues };
+    }
+
+    return withTransaction(async (client) => {
+      const actorId = String((request.user as any).sub ?? '');
+      const message = await createAdminOperationMessage(
+        client,
+        actorId,
+        body.data.body
+      );
+      await logAudit(client, actorId, 'SEND_ADMIN_OPERATION_MESSAGE', 'admin_operation_message', message?.id?.toString() ?? null, {
+        length: body.data.body.length,
+      });
+      return { ok: true, message };
     });
   });
 
@@ -3554,18 +3786,40 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/admin/settings', { preHandler: [app.adminOnly] }, async () => {
     return withTransaction(async (client) => {
       const res = await client.query('SELECT key, value FROM admin_settings');
-      const settings: Record<string, string> = {};
+      const settings: Record<string, string> = {
+        campaign_approval_mode: 'MANUAL',
+        operations_sla_minutes: '10',
+        operations_ack_minutes: '5',
+      };
       for (const row of res.rows) settings[row.key] = row.value;
       return { settings };
     });
   });
 
   app.patch('/admin/settings', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    const body = z.object({
-      campaign_approval_mode: z.enum(['AUTO', 'MANUAL']).optional(),
-    }).safeParse(request.body);
-    if (!body.success) { reply.code(400); return { error: 'invalid_body' }; }
+    const body = AdminSettingsPatchSchema.safeParse(request.body);
+    if (!body.success) {
+      reply.code(400);
+      return { error: 'invalid_body', issues: body.error.issues };
+    }
     return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      if (
+        !isSuperDashboardAccess(access) &&
+        (body.data.operations_sla_minutes !== undefined ||
+          body.data.operations_ack_minutes !== undefined)
+      ) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      if (
+        body.data.operations_sla_minutes !== undefined &&
+        body.data.operations_ack_minutes !== undefined &&
+        body.data.operations_ack_minutes > body.data.operations_sla_minutes
+      ) {
+        reply.code(400);
+        return { error: 'ack_window_exceeds_sla' };
+      }
       if (body.data.campaign_approval_mode !== undefined) {
         await client.query(
           `INSERT INTO admin_settings (key, value, updated_at)
@@ -3574,8 +3828,37 @@ export async function adminRoutes(app: FastifyInstance) {
           [body.data.campaign_approval_mode]
         );
       }
+      if (body.data.operations_sla_minutes !== undefined) {
+        await client.query(
+          `INSERT INTO admin_settings (key, value, updated_at)
+           VALUES ('operations_sla_minutes', $1, now())
+           ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`,
+          [String(body.data.operations_sla_minutes)]
+        );
+      }
+      if (body.data.operations_ack_minutes !== undefined) {
+        const maxAckMinutes = body.data.operations_sla_minutes ?? Number((
+          await client.query(
+            `SELECT value FROM admin_settings WHERE key = 'operations_sla_minutes' LIMIT 1`
+          )
+        ).rows[0]?.value ?? 10);
+        if (body.data.operations_ack_minutes > maxAckMinutes) {
+          reply.code(400);
+          return { error: 'ack_window_exceeds_sla' };
+        }
+        await client.query(
+          `INSERT INTO admin_settings (key, value, updated_at)
+           VALUES ('operations_ack_minutes', $1, now())
+           ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`,
+          [String(body.data.operations_ack_minutes)]
+        );
+      }
       const res = await client.query('SELECT key, value FROM admin_settings');
-      const settings: Record<string, string> = {};
+      const settings: Record<string, string> = {
+        campaign_approval_mode: 'MANUAL',
+        operations_sla_minutes: '10',
+        operations_ack_minutes: '5',
+      };
       for (const row of res.rows) settings[row.key] = row.value;
       return { settings };
     });
@@ -3643,6 +3926,12 @@ export async function adminRoutes(app: FastifyInstance) {
       );
 
       await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN', 'campaign', params.id, {});
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'CAMPAIGN_APPROVAL',
+        params.id,
+        adminUserId
+      );
       return { ok: true };
     });
   });
@@ -3670,6 +3959,12 @@ export async function adminRoutes(app: FastifyInstance) {
         [camp.business_id, `Your campaign "${camp.title}" was rejected: ${body.data.reason}`]
       );
       await logAudit(client, adminUserId, 'REJECT_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'CAMPAIGN_APPROVAL',
+        params.id,
+        adminUserId
+      );
       return { ok: true };
     });
   });
@@ -3697,6 +3992,12 @@ export async function adminRoutes(app: FastifyInstance) {
         [camp.business_id, `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`]
       );
       await logAudit(client, adminUserId, 'RETURN_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'CAMPAIGN_APPROVAL',
+        params.id,
+        adminUserId
+      );
       return { ok: true };
     });
   });
@@ -3828,6 +4129,12 @@ export async function adminRoutes(app: FastifyInstance) {
       );
 
       await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN_COMPLETION', 'proof', params.proofId, {});
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'CAMPAIGN_COMPLETION',
+        params.proofId,
+        adminUserId
+      );
       return { ok: true };
     });
   });
@@ -3874,6 +4181,12 @@ export async function adminRoutes(app: FastifyInstance) {
       );
 
       await logAudit(client, adminUserId, 'REJECT_CAMPAIGN_COMPLETION', 'proof', params.proofId, { reason });
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'CAMPAIGN_COMPLETION',
+        params.proofId,
+        adminUserId
+      );
       return { ok: true };
     });
   });
@@ -3938,6 +4251,12 @@ export async function adminRoutes(app: FastifyInstance) {
         'proof',
         params.proofId,
         { reason: reason.length > 0 ? reason : null }
+      );
+      await resolveAdminOperationTaskByEntity(
+        client,
+        'CAMPAIGN_COMPLETION',
+        params.proofId,
+        adminUserId
       );
       return { ok: true };
     });
@@ -4459,6 +4778,18 @@ export async function adminRoutes(app: FastifyInstance) {
           params.id,
           body
         );
+        if (
+          body.status &&
+          body.status !== 'FAILED' &&
+          body.status !== 'RETRY'
+        ) {
+          await resolveAdminOperationTaskByEntity(
+            client,
+            'JOB',
+            params.id,
+            String((request.user as any).sub ?? '')
+          );
+        }
       }
       return updated.rows[0];
     });
@@ -4498,6 +4829,12 @@ export async function adminRoutes(app: FastifyInstance) {
           'job',
           params.id,
           { reason: body.reason ?? null }
+        );
+        await resolveAdminOperationTaskByEntity(
+          client,
+          'JOB',
+          params.id,
+          String((request.user as any).sub ?? '')
         );
       }
       return updated.rows[0];
@@ -4546,6 +4883,14 @@ export async function adminRoutes(app: FastifyInstance) {
           params.id,
           { status: body.status }
         );
+        if (body.status !== 'REQUESTED' && body.status !== 'PROCESSING') {
+          await resolveAdminOperationTaskByEntity(
+            client,
+            'PAYOUT_REQUEST',
+            params.id,
+            String((request.user as any).sub ?? '')
+          );
+        }
       }
       return updated.rows[0];
     });

@@ -29,8 +29,8 @@ export const adminModuleDefinitions = [
     {
         key: ADMIN_MODULE_OPERATIONS,
         label: 'Operations',
-        description: 'Backend control panel, automation status, and worker queue signals.',
-        super_admin_only: true,
+        description: 'Shared live operations command center, alerts, and workforce coordination.',
+        always_on: true,
     },
     {
         key: ADMIN_MODULE_COUNTRIES,
@@ -180,5 +180,7 @@ export function normalizeAdminModuleKey(value) {
         : null;
 }
 export function isAlwaysOnAdminModule(value) {
-    return normalizeAdminModuleKey(value) === ADMIN_MODULE_OVERVIEW;
+    const normalized = normalizeAdminModuleKey(value);
+    return (normalized === ADMIN_MODULE_OVERVIEW ||
+        normalized === ADMIN_MODULE_OPERATIONS);
 }

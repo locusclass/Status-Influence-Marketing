@@ -1,4 +1,4 @@
-import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_OVERVIEW, ADMIN_ROLE_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_USER, ALL_ADMIN_MODULE_KEYS, LEGACY_COUNTRY_ADMIN_MODULE_KEYS, LEGACY_TENANT_ADMIN_MODULE_KEYS, normalizeAdminDashboardRole, normalizeAdminModuleKey, } from '@prime/shared';
+import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ADMIN_ROLE_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_USER, ALL_ADMIN_MODULE_KEYS, LEGACY_COUNTRY_ADMIN_MODULE_KEYS, LEGACY_TENANT_ADMIN_MODULE_KEYS, normalizeAdminDashboardRole, normalizeAdminModuleKey, } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { resolveCountry } from '../countryResolver.js';
 import { hashPassword } from './auth.js';
@@ -94,7 +94,9 @@ function sanitizeAssignedModuleKeys(role, moduleKeys) {
     const filtered = [];
     for (const raw of moduleKeys) {
         const normalized = normalizeAdminModuleKey(raw);
-        if (!normalized || normalized === ADMIN_MODULE_OVERVIEW) {
+        if (!normalized ||
+            normalized === ADMIN_MODULE_OVERVIEW ||
+            normalized === ADMIN_MODULE_OPERATIONS) {
             continue;
         }
         if (normalized === ADMIN_MODULE_ADMIN_MANAGEMENT &&
@@ -132,7 +134,7 @@ function visibleModulesForAccess(role, storedModules, legacyRole) {
         return [];
     }
     const base = storedModules.length > 0 ? storedModules : modulesForLegacyRole(legacyRole);
-    return uniqueModules([ADMIN_MODULE_OVERVIEW, ...base]);
+    return uniqueModules([ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ...base]);
 }
 function roleForLegacyScope(user) {
     const explicit = normalizeAdminDashboardRole(user.admin_role);
