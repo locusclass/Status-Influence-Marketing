@@ -21,7 +21,10 @@ import {
   touchAdminLogin,
   type DashboardAccessContext,
 } from '../services/adminTenant.js';
-import { touchUserPresenceWithClient } from '../services/userSignals.js';
+import {
+  getActiveBlockingNotice,
+  touchUserPresenceWithClient,
+} from '../services/userSignals.js';
 
 const publicRoleSchema = z
   .string()
@@ -316,12 +319,16 @@ export async function authRoutes(app: FastifyInstance) {
       }
       return current;
     });
+    const activeAdminNotice = await withTransaction(async (client) =>
+      getActiveBlockingNotice(client, String(user.id))
+    );
 
     return {
       token,
       user: {
         ...mergeDashboardAccessIntoSession(user, dashboardAccess),
         full_name: user.full_name ?? '',
+        active_admin_notice: activeAdminNotice,
       },
     };
   });
@@ -510,6 +517,9 @@ export async function authRoutes(app: FastifyInstance) {
       }
       return current;
     });
+    const activeAdminNotice = await withTransaction(async (client) =>
+      getActiveBlockingNotice(client, String(sessionUser.id))
+    );
 
     return {
       token,
@@ -518,6 +528,7 @@ export async function authRoutes(app: FastifyInstance) {
         full_name: sessionUser.full_name ?? fullName,
         avatar_url: photoUrl || null,
         dialCode: countryData.dialCode,
+        active_admin_notice: activeAdminNotice,
       },
     };
   });
