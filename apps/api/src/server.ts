@@ -21,6 +21,7 @@ import {
   ADMIN_MODULE_OVERVIEW,
   ADMIN_MODULE_OPERATIONS,
   ADMIN_MODULE_PAYOUT_REQUESTS,
+  ADMIN_MODULE_PUBLIC_COMMUNICATION,
   ADMIN_MODULE_PROOFS,
   ADMIN_MODULE_RISK,
   ADMIN_MODULE_SESSIONS,
@@ -55,6 +56,7 @@ import {
   touchUserPresence,
 } from './services/userSignals.js';
 import {
+  ensurePrimarySuperAdmin,
   hasAdminModuleAccess,
   loadDashboardAccessContext,
   resolveLiveDashboardAccess,
@@ -93,6 +95,9 @@ export function buildServer() {
     }
     if (normalized.startsWith('/admin/wallet-withdrawals')) {
       return ADMIN_MODULE_WITHDRAWALS;
+    }
+    if (normalized.startsWith('/admin/user-notices')) {
+      return ADMIN_MODULE_PUBLIC_COMMUNICATION;
     }
     if (normalized.startsWith('/admin/users')) return ADMIN_MODULE_USERS;
     if (normalized.startsWith('/admin/admins')) {
@@ -133,6 +138,7 @@ export function buildServer() {
       await withTransaction(async (client) => {
         await ensureUserSignalSchema(client);
         await ensurePolicyAcceptanceColumns(client);
+        await ensurePrimarySuperAdmin(client);
       });
     } catch (error) {
       app.log.error(

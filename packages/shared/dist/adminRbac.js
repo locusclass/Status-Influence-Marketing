@@ -3,6 +3,7 @@ export const ADMIN_MODULE_OPERATIONS = 'OPERATIONS';
 export const ADMIN_MODULE_COUNTRIES = 'COUNTRIES';
 export const ADMIN_MODULE_DIVISIONS = 'DIVISIONS';
 export const ADMIN_MODULE_USERS = 'USERS';
+export const ADMIN_MODULE_PUBLIC_COMMUNICATION = 'PUBLIC_COMMUNICATION';
 export const ADMIN_MODULE_CAMPAIGNS = 'CAMPAIGNS';
 export const ADMIN_MODULE_DRAFTS = 'DRAFTS';
 export const ADMIN_MODULE_PROOFS = 'PROOFS';
@@ -48,6 +49,12 @@ export const adminModuleDefinitions = [
         key: ADMIN_MODULE_USERS,
         label: 'User Management',
         description: 'Users, account moderation, and profile operations.',
+        scope_enabled: true,
+    },
+    {
+        key: ADMIN_MODULE_PUBLIC_COMMUNICATION,
+        label: 'Public Communication',
+        description: 'Blocking notices and public admin messages to selected or scoped users.',
         scope_enabled: true,
     },
     {

@@ -96,7 +96,6 @@ export const config = {
     yo: yoConfig,
     flutterwave: legacyFlutterwaveCompatConfig,
     pesapal: yoConfig,
-    adminAccessPhrase: process.env.ADMIN_ACCESS_PHRASE ?? '',
     whatsappVerification: {
         mode: process.env.WHATSAPP_VERIFICATION_MODE ??
             (process.env.NODE_ENV === 'test' ? 'mock' : 'baileys'),

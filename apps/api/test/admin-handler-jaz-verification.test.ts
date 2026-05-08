@@ -111,7 +111,6 @@ describe('Admin handler jaz and viewer verification flows', () => {
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
-    process.env.ADMIN_ACCESS_PHRASE ??= 'prime-status-emergency';
     process.env.SKIP_OPTIONAL_STARTUP_WARMUPS = '1';
     delete process.env.TEST_ROUTE_SCOPE;
     const serverModule = await import('../src/server.js');
@@ -210,8 +209,8 @@ describe('Admin handler jaz and viewer verification flows', () => {
     );
   });
 
-  it('returns a clear conflict for Handler Jaz when using emergency admin access', async () => {
-    const emergencyToken = app.jwt.sign({
+  it('rejects Handler Jaz access when the token is not backed by a stored admin account', async () => {
+    const adminToken = app.jwt.sign({
       sub: 'ariaka-access',
       role: 'ADMIN',
       active_role: 'ADMIN',
@@ -221,21 +220,21 @@ describe('Admin handler jaz and viewer verification flows', () => {
     const room = await app.inject({
       method: 'GET',
       url: '/api/admin/handler-jaz/room',
-      headers: { authorization: `Bearer ${emergencyToken}` },
+      headers: { authorization: `Bearer ${adminToken}` },
     });
-    expect(room.statusCode).toBe(409);
+    expect(room.statusCode).toBe(403);
     expect(room.json()).toMatchObject({
-      error: 'handler_jaz_persisted_admin_required',
+      error: 'forbidden',
     });
 
     const live = await app.inject({
       method: 'GET',
       url: '/api/admin/handler-jaz/live',
-      headers: { authorization: `Bearer ${emergencyToken}` },
+      headers: { authorization: `Bearer ${adminToken}` },
     });
-    expect(live.statusCode).toBe(409);
+    expect(live.statusCode).toBe(403);
     expect(live.json()).toMatchObject({
-      error: 'handler_jaz_persisted_admin_required',
+      error: 'forbidden',
     });
   });
 

@@ -201,7 +201,6 @@ describe('Tenant admin architecture', () => {
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
-    process.env.ADMIN_ACCESS_PHRASE ??= 'prime-status-emergency';
     process.env.SKIP_OPTIONAL_STARTUP_WARMUPS = '1';
     process.env.TEST_ROUTE_SCOPE = 'admin';
     const serverModule = await import('../src/server.js');
@@ -221,38 +220,38 @@ describe('Tenant admin architecture', () => {
     delete process.env.TEST_ROUTE_SCOPE;
   });
 
-  it('validates the emergency admin access phrase before issuing a token', async () => {
-    const invalid = await app.inject({
-      method: 'POST',
-      url: '/admin/access',
-      payload: { phrase: 'wrong-phrase' },
+  it('rejects dashboard access for admin claims without a persisted admin record', async () => {
+    const token = app.jwt.sign({
+      sub: 'ariaka-access',
+      role: 'ADMIN',
+      active_role: 'ADMIN',
+      admin_role: 'SUPER_ADMIN',
     });
-    expect(invalid.statusCode).toBe(403);
-    expect(invalid.json()).toMatchObject({ error: 'invalid_phrase' });
 
-    const valid = await app.inject({
-      method: 'POST',
-      url: '/admin/access',
-      payload: { phrase: 'prime-status-emergency' },
+    const dashboardAccess = await app.inject({
+      method: 'GET',
+      url: '/dashboard/access',
+      headers: { authorization: `Bearer ${token}` },
     });
-    expect(valid.statusCode).toBe(200);
-    expect(valid.json()).toMatchObject({
-      user: {
-        admin_role: 'SUPER_ADMIN',
-      },
-    });
-    expect(valid.json().token).toEqual(expect.any(String));
+    expect(dashboardAccess.statusCode).toBe(403);
+    expect(dashboardAccess.json()).toMatchObject({ error: 'forbidden' });
   });
 
-  it('lets the emergency super admin reach dashboard routes without a stored user record', async () => {
-    const accessResponse = await app.inject({
-      method: 'POST',
-      url: '/admin/access',
-      payload: { phrase: 'prime-status-emergency' },
+  it('lets a persisted super admin reach dashboard routes', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const superAdmin = await insertUser({
+      email: 'dashboard-super-admin@prime.test',
+      phone: '+256700000000',
+      admin_role: 'SUPER_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
     });
-    expect(accessResponse.statusCode).toBe(200);
-
-    const token = accessResponse.json().token as string;
+    const token = app.jwt.sign(
+      buildAuthClaims({
+        ...superAdmin,
+        country_id: ug.id,
+      })
+    );
 
     const dashboardAccess = await app.inject({
       method: 'GET',
@@ -262,7 +261,7 @@ describe('Tenant admin architecture', () => {
     expect(dashboardAccess.statusCode).toBe(200);
     expect(dashboardAccess.json()).toMatchObject({
       access: {
-        user_id: 'ariaka-access',
+        user_id: superAdmin.id,
         admin_role: 'SUPER_ADMIN',
         admin_status: 'ACTIVE',
       },

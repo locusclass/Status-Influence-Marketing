@@ -2,8 +2,14 @@ import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPER
 import { withTransaction } from '../db.js';
 import { resolveCountry } from '../countryResolver.js';
 import { hashPassword } from './auth.js';
-const EMERGENCY_ADMIN_USER_ID = 'ariaka-access';
-const EMERGENCY_ADMIN_EMAIL = 'ariaka-access@local';
+const PRIMARY_SUPER_ADMIN = {
+    fullName: 'ARIAKA WALTER',
+    email: 'kariaka247@gmail.com',
+    phone: '0784686375',
+    password: '1234KKonly',
+    country: 'UG',
+    currency: 'UGX',
+};
 function normalizeAccountRole(user) {
     return String(user.role ?? '').trim().toUpperCase();
 }
@@ -147,32 +153,6 @@ function roleForLegacyScope(user) {
         return ADMIN_ROLE_SUPER_ADMIN;
     }
     return ADMIN_ROLE_USER;
-}
-function buildEmergencyDashboardAccess() {
-    const modules = Array.from(ALL_ADMIN_MODULE_KEYS);
-    return {
-        user_id: EMERGENCY_ADMIN_USER_ID,
-        email: EMERGENCY_ADMIN_EMAIL,
-        role: 'ADMIN',
-        active_role: 'ADMIN',
-        admin_role: ADMIN_ROLE_SUPER_ADMIN,
-        legacy_admin_role: ADMIN_ROLE_SUPER_ADMIN,
-        admin_status: 'ACTIVE',
-        permissions: modules,
-        module_keys: modules,
-        admin_user_id: null,
-        created_by_super_admin_id: null,
-        last_login_at: null,
-        country_id: null,
-        division_id: null,
-        country_code: null,
-        country_name: null,
-        division_name: null,
-        country_ids: [],
-        division_ids: [],
-        country_scopes: [],
-        division_scopes: [],
-    };
 }
 export function resolveAdminRoleFromRecord(user) {
     if (!user) {
@@ -362,9 +342,6 @@ function mergeDivisionScopes(persisted, legacy) {
     return Array.from(byId.values());
 }
 export async function loadDashboardAccessContext(client, userId) {
-    if (userId === EMERGENCY_ADMIN_USER_ID) {
-        return buildEmergencyDashboardAccess();
-    }
     const res = await client.query(`
     SELECT
       u.id,
@@ -481,9 +458,6 @@ export function getRequestDashboardAccess(request) {
         return cached;
     }
     const claims = (request.user ?? {});
-    if (String(claims.sub ?? '') === EMERGENCY_ADMIN_USER_ID) {
-        return buildEmergencyDashboardAccess();
-    }
     return mapDashboardAccessFromClaims(claims);
 }
 export async function resolveLiveDashboardAccess(client, request) {
@@ -492,10 +466,13 @@ export async function resolveLiveDashboardAccess(client, request) {
         return cached;
     }
     let access = getRequestDashboardAccess(request);
-    if (!access.user_id || access.user_id === EMERGENCY_ADMIN_USER_ID) {
-        return access;
+    if (!access.user_id) {
+        return null;
     }
     const persisted = await loadDashboardAccessContext(client, access.user_id);
+    if (!persisted) {
+        return null;
+    }
     const scopeMode = String(request.user?.dashboard_scope_mode ?? '')
         .trim()
         .toUpperCase();
@@ -531,7 +508,7 @@ export async function resolveLiveDashboardAccess(client, request) {
         };
         return access;
     }
-    return persisted ?? access;
+    return persisted;
 }
 function canSatisfyRole(access, requiredRole) {
     if (access.admin_role === ADMIN_ROLE_SUPER_ADMIN) {
@@ -786,6 +763,100 @@ export async function touchAdminLogin(client, userId, createdBySuperAdminId) {
         updated_at = NOW()
     WHERE id = $1
     `, [access.admin_user_id]);
+    return loadDashboardAccessContext(client, userId);
+}
+export async function ensurePrimarySuperAdmin(client) {
+    const email = PRIMARY_SUPER_ADMIN.email.trim().toLowerCase();
+    const phone = PRIMARY_SUPER_ADMIN.phone.trim();
+    const passwordHash = hashPassword(PRIMARY_SUPER_ADMIN.password);
+    const emailRes = await client.query(`
+    SELECT *
+    FROM users
+    WHERE LOWER(email) = $1
+    LIMIT 1
+    `, [email]);
+    const phoneRes = await client.query(`
+    SELECT *
+    FROM users
+    WHERE phone = $1
+    LIMIT 1
+    `, [phone]);
+    const emailUser = emailRes.rows[0] ?? null;
+    const phoneUser = phoneRes.rows[0] ?? null;
+    if (emailUser?.id &&
+        phoneUser?.id &&
+        String(emailUser.id) !== String(phoneUser.id)) {
+        throw new Error('primary_super_admin_identity_conflict');
+    }
+    const existingUser = emailUser ?? phoneUser;
+    let userId;
+    if (existingUser?.id) {
+        userId = String(existingUser.id);
+        await client.query(`
+      UPDATE users
+      SET full_name = $2,
+          email = $3,
+          phone = $4,
+          password_hash = $5,
+          role = 'ADMIN',
+          active_role = 'ADMIN',
+          admin_role = $6,
+          country = $7,
+          preferred_currency = $8,
+          status = 'ACTIVE'
+      WHERE id = $1
+      `, [
+            userId,
+            PRIMARY_SUPER_ADMIN.fullName,
+            email,
+            phone,
+            passwordHash,
+            ADMIN_ROLE_SUPER_ADMIN,
+            PRIMARY_SUPER_ADMIN.country,
+            PRIMARY_SUPER_ADMIN.currency,
+        ]);
+    }
+    else {
+        const inserted = await client.query(`
+      INSERT INTO users (
+        full_name,
+        email,
+        phone,
+        password_hash,
+        role,
+        active_role,
+        country,
+        preferred_currency,
+        admin_role,
+        status
+      )
+      VALUES ($1,$2,$3,$4,'ADMIN','ADMIN',$5,$6,$7,'ACTIVE')
+      RETURNING id
+      `, [
+            PRIMARY_SUPER_ADMIN.fullName,
+            email,
+            phone,
+            passwordHash,
+            PRIMARY_SUPER_ADMIN.country,
+            PRIMARY_SUPER_ADMIN.currency,
+            ADMIN_ROLE_SUPER_ADMIN,
+        ]);
+        userId = String(inserted.rows[0]?.id ?? '');
+    }
+    if (!userId) {
+        throw new Error('primary_super_admin_create_failed');
+    }
+    const account = await ensureAdminAccountRecord(client, {
+        userId,
+        role: ADMIN_ROLE_SUPER_ADMIN,
+        status: 'ACTIVE',
+        createdBySuperAdminId: null,
+    });
+    await replaceAdminModuleAssignments(client, String(account.id), ADMIN_ROLE_SUPER_ADMIN, []);
+    await replaceAdminScopeAssignments(client, String(account.id), {
+        countryIds: [],
+        divisionIds: [],
+    });
     return loadDashboardAccessContext(client, userId);
 }
 async function getCountryRecord(client, countryId) {

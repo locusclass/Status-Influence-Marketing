@@ -13,6 +13,7 @@ import {
   ADMIN_MODULE_JOBS,
   ADMIN_MODULE_OVERVIEW,
   ADMIN_MODULE_PAYOUT_REQUESTS,
+  ADMIN_MODULE_PUBLIC_COMMUNICATION,
   ADMIN_MODULE_PROOFS,
   ADMIN_MODULE_RISK,
   ADMIN_MODULE_SESSIONS,
@@ -31,7 +32,6 @@ import {
 } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
-import { config } from '../config.js';
 import { resolveCountry } from '../countryResolver.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { JobRepo } from '../repositories/jobRepo.js';
@@ -246,10 +246,6 @@ const UpdateJobSchema = z.object({
   retry_reason: z.string().optional().nullable()
 });
 
-const AdminAccessSchema = z.object({
-  phrase: z.string().min(6)
-});
-
 const AuditQuerySchema = z.object({
   q: z.string().optional(),
   action: z.string().optional(),
@@ -392,19 +388,16 @@ function isManagedAdminAccount(row: {
   return role === 'ADMIN' || adminRole !== 'USER';
 }
 
-function verifyEmergencyPhrase(input: string) {
-  const expected = config.adminAccessPhrase.trim();
-  const candidate = input.trim();
-  if (!expected || !candidate) {
-    return false;
-  }
-  const left = Buffer.from(candidate, 'utf8');
-  const right = Buffer.from(expected, 'utf8');
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
 async function getLiveDashboardAccess(client: any, request: any) {
-  return resolveLiveDashboardAccess(client, request);
+  const attached = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+  if (attached) {
+    return attached;
+  }
+  const access = await resolveLiveDashboardAccess(client, request);
+  if (!access) {
+    throw new Error('dashboard_access_missing');
+  }
+  return access;
 }
 
 async function requireSuperDashboardAccess(
@@ -1224,13 +1217,6 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
   return labels.length > 0 ? labels.join(', ') : 'campaign settings';
 }
 
-function resolveAdminRequestUserId(request: any) {
-  const authSub = String((request.user as any)?.sub ?? '').trim();
-  return authSub === 'ariaka-access'
-    ? '00000000-0000-0000-0000-000000000000'
-    : authSub;
-}
-
 function buildDefaultHandlerJazHandle(access: DashboardAccessContext) {
   const rawAccess = access as DashboardAccessContext & {
     full_name?: string;
@@ -1354,7 +1340,7 @@ function rejectInvalidHandlerJazAccess(
   return {
     error: 'handler_jaz_persisted_admin_required',
     detail:
-      "Handler's Jaz requires a signed-in admin account. Emergency access mode can't join the room.",
+      "Handler's Jaz requires a signed-in admin account backed by a stored admin profile.",
   };
 }
 
@@ -1397,73 +1383,9 @@ export async function adminRoutes(app: FastifyInstance) {
     await ensureAdminRoutesSchema();
   });
 
-  app.post('/admin/access', async (request, reply) => {
-    const body = AdminAccessSchema.parse(request.body);
-
-    if (!config.adminAccessPhrase.trim()) {
-      reply.code(503);
-      return {
-        error: 'admin_access_disabled',
-        detail: 'Emergency admin access is not configured on this server.',
-      };
-    }
-
-    if (!verifyEmergencyPhrase(body.phrase)) {
-      reply.code(403);
-      return { error: 'invalid_phrase' };
-    }
-
-    const token = app.jwt.sign({
-      sub: 'ariaka-access',
-      role: 'ADMIN',
-      active_role: 'ADMIN',
-      admin_role: 'SUPER_ADMIN'
-    });
-
-    return {
-      token,
-      user: {
-        id: 'ariaka-access',
-        email: 'ariaka-access@local',
-        role: 'ADMIN',
-        active_role: 'ADMIN',
-        admin_role: 'SUPER_ADMIN'
-      }
-    };
-  });
-
   app.get('/admin/me', { preHandler: [app.adminOnly] }, async (request, reply) => {
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      if (access.user_id === 'ariaka-access') {
-        return {
-          admin: {
-            id: access.user_id,
-            public_id: null,
-            admin_user_id: null,
-            full_name: 'Emergency Super Admin',
-            email: access.email,
-            phone: '',
-            user_status: 'ACTIVE',
-            admin_status: access.admin_status,
-            role: access.admin_role,
-            legacy_admin_role: access.legacy_admin_role,
-            permissions: access.permissions,
-            module_keys: access.module_keys,
-            country: '',
-            country_id: access.country_id,
-            division_id: access.division_id,
-            country_ids: access.country_ids,
-            division_ids: access.division_ids,
-            country_scopes: access.country_scopes,
-            division_scopes: access.division_scopes,
-            created_by_super_admin_id: access.created_by_super_admin_id,
-            last_login_at: access.last_login_at,
-            created_at: null,
-            updated_at: null,
-          },
-        };
-      }
 
       const target = await loadManagedAdminTarget(client, access.user_id);
       if (!target?.access || target.access.admin_role === 'USER') {
@@ -1615,8 +1537,7 @@ export async function adminRoutes(app: FastifyInstance) {
         userId: targetUserId,
         role,
         status: body.status,
-        createdBySuperAdminId:
-          actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        createdBySuperAdminId: actorAccess.user_id,
       });
 
       if (role === ADMIN_ROLE_ADMIN) {
@@ -1645,7 +1566,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       await recordAdminAudit(client, {
-        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        actorId: actorAccess.user_id,
         action: 'ADMIN_CREATED',
         targetType: 'admin_user',
         targetId: targetUserId,
@@ -1792,7 +1713,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       await recordAdminAudit(client, {
-        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        actorId: actorAccess.user_id,
         action: 'ADMIN_UPDATED',
         targetType: 'admin_user',
         targetId: target.resolvedUserId,
@@ -1859,7 +1780,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       await recordAdminAudit(client, {
-        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        actorId: actorAccess.user_id,
         action: body.status === 'ACTIVE' ? 'ADMIN_REACTIVATED' : 'ADMIN_SUSPENDED',
         targetType: 'admin_user',
         targetId: target.resolvedUserId,
@@ -1923,7 +1844,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       await recordAdminAudit(client, {
-        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        actorId: actorAccess.user_id,
         action: 'ADMIN_PERMISSIONS_ASSIGNED',
         targetType: 'admin_user',
         targetId: target.resolvedUserId,
@@ -1990,7 +1911,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       await recordAdminAudit(client, {
-        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        actorId: actorAccess.user_id,
         action: 'ADMIN_PERMISSIONS_REMOVED',
         targetType: 'admin_user',
         targetId: target.resolvedUserId,
@@ -2053,7 +1974,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       await recordAdminAudit(client, {
-        actorId: actorAccess.user_id === 'ariaka-access' ? null : actorAccess.user_id,
+        actorId: actorAccess.user_id,
         action: 'ADMIN_DELETED',
         targetType: 'admin_user',
         targetId: target.resolvedUserId,
@@ -3365,7 +3286,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
       await ensureUserSignalSchema(client);
-      if (!hasAdminModuleAccess(access, ADMIN_MODULE_USERS)) {
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
         reply.code(403);
         return { error: 'forbidden' };
       }
@@ -3436,7 +3357,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
       await ensureUserSignalSchema(client);
-      if (!hasAdminModuleAccess(access, ADMIN_MODULE_USERS)) {
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
         reply.code(403);
         return { error: 'forbidden' };
       }
@@ -3514,7 +3435,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
       await ensureUserSignalSchema(client);
-      if (!hasAdminModuleAccess(access, ADMIN_MODULE_USERS)) {
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
         reply.code(403);
         return { error: 'forbidden' };
       }

@@ -98,7 +98,15 @@ function parsePaging(query: any) {
 }
 
 async function getLiveAccess(client: any, request: any) {
-  return resolveLiveDashboardAccess(client, request);
+  const attached = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
+  if (attached) {
+    return attached;
+  }
+  const access = await resolveLiveDashboardAccess(client, request);
+  if (!access) {
+    throw new Error('dashboard_access_missing');
+  }
+  return access;
 }
 
 type ScopeState = {
@@ -283,51 +291,41 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
           return { error: 'country_not_found' };
         }
 
-                const access = getRequestDashboardAccess(request);
+        const access = getRequestDashboardAccess(request);
         let user: any;
-        if (access.user_id === 'ariaka-access') {
-          user = {
-            id: 'ariaka-access',
-            email: 'ariaka-access@local',
-            role: 'ADMIN',
-            active_role: 'ADMIN',
-            admin_role: ADMIN_ROLE_SUPER_ADMIN,
-          };
-        } else {
-          const userRes = await client.query(
-            'SELECT * FROM users WHERE id = $1 LIMIT 1',
-            [access.user_id]
-          );
-          user = userRes.rows[0];
-          if (!user) {
-            reply.code(404);
-            return { error: 'user_not_found' };
-          }
+        const userRes = await client.query(
+          'SELECT * FROM users WHERE id = $1 LIMIT 1',
+          [access.user_id]
+        );
+        user = userRes.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
         }
 
-          const scopedModules = [
-            ADMIN_MODULE_OVERVIEW,
-            ...LEGACY_COUNTRY_ADMIN_MODULE_KEYS,
-          ];
-          const countryCode =
-            country.code == null ? null : String(country.code);
-          const countryName =
-            country.name == null ? null : String(country.name);
-          const claims: any = {
-            ...buildAuthClaims(user),
-            email: String(user.email ?? ''),
-            admin_role: ADMIN_ROLE_ADMIN,
-            legacy_admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
-            admin_status: 'ACTIVE',
-            permissions: scopedModules,
-            module_keys: scopedModules,
-            country_id: country.id,
-            division_id: null,
-            country_code: countryCode,
-            country_name: countryName,
-            division_name: null,
-            country_ids: [country.id],
-            division_ids: [],
+        const scopedModules = [
+          ADMIN_MODULE_OVERVIEW,
+          ...LEGACY_COUNTRY_ADMIN_MODULE_KEYS,
+        ];
+        const countryCode =
+          country.code == null ? null : String(country.code);
+        const countryName =
+          country.name == null ? null : String(country.name);
+        const claims: any = {
+          ...buildAuthClaims(user),
+          email: String(user.email ?? ''),
+          admin_role: ADMIN_ROLE_ADMIN,
+          legacy_admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+          admin_status: 'ACTIVE',
+          permissions: scopedModules,
+          module_keys: scopedModules,
+          country_id: country.id,
+          division_id: null,
+          country_code: countryCode,
+          country_name: countryName,
+          division_name: null,
+          country_ids: [country.id],
+          division_ids: [],
             country_scopes: [
               {
                 id: country.id,
@@ -726,7 +724,7 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
                 paid_by = $2
             WHERE id = $1
             `,
-            [params.id, (access.user_id === 'ariaka-access' ? null : (access.user_id || null))]
+            [params.id, access.user_id || null]
           );
         }
 
@@ -1014,7 +1012,7 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
             countryId,
             body.name.trim(),
             body.type,
-            (access.user_id === 'ariaka-access' ? null : (access.user_id || null)),
+            access.user_id || null,
           ]
         );
         return { division: inserted.rows[0] };

@@ -109,7 +109,6 @@ describe('Admin user blocking notices', () => {
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
-    process.env.ADMIN_ACCESS_PHRASE ??= 'prime-status-emergency';
     process.env.SKIP_OPTIONAL_STARTUP_WARMUPS = '1';
     delete process.env.TEST_ROUTE_SCOPE;
     const serverModule = await import('../src/server.js');

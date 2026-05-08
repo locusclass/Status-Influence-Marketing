@@ -54,7 +54,15 @@ function parsePaging(query) {
     };
 }
 async function getLiveAccess(client, request) {
-    return resolveLiveDashboardAccess(client, request);
+    const attached = (request.adminAccess ?? null);
+    if (attached) {
+        return attached;
+    }
+    const access = await resolveLiveDashboardAccess(client, request);
+    if (!access) {
+        throw new Error('dashboard_access_missing');
+    }
+    return access;
 }
 function appendTenantScope(state, access, scope) {
     appendDashboardTenantScope(state, access, scope);
@@ -160,22 +168,11 @@ export async function tenantAdminRoutes(app) {
             }
             const access = getRequestDashboardAccess(request);
             let user;
-            if (access.user_id === 'ariaka-access') {
-                user = {
-                    id: 'ariaka-access',
-                    email: 'ariaka-access@local',
-                    role: 'ADMIN',
-                    active_role: 'ADMIN',
-                    admin_role: ADMIN_ROLE_SUPER_ADMIN,
-                };
-            }
-            else {
-                const userRes = await client.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [access.user_id]);
-                user = userRes.rows[0];
-                if (!user) {
-                    reply.code(404);
-                    return { error: 'user_not_found' };
-                }
+            const userRes = await client.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [access.user_id]);
+            user = userRes.rows[0];
+            if (!user) {
+                reply.code(404);
+                return { error: 'user_not_found' };
             }
             const scopedModules = [
                 ADMIN_MODULE_OVERVIEW,
@@ -516,7 +513,7 @@ export async function tenantAdminRoutes(app) {
                 paid_at = NOW(),
                 paid_by = $2
             WHERE id = $1
-            `, [params.id, (access.user_id === 'ariaka-access' ? null : (access.user_id || null))]);
+            `, [params.id, access.user_id || null]);
             }
             const updated = await client.query(`
           SELECT *
@@ -695,7 +692,7 @@ export async function tenantAdminRoutes(app) {
                 countryId,
                 body.name.trim(),
                 body.type,
-                (access.user_id === 'ariaka-access' ? null : (access.user_id || null)),
+                access.user_id || null,
             ]);
             return { division: inserted.rows[0] };
         });
