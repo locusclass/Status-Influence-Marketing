@@ -872,6 +872,26 @@ async function loadHandlerJazSnapshot(client, access, cursor) {
         cursor: nextCursor,
     };
 }
+function hasPersistedHandlerJazUser(access) {
+    if (!access)
+        return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(String(access.user_id ?? '').trim());
+}
+function rejectInvalidHandlerJazAccess(access, reply) {
+    if (!access) {
+        reply.code(403);
+        return { error: 'forbidden' };
+    }
+    if (hasPersistedHandlerJazUser(access)) {
+        return null;
+    }
+    reply.code(409);
+    return {
+        error: 'handler_jaz_persisted_admin_required',
+        detail: "Handler's Jaz requires a signed-in admin account. Emergency access mode can't join the room.",
+    };
+}
 export async function adminRoutes(app) {
     const jobRepo = new JobRepo();
     const paymentRepo = new PaymentRepo();
@@ -3066,10 +3086,9 @@ export async function adminRoutes(app) {
     app.get('/admin/handler-jaz/room', { preHandler: [app.adminOnly] }, async (request, reply) => {
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             await ensureAdminHandlerJazSchema(client);
             return loadHandlerJazSnapshot(client, access);
         });
@@ -3079,10 +3098,9 @@ export async function adminRoutes(app) {
         const cursor = parseLiveCursor(query.cursor);
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             await ensureAdminHandlerJazSchema(client);
             return loadHandlerJazSnapshot(client, access, cursor);
         });
@@ -3095,10 +3113,9 @@ export async function adminRoutes(app) {
         }
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             const identity = await upsertAdminHandlerJazIdentity(client, {
                 userId: access.user_id,
                 handle: parsed.data.handle,
@@ -3126,10 +3143,9 @@ export async function adminRoutes(app) {
         }
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             const handle = await resolveHandlerJazHandle(client, access, parsed.data.handle);
             if (!handle) {
                 reply.code(409);
@@ -3170,10 +3186,9 @@ export async function adminRoutes(app) {
             .includes('multipart/form-data');
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             let payload = {};
             let attachmentUrl = null;
             let attachmentName = null;
@@ -3250,10 +3265,9 @@ export async function adminRoutes(app) {
         }
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             const handle = await resolveHandlerJazHandle(client, access, null);
             if (!handle) {
                 reply.code(409);
@@ -3278,10 +3292,9 @@ export async function adminRoutes(app) {
     app.post('/admin/handler-jaz/leave', { preHandler: [app.adminOnly] }, async (request, reply) => {
         return withTransaction(async (client) => {
             const access = (request.adminAccess ?? null);
-            if (!access) {
-                reply.code(403);
-                return { error: 'forbidden' };
-            }
+            const denied = rejectInvalidHandlerJazAccess(access, reply);
+            if (denied)
+                return denied;
             await deactivateAdminHandlerJazPresence(client, access.user_id);
             return { ok: true };
         });

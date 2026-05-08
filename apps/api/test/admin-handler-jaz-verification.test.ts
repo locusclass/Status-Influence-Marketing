@@ -210,6 +210,35 @@ describe('Admin handler jaz and viewer verification flows', () => {
     );
   });
 
+  it('returns a clear conflict for Handler Jaz when using emergency admin access', async () => {
+    const emergencyToken = app.jwt.sign({
+      sub: 'ariaka-access',
+      role: 'ADMIN',
+      active_role: 'ADMIN',
+      admin_role: 'SUPER_ADMIN',
+    });
+
+    const room = await app.inject({
+      method: 'GET',
+      url: '/api/admin/handler-jaz/room',
+      headers: { authorization: `Bearer ${emergencyToken}` },
+    });
+    expect(room.statusCode).toBe(409);
+    expect(room.json()).toMatchObject({
+      error: 'handler_jaz_persisted_admin_required',
+    });
+
+    const live = await app.inject({
+      method: 'GET',
+      url: '/api/admin/handler-jaz/live',
+      headers: { authorization: `Bearer ${emergencyToken}` },
+    });
+    expect(live.statusCode).toBe(409);
+    expect(live.json()).toMatchObject({
+      error: 'handler_jaz_persisted_admin_required',
+    });
+  });
+
   it('approves viewer verification and exposes the result through account profile and notifications', async () => {
     const ug = await insertCountry('UG', 'Uganda');
     const admin = await insertUser({
