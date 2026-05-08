@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { z } from 'zod';
-import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WITHDRAWALS, ADMIN_ROLE_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, ADMIN_ROLE_SUPER_ADMIN, ASSIGNABLE_ADMIN_MODULE_KEYS, adminModuleDefinitions, recordCampaignRevenueEntry, normalizeAdminModuleKey, } from '@prime/shared';
+import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WITHDRAWALS, ADMIN_ROLE_ADMIN, ADMIN_ROLE_SUPER_ADMIN, ASSIGNABLE_ADMIN_MODULE_KEYS, adminModuleDefinitions, recordCampaignRevenueEntry, normalizeAdminModuleKey, } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { hashPassword } from '../services/auth.js';
 import { config } from '../config.js';
@@ -12,7 +12,7 @@ import { buildCampaignStatusSummaries } from './campaigns.js';
 import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, resolveLiveDashboardAccess, } from '../services/adminTenant.js';
-import { collectCampaignNotificationUserIds, createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
+import { collectCampaignNotificationUserIds, createBlockingNotice, createUserNotifications, ensureUserSignalSchema, removeBlockingNotice, } from '../services/userSignals.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 import { acknowledgeAdminOperationTask, claimAdminOperationTask, createAdminOperationMessage, ensureAdminOperationsSchema, loadAdminOperationTaskState, loadAdminOperationsSnapshot, releaseAdminOperationTaskClaim, resolveAdminOperationTaskByEntity, } from '../services/adminOperations.js';
 import { ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS, ADMIN_HANDLER_JAZ_ROOM_KEY, cleanupAdminHandlerJaz, createAdminHandlerJazMessage, createAdminHandlerJazSignalEvent, deactivateAdminHandlerJazPresence, ensureAdminHandlerJazSchema, listAdminHandlerJazMessages, listAdminHandlerJazParticipants, listAdminHandlerJazSignalEvents, loadAdminHandlerJazIdentity, maxLiveCursor, parseLiveCursor, timestampText, upsertAdminHandlerJazIdentity, upsertAdminHandlerJazPresence, } from '../services/adminHandlerJaz.js';
@@ -44,6 +44,22 @@ const UpdateUserStatusSchema = z.object({
 });
 const UpdateUserContractPrivilegeSchema = z.object({
     can_multi_contract: z.boolean()
+});
+const CreateBlockingNoticeSchema = z
+    .object({
+    title: z.string().trim().min(3).max(120),
+    body: z.string().trim().min(6).max(4000),
+    send_to_all: z.boolean().default(false),
+    user_ids: z.array(z.string().trim().min(1).max(120)).max(500).default([]),
+})
+    .superRefine((value, ctx) => {
+    if (!value.send_to_all && value.user_ids.length == 0) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['user_ids'],
+            message: 'Select at least one user or enable send_to_all.',
+        });
+    }
 });
 const ResetPasswordSchema = z.object({
     password: z.string().min(8)
@@ -262,6 +278,62 @@ async function loadScopedUser(client, access, rawUserId) {
         resolvedUserId,
         user,
     };
+}
+const ACTIVE_BLOCKING_NOTICE_SELECT_SQL = `
+  active_notice.id AS active_admin_notice_id,
+  active_notice.title AS active_admin_notice_title,
+  active_notice.created_at AS active_admin_notice_created_at
+`;
+const ACTIVE_BLOCKING_NOTICE_JOIN_SQL = `
+  LEFT JOIN LATERAL (
+    SELECT notice.id, notice.title, notice.created_at
+    FROM admin_blocking_notice_targets target
+    JOIN admin_blocking_notices notice
+      ON notice.id = target.notice_id
+    WHERE target.user_id = u.id
+      AND notice.removed_at IS NULL
+    ORDER BY notice.created_at DESC
+    LIMIT 1
+  ) active_notice ON TRUE
+`;
+function appendNoticeEligibleUserFilters(state, access, userAlias = 'u') {
+    state.conditions.push(`${userAlias}.role <> 'ADMIN'`);
+    appendTenantScope(state, access, {
+        country: `${userAlias}.country_id`,
+        division: `${userAlias}.division_id`,
+    });
+}
+async function loadAllScopedNoticeTargetUsers(client, access) {
+    const state = {
+        conditions: [],
+        params: [],
+        idx: 1,
+    };
+    appendNoticeEligibleUserFilters(state, access);
+    const where = state.conditions.length
+        ? `WHERE ${state.conditions.join(' AND ')}`
+        : '';
+    const res = await client.query(`
+    SELECT u.id, u.full_name, u.email, u.country_id, u.division_id
+    FROM users u
+    ${where}
+    ORDER BY u.created_at DESC
+    `, state.params);
+    return res.rows;
+}
+async function loadScopedNoticeTargetUsers(client, access, rawUserIds) {
+    await ensurePublicIdColumns(client);
+    const resolvedUserIds = Array.from(new Set((await Promise.all(rawUserIds.map((value) => resolveUserId(client, value)))).filter((value) => Boolean(value))));
+    if (resolvedUserIds.length === 0) {
+        return [];
+    }
+    const res = await client.query(`
+    SELECT id, role, full_name, email, country_id, division_id
+    FROM users
+    WHERE id = ANY($1::uuid[])
+    `, [resolvedUserIds]);
+    return res.rows.filter((row) => String(row.role ?? '').trim().toUpperCase() !== 'ADMIN' &&
+        matchesTenantScope(access, row));
 }
 async function loadScopedCampaign(client, access, rawCampaignId) {
     await ensurePublicIdColumns(client);
@@ -2288,6 +2360,7 @@ export async function adminRoutes(app) {
         return withTransaction(async (client) => {
             const access = await getLiveDashboardAccess(client, request);
             await ensurePublicIdColumns(client);
+            await ensureUserSignalSchema(client);
             const conditions = [];
             const params = [];
             let idx = 1;
@@ -2322,32 +2395,24 @@ export async function adminRoutes(app) {
                 division: 'u.division_id',
             });
             idx = state.idx;
-            if (access.admin_role === ADMIN_ROLE_COUNTRY_ADMIN && access.country_id) {
-                conditions.push(`u.country_id = $${idx}`);
-                params.push(access.country_id);
-                idx++;
-            }
-            else if (access.admin_role === ADMIN_ROLE_DIVISION_ADMIN && access.division_id) {
-                conditions.push(`u.division_id = $${idx}`);
-                params.push(access.division_id);
-                idx++;
-            }
             const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
             const res = await client.query(`
-          SELECT
-            u.*,
-            p.avatar_url,
-        CASE
-          WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
-            THEN TRUE
-          ELSE FALSE
-        END AS is_online
-      FROM users u
-      LEFT JOIN user_profiles p ON p.user_id = u.id
-      ${where}
-      ORDER BY u.created_at DESC
-      LIMIT $${idx} OFFSET $${idx + 1}
-      `, [...params, limit, offset]);
+        SELECT
+          u.*,
+          p.avatar_url,
+          ${ACTIVE_BLOCKING_NOTICE_SELECT_SQL},
+          CASE
+            WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
+              THEN TRUE
+            ELSE FALSE
+          END AS is_online
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${ACTIVE_BLOCKING_NOTICE_JOIN_SQL}
+        ${where}
+        ORDER BY u.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
             return { users: res.rows };
         });
     });
@@ -2366,6 +2431,7 @@ export async function adminRoutes(app) {
         SELECT
           u.*,
           p.avatar_url,
+          ${ACTIVE_BLOCKING_NOTICE_SELECT_SQL},
           CASE
             WHEN COALESCE(u.last_seen_at, '-infinity'::timestamptz) >= NOW() - interval '5 minutes'
               THEN TRUE
@@ -2373,6 +2439,7 @@ export async function adminRoutes(app) {
           END AS is_online
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${ACTIVE_BLOCKING_NOTICE_JOIN_SQL}
         WHERE u.id = $1
         LIMIT 1
         `, [resolvedUserId]);
@@ -2630,6 +2697,176 @@ export async function adminRoutes(app) {
             return { error: 'user_not_found' };
         }
         return { user: result };
+    });
+    app.get('/admin/user-notices', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const query = request.query;
+        const { limit, offset } = parsePaging(query);
+        const status = typeof query?.status === 'string'
+            ? query.status.trim().toUpperCase()
+            : 'ACTIVE';
+        return withTransaction(async (client) => {
+            const access = await getLiveDashboardAccess(client, request);
+            await ensureUserSignalSchema(client);
+            if (!hasAdminModuleAccess(access, ADMIN_MODULE_USERS)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
+            const conditions = [`u.role <> 'ADMIN'`];
+            const params = [];
+            let idx = 1;
+            if (status === 'ACTIVE') {
+                conditions.push(`notice.removed_at IS NULL`);
+            }
+            else if (status === 'REMOVED') {
+                conditions.push(`notice.removed_at IS NOT NULL`);
+            }
+            if (typeof query?.q === 'string' && query.q.trim().length > 0) {
+                conditions.push(`(notice.title ILIKE $${idx} OR notice.body ILIKE $${idx})`);
+                params.push(`%${query.q.trim()}%`);
+                idx++;
+            }
+            const state = { conditions, params, idx };
+            appendTenantScope(state, access, {
+                country: 'u.country_id',
+                division: 'u.division_id',
+            });
+            idx = state.idx;
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+            const res = await client.query(`
+        SELECT
+          notice.id,
+          notice.title,
+          notice.body,
+          notice.audience_kind,
+          notice.created_at,
+          notice.updated_at,
+          notice.removed_at,
+          notice.created_by_user_id,
+          notice.removed_by_user_id,
+          COALESCE(NULLIF(creator.full_name, ''), creator.email, 'Admin') AS created_by_name,
+          COALESCE(NULLIF(remover.full_name, ''), remover.email, 'Admin') AS removed_by_name,
+          COUNT(DISTINCT target.user_id)::int AS target_count
+        FROM admin_blocking_notices notice
+        JOIN admin_blocking_notice_targets target ON target.notice_id = notice.id
+        JOIN users u ON u.id = target.user_id
+        LEFT JOIN users creator ON creator.id = notice.created_by_user_id
+        LEFT JOIN users remover ON remover.id = notice.removed_by_user_id
+        ${where}
+        GROUP BY notice.id, creator.full_name, creator.email, remover.full_name, remover.email
+        ORDER BY
+          CASE WHEN notice.removed_at IS NULL THEN 0 ELSE 1 END,
+          notice.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
+        `, [...params, limit, offset]);
+            return { notices: res.rows };
+        });
+    });
+    app.post('/admin/user-notices', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const parsed = CreateBlockingNoticeSchema.safeParse(request.body ?? {});
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        return withTransaction(async (client) => {
+            const access = await getLiveDashboardAccess(client, request);
+            await ensureUserSignalSchema(client);
+            if (!hasAdminModuleAccess(access, ADMIN_MODULE_USERS)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
+            const targetUsers = parsed.data.send_to_all
+                ? await loadAllScopedNoticeTargetUsers(client, access)
+                : await loadScopedNoticeTargetUsers(client, access, parsed.data.user_ids);
+            const requestedTargetIds = Array.from(new Set(parsed.data.user_ids.map((value) => value.trim()).filter(Boolean)));
+            if (!parsed.data.send_to_all && targetUsers.length !== requestedTargetIds.length) {
+                reply.code(404);
+                return { error: 'notice_target_not_found' };
+            }
+            if (targetUsers.length === 0) {
+                reply.code(404);
+                return { error: 'notice_target_not_found' };
+            }
+            const actorId = String(request.user.sub ?? '').trim();
+            const notice = await createBlockingNotice(client, targetUsers.map((row) => row.id), {
+                title: parsed.data.title,
+                body: parsed.data.body,
+                audienceKind: parsed.data.send_to_all
+                    ? 'ALL_SCOPED_USERS'
+                    : 'SELECTED_USERS',
+                createdByUserId: actorId,
+            });
+            if (!notice) {
+                reply.code(500);
+                return { error: 'notice_create_failed' };
+            }
+            await createUserNotifications(client, targetUsers.map((row) => row.id), {
+                category: 'ADMIN_NOTICE',
+                title: parsed.data.title,
+                body: parsed.data.body,
+                actorId,
+                targetType: 'ADMIN_BLOCKING_NOTICE',
+                targetId: String(notice.id),
+                meta: {
+                    blocking_notice_id: String(notice.id),
+                    audience_kind: parsed.data.send_to_all
+                        ? 'ALL_SCOPED_USERS'
+                        : 'SELECTED_USERS',
+                },
+            });
+            await logAudit(client, actorId, 'CREATE_USER_BLOCKING_NOTICE', 'admin_blocking_notice', String(notice.id), {
+                title: parsed.data.title,
+                target_count: targetUsers.length,
+                send_to_all: parsed.data.send_to_all,
+            });
+            return { notice };
+        });
+    });
+    app.delete('/admin/user-notices/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        return withTransaction(async (client) => {
+            const access = await getLiveDashboardAccess(client, request);
+            await ensureUserSignalSchema(client);
+            if (!hasAdminModuleAccess(access, ADMIN_MODULE_USERS)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
+            const scopeRes = await client.query(`
+        SELECT
+          notice.id,
+          notice.removed_at,
+          target.user_id,
+          u.role,
+          u.country_id,
+          u.division_id
+        FROM admin_blocking_notices notice
+        JOIN admin_blocking_notice_targets target ON target.notice_id = notice.id
+        JOIN users u ON u.id = target.user_id
+        WHERE notice.id = $1
+        `, [params.id]);
+            if (scopeRes.rows.length === 0) {
+                reply.code(404);
+                return { error: 'notice_not_found' };
+            }
+            if (scopeRes.rows.some((row) => String(row.role ?? '').trim().toUpperCase() === 'ADMIN' ||
+                !matchesTenantScope(access, row))) {
+                reply.code(404);
+                return { error: 'notice_not_found' };
+            }
+            if (scopeRes.rows[0]?.removed_at) {
+                reply.code(409);
+                return { error: 'notice_already_removed' };
+            }
+            const actorId = String(request.user.sub ?? '').trim();
+            const removed = await removeBlockingNotice(client, params.id, actorId);
+            if (!removed) {
+                reply.code(404);
+                return { error: 'notice_not_found' };
+            }
+            await logAudit(client, actorId, 'REMOVE_USER_BLOCKING_NOTICE', 'admin_blocking_notice', params.id, {
+                target_count: scopeRes.rows.length,
+            });
+            return { notice: removed };
+        });
     });
     app.patch('/admin/users/:id/password', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;

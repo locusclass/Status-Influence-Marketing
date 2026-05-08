@@ -1,4 +1,9 @@
 import { pool } from '../db.js';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function normalizeUuid(value) {
+    const text = String(value ?? '').trim();
+    return UUID_PATTERN.test(text) ? text : null;
+}
 export async function ensureUserSignalSchema(client) {
     await client.query(`
     ALTER TABLE users
@@ -38,6 +43,44 @@ export async function ensureUserSignalSchema(client) {
     await client.query(`
     CREATE INDEX IF NOT EXISTS user_notifications_user_unread_idx
     ON user_notifications (user_id, read_at, created_at DESC)
+  `);
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS admin_blocking_notices (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      audience_kind TEXT NOT NULL DEFAULT 'SELECTED_USERS',
+      created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      removed_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      removed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await client.query(`
+    ALTER TABLE admin_blocking_notices
+      DROP CONSTRAINT IF EXISTS admin_blocking_notices_audience_kind_check
+  `);
+    await client.query(`
+    ALTER TABLE admin_blocking_notices
+      ADD CONSTRAINT admin_blocking_notices_audience_kind_check
+      CHECK (audience_kind IN ('SELECTED_USERS', 'ALL_SCOPED_USERS'))
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS admin_blocking_notices_active_idx
+    ON admin_blocking_notices (removed_at, created_at DESC)
+  `);
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS admin_blocking_notice_targets (
+      notice_id UUID NOT NULL REFERENCES admin_blocking_notices(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (notice_id, user_id)
+    )
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS admin_blocking_notice_targets_user_idx
+    ON admin_blocking_notice_targets (user_id, created_at DESC)
   `);
 }
 export async function touchUserPresenceWithClient(client, userId, options = {}) {
@@ -110,6 +153,85 @@ export async function createUserNotifications(client, userIds, input) {
             JSON.stringify(input.meta ?? {}),
         ]);
     }
+}
+export async function createBlockingNotice(client, userIds, input) {
+    await ensureUserSignalSchema(client);
+    const uniqueUserIds = Array.from(new Set(userIds
+        .map((value) => String(value ?? '').trim())
+        .filter((value) => value.length > 0)));
+    if (uniqueUserIds.length === 0) {
+        return null;
+    }
+    const createdByUserId = normalizeUuid(input.createdByUserId);
+    const created = await client.query(`
+    INSERT INTO admin_blocking_notices (
+      title,
+      body,
+      audience_kind,
+      created_by_user_id
+    )
+    VALUES ($1, $2, $3, $4)
+    RETURNING *
+    `, [
+        input.title.trim(),
+        input.body.trim(),
+        input.audienceKind ?? 'SELECTED_USERS',
+        createdByUserId,
+    ]);
+    const notice = created.rows[0] ?? null;
+    if (!notice?.id) {
+        return null;
+    }
+    for (const userId of uniqueUserIds) {
+        await client.query(`
+      INSERT INTO admin_blocking_notice_targets (notice_id, user_id)
+      VALUES ($1, $2)
+      ON CONFLICT (notice_id, user_id) DO NOTHING
+      `, [notice.id, userId]);
+    }
+    return {
+        ...notice,
+        target_count: uniqueUserIds.length,
+    };
+}
+export async function removeBlockingNotice(client, noticeId, removedByUserId) {
+    await ensureUserSignalSchema(client);
+    const normalizedRemovedBy = normalizeUuid(removedByUserId);
+    const updated = await client.query(`
+    UPDATE admin_blocking_notices
+    SET removed_at = COALESCE(removed_at, NOW()),
+        removed_by_user_id = COALESCE($2, removed_by_user_id),
+        updated_at = NOW()
+    WHERE id = $1
+      AND removed_at IS NULL
+    RETURNING *
+    `, [noticeId, normalizedRemovedBy]);
+    return updated.rows[0] ?? null;
+}
+export async function getActiveBlockingNotice(client, userId) {
+    await ensureUserSignalSchema(client);
+    const normalizedUserId = String(userId ?? '').trim();
+    if (!normalizedUserId) {
+        return null;
+    }
+    const res = await client.query(`
+    SELECT
+      notice.id,
+      notice.title,
+      notice.body,
+      notice.audience_kind,
+      notice.created_at,
+      notice.updated_at,
+      notice.created_by_user_id
+    FROM admin_blocking_notice_targets target
+    JOIN admin_blocking_notices notice
+      ON notice.id = target.notice_id
+    WHERE target.user_id = $1
+      AND notice.removed_at IS NULL
+    ORDER BY notice.created_at DESC
+    LIMIT 1
+    `, [normalizedUserId]);
+    return res.rows[0] ?? null;
 }
 export async function listUserNotifications(client, userId, options = {}) {
     await ensureUserSignalSchema(client);

@@ -9,7 +9,7 @@ import { deleteFromFirebaseStorage, extractFirebaseObjectNameFromUrl, } from '..
 import { resolveMediaUploadError, storeMultipartMediaFile, } from '../services/mediaUploads.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { ACCOUNT_ROLE_BUSINESS, buildAuthClaims, buildUserSession, canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeAccountRole, normalizeActiveRole, normalizeRequestedUserRole, } from '../services/roles.js';
-import { deleteUserNotification, ensureUserSignalSchema, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
+import { deleteUserNotification, ensureUserSignalSchema, getActiveBlockingNotice, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
 import { buildCurrentPolicyDocuments, buildPolicyAcceptanceState, CURRENT_PLATFORM_POLICY_VERSION, CURRENT_PRIVACY_POLICY_VERSION, ensurePolicyAcceptanceColumns, policyAcceptanceSelectSql, } from '../services/policies.js';
 import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
 import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, ensureViewerVerificationSchema, } from '../services/viewerVerification.js';
@@ -541,11 +541,16 @@ export async function accountRoutes(app) {
                     handle: null,
                 },
             ];
+            const profile = res.rows[0] ?? null;
+            const activeAdminNotice = profile
+                ? await getActiveBlockingNotice(client, userId)
+                : null;
             return {
-                profile: res.rows[0]
+                profile: profile
                     ? {
-                        ...res.rows[0],
-                        ...buildPolicyAcceptanceState(res.rows[0]),
+                        ...profile,
+                        ...buildPolicyAcceptanceState(profile),
+                        active_admin_notice: activeAdminNotice,
                         ambassador_platforms: ambassadorPlatforms,
                     }
                     : null,
@@ -1211,6 +1216,88 @@ export async function accountRoutes(app) {
         ORDER BY created_at DESC
         LIMIT 20
         `, [wallet?.id]);
+            const contractFundingRes = activeRole === ACCOUNT_ROLE_BUSINESS && wallet?.id
+                ? await client.query(`
+              WITH funding_events AS (
+                SELECT
+                  wt.id,
+                  wt.amount,
+                  wt.created_at,
+                  wt.reference,
+                  CASE
+                    WHEN wt.reference LIKE 'ESCROW_FUND:BUNDLE:%' THEN 'BUNDLE'
+                    ELSE 'CAMPAIGN'
+                  END AS funding_type,
+                  CASE
+                    WHEN wt.reference LIKE 'ESCROW_FUND:BUNDLE:%'
+                      THEN NULLIF(SPLIT_PART(wt.reference, ':', 3), '')
+                    ELSE NULLIF(SPLIT_PART(wt.reference, ':', 2), '')
+                  END AS funding_key
+                FROM wallet_txns wt
+                WHERE wt.wallet_id = $1
+                  AND wt.direction = 'DEBIT'
+                  AND wt.reference LIKE 'ESCROW_FUND:%'
+                ORDER BY wt.created_at DESC
+                LIMIT 20
+              )
+              SELECT
+                event.id,
+                event.amount,
+                event.created_at,
+                event.reference,
+                event.funding_type,
+                CASE
+                  WHEN event.funding_type = 'BUNDLE'
+                    THEN COALESCE(bundle_meta.title, 'Campaign bundle')
+                  ELSE COALESCE(campaign_meta.title, 'Campaign')
+                END AS campaign_title,
+                CASE
+                  WHEN event.funding_type = 'BUNDLE'
+                    THEN bundle_meta.public_id
+                  ELSE campaign_meta.public_id
+                END AS campaign_public_id,
+                COALESCE(bundle_meta.campaign_count, 1)::int AS campaign_count
+              FROM funding_events event
+              LEFT JOIN LATERAL (
+                SELECT c.id, c.title, c.public_id
+                FROM campaigns c
+                WHERE event.funding_type = 'CAMPAIGN'
+                  AND c.id::text = event.funding_key
+                LIMIT 1
+              ) campaign_meta ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT
+                  COALESCE(
+                    MAX(
+                      CASE
+                        WHEN c.bundle_root_campaign_id IS NULL
+                          OR c.bundle_root_campaign_id = c.id
+                          THEN c.title
+                        ELSE NULL
+                      END
+                    ),
+                    MAX(c.title),
+                    'Campaign bundle'
+                  ) AS title,
+                  COALESCE(
+                    MAX(
+                      CASE
+                        WHEN c.bundle_root_campaign_id IS NULL
+                          OR c.bundle_root_campaign_id = c.id
+                          THEN c.public_id
+                        ELSE NULL
+                      END
+                    ),
+                    MAX(c.public_id)
+                  ) AS public_id,
+                  COUNT(*)::int AS campaign_count
+                FROM campaigns c
+                WHERE event.funding_type = 'BUNDLE'
+                  AND c.campaign_bundle_id::text = event.funding_key
+              ) bundle_meta ON TRUE
+              ORDER BY event.created_at DESC
+              `, [wallet.id])
+                : { rows: [] };
             return {
                 wallet: wallet
                     ? {
@@ -1224,6 +1311,7 @@ export async function accountRoutes(app) {
                     : wallet,
                 txns: txnsRes.rows,
                 withdrawals: withdrawalsRes.rows,
+                contract_funding: contractFundingRes.rows,
             };
         });
         return data;
