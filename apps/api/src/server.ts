@@ -56,6 +56,8 @@ import {
   touchUserPresence,
 } from './services/userSignals.js';
 import { ensureSmsSchema } from './services/smsDispatch.js';
+import { ensurePublicIdColumns } from './services/publicId.js';
+import { ensureAdminOperationsSchema } from './services/adminOperations.js';
 import {
   ensurePrimarySuperAdmin,
   hasAdminModuleAccess,
@@ -141,6 +143,9 @@ export function buildServer() {
         await ensureSmsSchema(client);
         await ensurePolicyAcceptanceColumns(client);
         await ensurePrimarySuperAdmin(client);
+        await ensurePublicIdColumns(client);
+        await ensureAdminOperationsSchema(client);
+        await ensureAdminHandlerJazSchema(client);
       });
     } catch (error) {
       app.log.error(

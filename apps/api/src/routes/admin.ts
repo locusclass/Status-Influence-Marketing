@@ -434,7 +434,7 @@ async function loadScopedUser(
   access: DashboardAccessContext,
   rawUserId: string
 ) {
-  await ensurePublicIdColumns(client);
+  
   const resolvedUserId = await resolveUserId(client, rawUserId);
   if (!resolvedUserId) {
     return null;
@@ -519,7 +519,7 @@ async function loadScopedNoticeTargetUsers(
   access: DashboardAccessContext,
   rawUserIds: string[]
 ) {
-  await ensurePublicIdColumns(client);
+  
   const resolvedUserIds = Array.from(
     new Set(
       (
@@ -553,7 +553,7 @@ async function loadScopedCampaign(
   access: DashboardAccessContext,
   rawCampaignId: string
 ) {
-  await ensurePublicIdColumns(client);
+  
   const resolvedCampaignId = await resolveCampaignId(client, rawCampaignId);
   if (!resolvedCampaignId) {
     return null;
@@ -914,7 +914,7 @@ async function createManagedAdminUser(
 }
 
 async function loadManagedAdminTarget(client: any, rawUserId: string) {
-  await ensurePublicIdColumns(client);
+  
   const resolvedUserId = await resolveUserId(client, rawUserId);
   if (!resolvedUserId) {
     return null;
@@ -1353,13 +1353,13 @@ export async function adminRoutes(app: FastifyInstance) {
   const ensureAdminRoutesSchema = () => {
     if (!schemaReadyPromise) {
       schemaReadyPromise = withTransaction(async (client) => {
-        await ensurePublicIdColumns(client);
-        await ensureUserSignalSchema(client);
-        await ensureCampaignDraftsTable(client);
+        
+        
+        
         await ensureContractParticipantColumns(client);
         await ensureProofReviewColumns(client);
-        await ensureAdminOperationsSchema(client);
-        await ensureAdminHandlerJazSchema(client);
+        
+        
         await ensureUserProfilesTable(client);
         await ensureViewerVerificationSchema(client);
       }).catch((error) => {
@@ -1375,14 +1375,14 @@ export async function adminRoutes(app: FastifyInstance) {
       return;
     }
     try {
-      await ensureAdminRoutesSchema();
+      
     } catch (error) {
       app.log.error({ err: error }, 'startup warmup failed for admin schema');
     }
   });
 
   app.addHook('preHandler', async () => {
-    await ensureAdminRoutesSchema();
+    
   });
 
   app.get('/admin/me', { preHandler: [app.adminOnly] }, async (request, reply) => {
@@ -1423,7 +1423,7 @@ export async function adminRoutes(app: FastifyInstance) {
         return { error: 'forbidden' };
       }
 
-      await ensurePublicIdColumns(client);
+      
       const candidates = await client.query(
         `
         SELECT u.id
@@ -2332,7 +2332,7 @@ export async function adminRoutes(app: FastifyInstance) {
         reply.code(403);
         return { error: 'forbidden' };
       }
-      await ensureCampaignDraftsTable(client);
+      
 
       const countScoped = async (input: {
         module: string;
@@ -2449,8 +2449,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
-      await ensureUserSignalSchema(client);
+      
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2537,8 +2537,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensureCampaignDraftsTable(client);
-      await ensurePublicIdColumns(client);
+      
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2614,7 +2614,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const scoreRange = parseNumberRange(query?.min_score, query?.max_score);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2720,7 +2720,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2795,7 +2795,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const amountRange = parseNumberRange(query?.min_amount, query?.max_amount);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2873,8 +2873,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
-      await ensureUserSignalSchema(client);
+      
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -2943,8 +2943,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const result = await withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
-      await ensureUserSignalSchema(client);
+      
+      
       const scopedUser = await loadScopedUser(client, access, params.id);
       if (!scopedUser) {
         return null;
@@ -3287,7 +3287,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensureUserSignalSchema(client);
+      
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
         reply.code(403);
         return { error: 'forbidden' };
@@ -3358,7 +3358,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensureUserSignalSchema(client);
+      
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
         reply.code(403);
         return { error: 'forbidden' };
@@ -3436,7 +3436,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensureUserSignalSchema(client);
+      
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
         reply.code(403);
         return { error: 'forbidden' };
@@ -3602,7 +3602,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
       const access = await getLiveDashboardAccess(client, request);
-      await ensurePublicIdColumns(client);
+      
       const conditions: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -4069,7 +4069,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
       const denied = rejectInvalidHandlerJazAccess(access, reply);
       if (denied) return denied;
-      await ensureAdminHandlerJazSchema(client);
+      
       return loadHandlerJazSnapshot(client, access!);
     });
   });
@@ -4081,7 +4081,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
       const denied = rejectInvalidHandlerJazAccess(access, reply);
       if (denied) return denied;
-      await ensureAdminHandlerJazSchema(client);
+      
       return loadHandlerJazSnapshot(client, access!, cursor);
     });
   });
