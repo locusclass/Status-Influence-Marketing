@@ -312,10 +312,14 @@ export async function listAdminHandlerJazMessages(client, options = {}) {
     params.push(limit);
     const res = await client.query(`
     SELECT *
-    FROM admin_handler_jaz_messages
-    WHERE ${conditions.join(' AND ')}
+    FROM (
+      SELECT *
+      FROM admin_handler_jaz_messages
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY created_at DESC
+      LIMIT $${params.length}
+    ) recent_messages
     ORDER BY created_at ASC
-    LIMIT $${params.length}
     `, params);
     return res.rows.map(serializeAdminHandlerJazMessage);
 }
@@ -334,10 +338,14 @@ export async function listAdminHandlerJazSignalEvents(client, userId, options = 
     params.push(limit);
     const res = await client.query(`
     SELECT *
-    FROM admin_handler_jaz_signal_events
-    WHERE ${conditions.join(' AND ')}
+    FROM (
+      SELECT *
+      FROM admin_handler_jaz_signal_events
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY created_at DESC
+      LIMIT $${params.length}
+    ) recent_signals
     ORDER BY created_at ASC
-    LIMIT $${params.length}
     `, params);
     return res.rows.map(serializeAdminHandlerJazSignal);
 }
