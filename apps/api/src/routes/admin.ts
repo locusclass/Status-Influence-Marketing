@@ -72,6 +72,7 @@ import {
   ensureUserSignalSchema,
   removeBlockingNotice,
 } from '../services/userSignals.js';
+import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 import {
   acknowledgeAdminOperationTask,
@@ -84,6 +85,7 @@ import {
   releaseAdminOperationTaskClaim,
   resolveAdminOperationTaskByEntity,
 } from '../services/adminOperations.js';
+import { queueSmsDispatch } from '../services/smsDispatch.js';
 import {
   ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS,
   ADMIN_HANDLER_JAZ_ROOM_KEY,
@@ -4570,7 +4572,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.patch('/admin/campaigns/:id/approve', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const params = request.params as { id: string };
     const adminUserId = (request.user as any).sub as string;
-    return withTransaction(async (client) => {
+    const result = await withTransaction(async (client) => {
       const campRes = await client.query(
         `SELECT c.id, c.business_id, c.title, c.approval_status
          FROM campaigns c WHERE c.id=$1 LIMIT 1`,
@@ -4585,17 +4587,26 @@ export async function adminRoutes(app: FastifyInstance) {
          WHERE id=$1`,
         [params.id, adminUserId]
       );
-
-      await client.query(
-        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_APPROVED',
-                 'Campaign approved',
-                 $2, now())
-         ON CONFLICT DO NOTHING`,
-        [
-          camp.business_id,
-          `Your campaign "${camp.title}" has been approved. You can now fund and launch it.`,
-        ]
+      const delivery = await createUserNotificationsWithSmsPlan(
+        client,
+        [camp.business_id],
+        {
+          category: 'CAMPAIGN_APPROVED',
+          title: 'Campaign approved',
+          body: `Your campaign "${camp.title}" has been approved. You can now fund and launch it.`,
+          actorId: adminUserId,
+          targetType: 'campaign',
+          targetId: params.id,
+          meta: {
+            approval_status: 'APPROVED',
+          },
+        },
+        {
+          sms: {
+            enabled: true,
+            message: `Your campaign "${camp.title}" has been approved. You can now fund and launch it on Prime Status.`,
+          },
+        }
       );
 
       await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN', 'campaign', params.id, {});
@@ -4605,8 +4616,13 @@ export async function adminRoutes(app: FastifyInstance) {
         params.id,
         adminUserId
       );
-      return { ok: true };
+      return { ok: true, smsJobs: delivery.smsJobs };
     });
+    if ((result as any)?.error) {
+      return result;
+    }
+    queueSmsDispatch((result as any).smsJobs ?? [], app.log, 'admin:campaign-approve');
+    return { ok: true };
   });
 
   app.patch('/admin/campaigns/:id/reject', { preHandler: [app.adminOnly] }, async (request, reply) => {
@@ -4614,7 +4630,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({ reason: z.string().trim().min(1).max(500) }).safeParse(request.body);
     if (!body.success) { reply.code(400); return { error: 'reason_required' }; }
     const adminUserId = (request.user as any).sub as string;
-    return withTransaction(async (client) => {
+    const result = await withTransaction(async (client) => {
       const campRes = await client.query(
         `SELECT c.id, c.business_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`,
         [params.id]
@@ -4625,11 +4641,27 @@ export async function adminRoutes(app: FastifyInstance) {
         `UPDATE campaigns SET approval_status='REJECTED', approved_at=now(), approved_by_user_id=$2 WHERE id=$1`,
         [params.id, adminUserId]
       );
-      await client.query(
-        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_REJECTED', 'Campaign rejected', $2, now())
-         ON CONFLICT DO NOTHING`,
-        [camp.business_id, `Your campaign "${camp.title}" was rejected: ${body.data.reason}`]
+      const delivery = await createUserNotificationsWithSmsPlan(
+        client,
+        [camp.business_id],
+        {
+          category: 'CAMPAIGN_REJECTED',
+          title: 'Campaign rejected',
+          body: `Your campaign "${camp.title}" was rejected: ${body.data.reason}`,
+          actorId: adminUserId,
+          targetType: 'campaign',
+          targetId: params.id,
+          meta: {
+            approval_status: 'REJECTED',
+            rejection_reason: body.data.reason,
+          },
+        },
+        {
+          sms: {
+            enabled: true,
+            message: `Your campaign "${camp.title}" was rejected: ${body.data.reason}`,
+          },
+        }
       );
       await logAudit(client, adminUserId, 'REJECT_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
       await resolveAdminOperationTaskByEntity(
@@ -4638,8 +4670,13 @@ export async function adminRoutes(app: FastifyInstance) {
         params.id,
         adminUserId
       );
-      return { ok: true };
+      return { ok: true, smsJobs: delivery.smsJobs };
     });
+    if ((result as any)?.error) {
+      return result;
+    }
+    queueSmsDispatch((result as any).smsJobs ?? [], app.log, 'admin:campaign-reject');
+    return { ok: true };
   });
 
   app.patch('/admin/campaigns/:id/return-for-edit', { preHandler: [app.adminOnly] }, async (request, reply) => {
@@ -4647,7 +4684,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({ reason: z.string().trim().min(1).max(500) }).safeParse(request.body);
     if (!body.success) { reply.code(400); return { error: 'reason_required' }; }
     const adminUserId = (request.user as any).sub as string;
-    return withTransaction(async (client) => {
+    const result = await withTransaction(async (client) => {
       const campRes = await client.query(
         `SELECT c.id, c.business_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`,
         [params.id]
@@ -4658,11 +4695,27 @@ export async function adminRoutes(app: FastifyInstance) {
         `UPDATE campaigns SET approval_status='RETURNED', approved_by_user_id=$2 WHERE id=$1`,
         [params.id, adminUserId]
       );
-      await client.query(
-        `INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_RETURNED', 'Campaign returned for edit', $2, now())
-         ON CONFLICT DO NOTHING`,
-        [camp.business_id, `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`]
+      const delivery = await createUserNotificationsWithSmsPlan(
+        client,
+        [camp.business_id],
+        {
+          category: 'CAMPAIGN_RETURNED',
+          title: 'Campaign returned for edit',
+          body: `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`,
+          actorId: adminUserId,
+          targetType: 'campaign',
+          targetId: params.id,
+          meta: {
+            approval_status: 'RETURNED',
+            return_reason: body.data.reason,
+          },
+        },
+        {
+          sms: {
+            enabled: true,
+            message: `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`,
+          },
+        }
       );
       await logAudit(client, adminUserId, 'RETURN_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
       await resolveAdminOperationTaskByEntity(
@@ -4671,8 +4724,13 @@ export async function adminRoutes(app: FastifyInstance) {
         params.id,
         adminUserId
       );
-      return { ok: true };
+      return { ok: true, smsJobs: delivery.smsJobs };
     });
+    if ((result as any)?.error) {
+      return result;
+    }
+    queueSmsDispatch((result as any).smsJobs ?? [], app.log, 'admin:campaign-return');
+    return { ok: true };
   });
 
   // ── Campaign completion / proof administration ───────────────────────────────

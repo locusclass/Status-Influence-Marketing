@@ -4,7 +4,7 @@ type TouchPresenceOptions = {
   markLogin?: boolean;
 };
 
-type NotificationInput = {
+export type NotificationInput = {
   category?: string;
   title: string;
   body: string;

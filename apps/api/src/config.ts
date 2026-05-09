@@ -52,6 +52,8 @@ const allowDirectApiBypass = allowDirectYoHostBypass(
 export const YO_PROXY_URL_MISSING_MESSAGE = 'YO_PROXY_URL is missing';
 export const YO_API_USERNAME_MISSING_MESSAGE = 'YO_API_USERNAME is missing';
 export const YO_API_PASSWORD_MISSING_MESSAGE = 'YO_API_PASSWORD is missing';
+export const AT_USERNAME_MISSING_MESSAGE = 'AT_USERNAME is missing';
+export const AT_API_KEY_MISSING_MESSAGE = 'AT_API_KEY is missing';
 
 const configuredYoApiPassword = stripWrappingQuotes(
   process.env.YO_API_PASSWORD ??
@@ -74,6 +76,14 @@ const configuredYoBaseUrl = stripWrappingQuotes(
     process.env.FLUTTERWAVE_BASE_URL ??
     ''
 );
+
+const configuredAtUsername = stripWrappingQuotes(process.env.AT_USERNAME ?? '');
+const configuredAtApiKey = stripWrappingQuotes(process.env.AT_API_KEY ?? '');
+const configuredAtSenderId = stripWrappingQuotes(
+  process.env.AT_SENDER_ID ?? 'PRIMESTATUS'
+);
+const africaTalkingEnvironment =
+  configuredAtUsername.trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'live';
 
 const yoConfig = {
   allowDirectApiBypass,
@@ -154,6 +164,16 @@ export const config = {
     ).replace(/\\n/g, '\n'),
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET ?? '',
   },
+  africaTalking: {
+    username: configuredAtUsername,
+    apiKey: configuredAtApiKey,
+    senderId: configuredAtSenderId,
+    environment: africaTalkingEnvironment,
+    baseUrl:
+      africaTalkingEnvironment === 'sandbox'
+        ? 'https://api.sandbox.africastalking.com/version1/messaging'
+        : 'https://api.africastalking.com/version1/messaging',
+  },
 };
 
 export function getStartupConfigIssues() {
@@ -189,6 +209,16 @@ export function getStartupConfigIssues() {
     );
   }
 
+  if (!config.africaTalking.username.trim()) {
+    issues.push(`${AT_USERNAME_MISSING_MESSAGE}. SMS delivery is disabled.`);
+  }
+  if (!config.africaTalking.apiKey.trim()) {
+    issues.push(`${AT_API_KEY_MISSING_MESSAGE}. SMS delivery is disabled.`);
+  }
+  if (!config.africaTalking.senderId.trim()) {
+    issues.push('AT_SENDER_ID is missing. SMS sender branding may fail.');
+  }
+
   if (
     config.firebase.projectId ||
     config.firebase.clientEmail ||
@@ -216,7 +246,9 @@ export function isFatalStartupIssue(issue: string) {
   return (
     issue.includes('DATABASE_URL is missing') ||
     issue.includes('JWT_SECRET is missing') ||
-    issue.includes('JWT_SECRET is missing or using the development default')
+    issue.includes('JWT_SECRET is missing or using the development default') ||
+    issue.includes(YO_API_USERNAME_MISSING_MESSAGE) ||
+    issue.includes(YO_API_PASSWORD_MISSING_MESSAGE)
   );
 }
 
@@ -241,6 +273,13 @@ export function hasYoLegacyApiCredentials() {
 
 export function hasYoSecretKey() {
   return false;
+}
+
+export function hasAfricaTalkingCredentials() {
+  return (
+    config.africaTalking.username.trim().length > 0 &&
+    config.africaTalking.apiKey.trim().length > 0
+  );
 }
 
 export function hasYoEncryptionKey() {

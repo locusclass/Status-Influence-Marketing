@@ -55,6 +55,7 @@ import {
   ensureUserSignalSchema,
   touchUserPresence,
 } from './services/userSignals.js';
+import { ensureSmsSchema } from './services/smsDispatch.js';
 import {
   ensurePrimarySuperAdmin,
   hasAdminModuleAccess,
@@ -137,13 +138,14 @@ export function buildServer() {
     try {
       await withTransaction(async (client) => {
         await ensureUserSignalSchema(client);
+        await ensureSmsSchema(client);
         await ensurePolicyAcceptanceColumns(client);
         await ensurePrimarySuperAdmin(client);
       });
     } catch (error) {
       app.log.error(
         { err: error, source },
-        'startup warmup failed for user signal and policy schema'
+        'startup warmup failed for user signal, policy, and sms schema'
       );
     }
   };
@@ -435,6 +437,17 @@ export function buildServer() {
     if (config.yo.allowDirectApiBypass) {
       app.log.warn('YO_ALLOW_DIRECT_API_BYPASS is enabled. Direct YO hosts can bypass the static-IP gateway.');
     }
+
+    app.log.info(
+      {
+        provider: 'AFRICAS_TALKING',
+        environment: config.africaTalking.environment,
+        sender_id: config.africaTalking.senderId || null,
+        configured: config.africaTalking.username.trim().length > 0 &&
+          config.africaTalking.apiKey.trim().length > 0,
+      },
+      'sms_config'
+    );
   });
 
   return app;

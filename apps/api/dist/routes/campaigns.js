@@ -11,8 +11,10 @@ import { buildPhoneLookupVariants, normalizePhoneSearchInput, splitSearchTerms, 
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import { canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeActiveRole, } from '../services/roles.js';
 import { createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
+import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, ensureViewerVerificationSchema, } from '../services/viewerVerification.js';
 import { ensureUserProfilesTable } from '../services/userProfiles.js';
+import { queueSmsDispatch } from '../services/smsDispatch.js';
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
@@ -28,6 +30,67 @@ const TEMPORARY_PLATFORM_INCORPORATION_DETAIL = 'Support for TikTok and X campai
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
     .map((platform) => `'${platform}'`)
     .join(', ')}))`;
+function collectAssignmentNotice(target, userId, campaignTitle) {
+    const normalizedUserId = String(userId ?? '').trim();
+    const title = String(campaignTitle ?? '').trim();
+    if (!normalizedUserId || !title) {
+        return;
+    }
+    const current = target.get(normalizedUserId) ?? [];
+    current.push(title);
+    target.set(normalizedUserId, current);
+}
+async function planCampaignPendingReviewDelivery(client, businessUserId, campaignId, campaignTitle) {
+    const body = `Your campaign "${campaignTitle}" was submitted and is pending admin review. We will notify you once the review is complete.`;
+    const plan = await createUserNotificationsWithSmsPlan(client, [businessUserId], {
+        category: 'CAMPAIGN_PENDING_REVIEW',
+        title: 'Campaign pending review',
+        body,
+        targetType: 'campaign',
+        targetId: campaignId,
+        meta: {
+            approval_status: 'PENDING_APPROVAL',
+        },
+    }, {
+        sms: {
+            enabled: true,
+            message: body,
+        },
+    });
+    return plan.smsJobs;
+}
+async function planCampaignAssignmentDeliveries(client, assignments, campaignId, pendingApproval) {
+    const smsJobs = [];
+    for (const [userId, titles] of assignments.entries()) {
+        if (titles.length === 0) {
+            continue;
+        }
+        const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} campaigns`;
+        const body = pendingApproval
+            ? `You have been assigned to ${subject} on Prime Status. The assignment is pending admin approval and will become active after review.`
+            : `You have been assigned to ${subject} on Prime Status. Open the app to review the details. The campaign will go live once funding is confirmed.`;
+        const plan = await createUserNotificationsWithSmsPlan(client, [userId], {
+            category: 'CAMPAIGN_ASSIGNMENT',
+            title: pendingApproval
+                ? 'Campaign assignment pending approval'
+                : 'New campaign assignment',
+            body,
+            targetType: 'campaign',
+            targetId: campaignId,
+            meta: {
+                assigned_campaign_titles: titles,
+                pending_admin_review: pendingApproval,
+            },
+        }, {
+            sms: {
+                enabled: true,
+                message: body,
+            },
+        });
+        smsJobs.push(...plan.smsJobs);
+    }
+    return smsJobs;
+}
 function normalizePhone(input) {
     return normalizePhoneSearchInput(input);
 }
@@ -2329,6 +2392,8 @@ export async function campaignRoutes(app) {
                 }
                 const bundleId = bundleItems.length > 1 ? uuid() : null;
                 const createdRootCampaigns = [];
+                const assignmentNotices = new Map();
+                const smsJobs = [];
                 let bundleRootCampaignId = null;
                 let totalEscrowAmount = 0;
                 for (const item of bundleItems) {
@@ -2492,6 +2557,7 @@ export async function campaignRoutes(app) {
                                 start_date: item.start_date,
                                 end_date: item.end_date,
                             });
+                            collectAssignmentNotice(assignmentNotices, share.ambassador.id, String(item.title ?? body.title));
                         }
                     }
                     createdRootCampaigns.push(withCampaignMediaUrls({
@@ -2555,7 +2621,9 @@ export async function campaignRoutes(app) {
                     for (const c of createdRootCampaigns) {
                         c.approval_status = 'PENDING_APPROVAL';
                     }
+                    smsJobs.push(...await planCampaignPendingReviewDelivery(client, authUser, approvalRoot, String(createdRootCampaigns[0]?.title ?? body.title)));
                 }
+                smsJobs.push(...await planCampaignAssignmentDeliveries(client, assignmentNotices, approvalRoot, !isAutoApproval));
                 if (bundleId && bundleRootCampaignId) {
                     await client.query(`
             UPDATE campaigns
@@ -2568,10 +2636,12 @@ export async function campaignRoutes(app) {
                         campaign: createdRootCampaigns[0],
                         campaigns: bundle?.campaigns ?? createdRootCampaigns,
                         bundle,
+                        smsJobs,
                     };
                 }
                 return {
                     campaign: createdRootCampaigns[0],
+                    smsJobs,
                 };
             });
         }
@@ -2589,7 +2659,9 @@ export async function campaignRoutes(app) {
                 detail: normalizedError === message ? message : '',
             };
         }
-        return campaign;
+        queueSmsDispatch(campaign.smsJobs ?? [], request.log, 'campaigns:create');
+        const { smsJobs: _smsJobs, ...response } = campaign;
+        return response;
     });
     app.patch('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;

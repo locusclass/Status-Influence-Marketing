@@ -11,8 +11,10 @@ import { ensurePublicIdColumns, resolveCampaignId, resolveUserId, } from '../ser
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
 import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, resolveLiveDashboardAccess, } from '../services/adminTenant.js';
 import { collectCampaignNotificationUserIds, createBlockingNotice, createUserNotifications, ensureUserSignalSchema, removeBlockingNotice, } from '../services/userSignals.js';
+import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 import { acknowledgeAdminOperationTask, claimAdminOperationTask, createAdminOperationMessage, ensureAdminOperationsSchema, loadAdminOperationTaskState, loadAdminOperationsSnapshot, releaseAdminOperationTaskClaim, resolveAdminOperationTaskByEntity, } from '../services/adminOperations.js';
+import { queueSmsDispatch } from '../services/smsDispatch.js';
 import { ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS, ADMIN_HANDLER_JAZ_ROOM_KEY, cleanupAdminHandlerJaz, createAdminHandlerJazMessage, createAdminHandlerJazSignalEvent, deactivateAdminHandlerJazPresence, ensureAdminHandlerJazSchema, listAdminHandlerJazMessages, listAdminHandlerJazParticipants, listAdminHandlerJazSignalEvents, loadAdminHandlerJazIdentity, maxLiveCursor, parseLiveCursor, timestampText, upsertAdminHandlerJazIdentity, upsertAdminHandlerJazPresence, } from '../services/adminHandlerJaz.js';
 import { resolveMediaUploadError, storeMultipartAttachmentFile, } from '../services/mediaUploads.js';
 import { ensureUserProfilesTable } from '../services/userProfiles.js';
@@ -3687,7 +3689,7 @@ export async function adminRoutes(app) {
     app.patch('/admin/campaigns/:id/approve', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
         const adminUserId = request.user.sub;
-        return withTransaction(async (client) => {
+        const result = await withTransaction(async (client) => {
             const campRes = await client.query(`SELECT c.id, c.business_id, c.title, c.approval_status
          FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
             const camp = campRes.rows[0];
@@ -3698,18 +3700,31 @@ export async function adminRoutes(app) {
             await client.query(`UPDATE campaigns
          SET approval_status='APPROVED', approved_at=now(), approved_by_user_id=$2
          WHERE id=$1`, [params.id, adminUserId]);
-            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_APPROVED',
-                 'Campaign approved',
-                 $2, now())
-         ON CONFLICT DO NOTHING`, [
-                camp.business_id,
-                `Your campaign "${camp.title}" has been approved. You can now fund and launch it.`,
-            ]);
+            const delivery = await createUserNotificationsWithSmsPlan(client, [camp.business_id], {
+                category: 'CAMPAIGN_APPROVED',
+                title: 'Campaign approved',
+                body: `Your campaign "${camp.title}" has been approved. You can now fund and launch it.`,
+                actorId: adminUserId,
+                targetType: 'campaign',
+                targetId: params.id,
+                meta: {
+                    approval_status: 'APPROVED',
+                },
+            }, {
+                sms: {
+                    enabled: true,
+                    message: `Your campaign "${camp.title}" has been approved. You can now fund and launch it on Prime Status.`,
+                },
+            });
             await logAudit(client, adminUserId, 'APPROVE_CAMPAIGN', 'campaign', params.id, {});
             await resolveAdminOperationTaskByEntity(client, 'CAMPAIGN_APPROVAL', params.id, adminUserId);
-            return { ok: true };
+            return { ok: true, smsJobs: delivery.smsJobs };
         });
+        if (result?.error) {
+            return result;
+        }
+        queueSmsDispatch(result.smsJobs ?? [], app.log, 'admin:campaign-approve');
+        return { ok: true };
     });
     app.patch('/admin/campaigns/:id/reject', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
@@ -3719,7 +3734,7 @@ export async function adminRoutes(app) {
             return { error: 'reason_required' };
         }
         const adminUserId = request.user.sub;
-        return withTransaction(async (client) => {
+        const result = await withTransaction(async (client) => {
             const campRes = await client.query(`SELECT c.id, c.business_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
             const camp = campRes.rows[0];
             if (!camp) {
@@ -3727,13 +3742,32 @@ export async function adminRoutes(app) {
                 return { error: 'campaign_not_found' };
             }
             await client.query(`UPDATE campaigns SET approval_status='REJECTED', approved_at=now(), approved_by_user_id=$2 WHERE id=$1`, [params.id, adminUserId]);
-            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_REJECTED', 'Campaign rejected', $2, now())
-         ON CONFLICT DO NOTHING`, [camp.business_id, `Your campaign "${camp.title}" was rejected: ${body.data.reason}`]);
+            const delivery = await createUserNotificationsWithSmsPlan(client, [camp.business_id], {
+                category: 'CAMPAIGN_REJECTED',
+                title: 'Campaign rejected',
+                body: `Your campaign "${camp.title}" was rejected: ${body.data.reason}`,
+                actorId: adminUserId,
+                targetType: 'campaign',
+                targetId: params.id,
+                meta: {
+                    approval_status: 'REJECTED',
+                    rejection_reason: body.data.reason,
+                },
+            }, {
+                sms: {
+                    enabled: true,
+                    message: `Your campaign "${camp.title}" was rejected: ${body.data.reason}`,
+                },
+            });
             await logAudit(client, adminUserId, 'REJECT_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
             await resolveAdminOperationTaskByEntity(client, 'CAMPAIGN_APPROVAL', params.id, adminUserId);
-            return { ok: true };
+            return { ok: true, smsJobs: delivery.smsJobs };
         });
+        if (result?.error) {
+            return result;
+        }
+        queueSmsDispatch(result.smsJobs ?? [], app.log, 'admin:campaign-reject');
+        return { ok: true };
     });
     app.patch('/admin/campaigns/:id/return-for-edit', { preHandler: [app.adminOnly] }, async (request, reply) => {
         const params = request.params;
@@ -3743,7 +3777,7 @@ export async function adminRoutes(app) {
             return { error: 'reason_required' };
         }
         const adminUserId = request.user.sub;
-        return withTransaction(async (client) => {
+        const result = await withTransaction(async (client) => {
             const campRes = await client.query(`SELECT c.id, c.business_id, c.title FROM campaigns c WHERE c.id=$1 LIMIT 1`, [params.id]);
             const camp = campRes.rows[0];
             if (!camp) {
@@ -3751,13 +3785,32 @@ export async function adminRoutes(app) {
                 return { error: 'campaign_not_found' };
             }
             await client.query(`UPDATE campaigns SET approval_status='RETURNED', approved_by_user_id=$2 WHERE id=$1`, [params.id, adminUserId]);
-            await client.query(`INSERT INTO user_signals (id, user_id, type, title, body, created_at)
-         VALUES (gen_random_uuid(), $1, 'CAMPAIGN_RETURNED', 'Campaign returned for edit', $2, now())
-         ON CONFLICT DO NOTHING`, [camp.business_id, `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`]);
+            const delivery = await createUserNotificationsWithSmsPlan(client, [camp.business_id], {
+                category: 'CAMPAIGN_RETURNED',
+                title: 'Campaign returned for edit',
+                body: `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`,
+                actorId: adminUserId,
+                targetType: 'campaign',
+                targetId: params.id,
+                meta: {
+                    approval_status: 'RETURNED',
+                    return_reason: body.data.reason,
+                },
+            }, {
+                sms: {
+                    enabled: true,
+                    message: `Your campaign "${camp.title}" was returned for editing: ${body.data.reason}. Please update and resubmit.`,
+                },
+            });
             await logAudit(client, adminUserId, 'RETURN_CAMPAIGN', 'campaign', params.id, { reason: body.data.reason });
             await resolveAdminOperationTaskByEntity(client, 'CAMPAIGN_APPROVAL', params.id, adminUserId);
-            return { ok: true };
+            return { ok: true, smsJobs: delivery.smsJobs };
         });
+        if (result?.error) {
+            return result;
+        }
+        queueSmsDispatch(result.smsJobs ?? [], app.log, 'admin:campaign-return');
+        return { ok: true };
     });
     // ── Campaign completion / proof administration ───────────────────────────────
     app.get('/admin/campaign-completions', { preHandler: [app.adminOnly] }, async (request) => {

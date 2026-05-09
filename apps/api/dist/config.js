@@ -37,6 +37,8 @@ const allowDirectApiBypass = allowDirectYoHostBypass(process.env.YO_ALLOW_DIRECT
 export const YO_PROXY_URL_MISSING_MESSAGE = 'YO_PROXY_URL is missing';
 export const YO_API_USERNAME_MISSING_MESSAGE = 'YO_API_USERNAME is missing';
 export const YO_API_PASSWORD_MISSING_MESSAGE = 'YO_API_PASSWORD is missing';
+export const AT_USERNAME_MISSING_MESSAGE = 'AT_USERNAME is missing';
+export const AT_API_KEY_MISSING_MESSAGE = 'AT_API_KEY is missing';
 const configuredYoApiPassword = stripWrappingQuotes(process.env.YO_API_PASSWORD ??
     process.env.YO_PASSWORD ??
     process.env.FLUTTERWAVE_CLIENT_SECRET ??
@@ -50,6 +52,10 @@ const configuredYoBaseUrl = stripWrappingQuotes(process.env.YO_PROXY_URL ??
     process.env.YO_API_URL ??
     process.env.FLUTTERWAVE_BASE_URL ??
     '');
+const configuredAtUsername = stripWrappingQuotes(process.env.AT_USERNAME ?? '');
+const configuredAtApiKey = stripWrappingQuotes(process.env.AT_API_KEY ?? '');
+const configuredAtSenderId = stripWrappingQuotes(process.env.AT_SENDER_ID ?? 'PRIMESTATUS');
+const africaTalkingEnvironment = configuredAtUsername.trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'live';
 const yoConfig = {
     allowDirectApiBypass,
     baseUrl: normalizeYoTaskUrl(configuredYoBaseUrl, DEFAULT_YO_GATEWAY_TASK_URL, { allowDirectHostBypass: allowDirectApiBypass }),
@@ -108,6 +114,15 @@ export const config = {
         privateKey: stripWrappingQuotes(process.env.FIREBASE_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),
         storageBucket: process.env.FIREBASE_STORAGE_BUCKET ?? '',
     },
+    africaTalking: {
+        username: configuredAtUsername,
+        apiKey: configuredAtApiKey,
+        senderId: configuredAtSenderId,
+        environment: africaTalkingEnvironment,
+        baseUrl: africaTalkingEnvironment === 'sandbox'
+            ? 'https://api.sandbox.africastalking.com/version1/messaging'
+            : 'https://api.africastalking.com/version1/messaging',
+    },
 };
 export function getStartupConfigIssues() {
     const issues = [];
@@ -134,6 +149,15 @@ export function getStartupConfigIssues() {
     if (config.yo.allowDirectApiBypass) {
         issues.push('YO_ALLOW_DIRECT_API_BYPASS is enabled, so direct YO hosts can bypass the static-IP gateway');
     }
+    if (!config.africaTalking.username.trim()) {
+        issues.push(`${AT_USERNAME_MISSING_MESSAGE}. SMS delivery is disabled.`);
+    }
+    if (!config.africaTalking.apiKey.trim()) {
+        issues.push(`${AT_API_KEY_MISSING_MESSAGE}. SMS delivery is disabled.`);
+    }
+    if (!config.africaTalking.senderId.trim()) {
+        issues.push('AT_SENDER_ID is missing. SMS sender branding may fail.');
+    }
     if (config.firebase.projectId ||
         config.firebase.clientEmail ||
         config.firebase.privateKey ||
@@ -156,7 +180,9 @@ export function getStartupConfigIssues() {
 export function isFatalStartupIssue(issue) {
     return (issue.includes('DATABASE_URL is missing') ||
         issue.includes('JWT_SECRET is missing') ||
-        issue.includes('JWT_SECRET is missing or using the development default'));
+        issue.includes('JWT_SECRET is missing or using the development default') ||
+        issue.includes(YO_API_USERNAME_MISSING_MESSAGE) ||
+        issue.includes(YO_API_PASSWORD_MISSING_MESSAGE));
 }
 export function hasYoCredentials() {
     return (config.yo.apiUsername.trim().length > 0 &&
@@ -173,6 +199,10 @@ export function hasYoLegacyApiCredentials() {
 }
 export function hasYoSecretKey() {
     return false;
+}
+export function hasAfricaTalkingCredentials() {
+    return (config.africaTalking.username.trim().length > 0 &&
+        config.africaTalking.apiKey.trim().length > 0);
 }
 export function hasYoEncryptionKey() {
     return false;

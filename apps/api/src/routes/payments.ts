@@ -14,6 +14,8 @@ import {
   YO_API_USERNAME_MISSING_MESSAGE,
 } from '../config.js';
 import { isDirectYoTaskUrl } from '@prime/shared';
+import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
+import { queueSmsDispatch } from '../services/smsDispatch.js';
 
 const yoProviderReferenceInputKeys = [
   'transaction_id',
@@ -291,6 +293,72 @@ export async function paymentRoutes(app: FastifyInstance) {
     'INDETERMINATE',
   ]);
 
+  const formatUgandaMoney = (value: number) =>
+    `UGX ${Math.trunc(Math.max(0, Number(value ?? 0))).toLocaleString('en-US')}`;
+
+  const planPaymentOutcomeNotification = async (
+    client: any,
+    input: {
+      userId: string;
+      txRef: string;
+      kind: string;
+      status: 'COMPLETED' | 'FAILED';
+      amount: number;
+      campaignId?: string | null;
+      campaignTitle?: string | null;
+    }
+  ) => {
+    const userId = String(input.userId ?? '').trim();
+    if (!userId) {
+      return [];
+    }
+
+    const isSuccess = input.status === 'COMPLETED';
+    const isWalletDeposit = input.kind === 'WALLET_DEPOSIT';
+    const amountText = formatUgandaMoney(input.amount);
+    const title = isWalletDeposit
+      ? isSuccess
+        ? 'Wallet deposit received'
+        : 'Wallet deposit failed'
+      : isSuccess
+        ? 'Campaign payment successful'
+        : 'Campaign payment failed';
+    const body = isWalletDeposit
+      ? isSuccess
+        ? `Your wallet deposit of ${amountText} was successful and is now available in your Prime Status wallet.`
+        : `Your wallet deposit of ${amountText} was not completed. You can try again from the app.`
+      : isSuccess
+        ? `Your payment of ${amountText} for "${input.campaignTitle ?? 'your campaign'}" was successful. Funding is now confirmed.`
+        : `Your payment of ${amountText} for "${input.campaignTitle ?? 'your campaign'}" was not completed. The campaign is still awaiting funding.`;
+
+    const plan = await createUserNotificationsWithSmsPlan(
+      client,
+      [userId],
+      {
+        category: isSuccess ? 'PAYMENT_SUCCESS' : 'PAYMENT_FAILURE',
+        title,
+        body,
+        targetType: 'PAYMENT',
+        targetId: input.txRef,
+        meta: {
+          payment_kind: input.kind,
+          payment_status: input.status,
+          amount: Math.trunc(Number(input.amount ?? 0)),
+          campaign_id: input.campaignId ?? null,
+          tx_ref: input.txRef,
+        },
+      },
+      {
+        sms: {
+          enabled: true,
+          message: body,
+        },
+      }
+    );
+
+    return plan.smsJobs;
+  };
+
   const buildPendingNextAction = (
     payload: YoPaymentResponse | Record<string, unknown>,
     nextCheckInMs = yoRecommendedPollIntervalMs
@@ -375,6 +443,9 @@ export async function paymentRoutes(app: FastifyInstance) {
     }
 
     const txnPayload = (txn.raw_payload ?? {}) as Record<string, unknown>;
+    const txKind = String(txnPayload.kind ?? 'CAMPAIGN_FUNDING')
+      .trim()
+      .toUpperCase();
     const statusText = normalizeTransactionStatus(verified);
     const actualProviderReference = readTransactionReference(verified);
     const expectedProviderReference =
@@ -422,7 +493,7 @@ export async function paymentRoutes(app: FastifyInstance) {
       return { ok: false, error: 'amount_mismatch' };
     }
 
-    if (txnPayload.kind === 'WALLET_DEPOSIT') {
+    if (txKind === 'WALLET_DEPOSIT') {
       if (txn.status === 'COMPLETED') {
         return { ok: true, duplicate: true, type: 'wallet_deposit' };
       }
@@ -456,7 +527,17 @@ export async function paymentRoutes(app: FastifyInstance) {
           'COMPLETED',
           String(paymentEvent.transactionId)
         );
-        return { ok: true, type: 'wallet_deposit' };
+        return {
+          ok: true,
+          type: 'wallet_deposit',
+          smsJobs: await planPaymentOutcomeNotification(client, {
+            userId: String(txnPayload.user_id ?? ''),
+            txRef: String(paymentEvent.reference),
+            kind: txKind,
+            status: 'COMPLETED',
+            amount: Number(txn.amount ?? 0),
+          }),
+        };
       }
 
       if (statusFailure.has(statusText)) {
@@ -466,7 +547,20 @@ export async function paymentRoutes(app: FastifyInstance) {
           'FAILED',
           String(paymentEvent.transactionId)
         );
-        return { ok: true, type: 'wallet_deposit' };
+        return {
+          ok: true,
+          type: 'wallet_deposit',
+          smsJobs:
+            txn.status === 'FAILED'
+              ? []
+              : await planPaymentOutcomeNotification(client, {
+                  userId: String(txnPayload.user_id ?? ''),
+                  txRef: String(paymentEvent.reference),
+                  kind: txKind,
+                  status: 'FAILED',
+                  amount: Number(txn.amount ?? 0),
+                }),
+        };
       }
 
       await paymentRepo.updatePesaPalTxnStatus(
@@ -483,6 +577,16 @@ export async function paymentRoutes(app: FastifyInstance) {
     if (!escrow || Number(txn.amount ?? 0) !== Number(escrow.amount_total ?? 0)) {
       return { ok: false, error: 'amount_mismatch' };
     }
+    const campaignOwnerRes = await client.query(
+      `
+      SELECT id, business_id, title
+      FROM campaigns
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [escrow.campaign_id]
+    );
+    const campaignOwner = campaignOwnerRes.rows[0] ?? null;
 
     if (txn.status === 'COMPLETED') {
       return { ok: true, duplicate: true, type: 'campaign_funding', escrow_id: escrow.id };
@@ -496,7 +600,21 @@ export async function paymentRoutes(app: FastifyInstance) {
         String(paymentEvent.transactionId)
       );
       await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
-      return { ok: true, type: 'campaign_funding', escrow_id: escrow.id };
+      return {
+        ok: true,
+        type: 'campaign_funding',
+        escrow_id: escrow.id,
+        smsJobs: await planPaymentOutcomeNotification(client, {
+          userId: String(campaignOwner?.business_id ?? ''),
+          txRef: String(paymentEvent.reference),
+          kind: txKind,
+          status: 'COMPLETED',
+          amount: Number(txn.amount ?? 0),
+          campaignId: campaignOwner?.id ? String(campaignOwner.id) : null,
+          campaignTitle:
+            campaignOwner?.title == null ? null : String(campaignOwner.title),
+        }),
+      };
     }
 
     if (statusFailure.has(statusText)) {
@@ -506,7 +624,24 @@ export async function paymentRoutes(app: FastifyInstance) {
         'FAILED',
         String(paymentEvent.transactionId)
       );
-      return { ok: true, type: 'campaign_funding', escrow_id: escrow.id };
+      return {
+        ok: true,
+        type: 'campaign_funding',
+        escrow_id: escrow.id,
+        smsJobs:
+          txn.status === 'FAILED'
+            ? []
+            : await planPaymentOutcomeNotification(client, {
+                userId: String(campaignOwner?.business_id ?? ''),
+                txRef: String(paymentEvent.reference),
+                kind: txKind,
+                status: 'FAILED',
+                amount: Number(txn.amount ?? 0),
+                campaignId: campaignOwner?.id ? String(campaignOwner.id) : null,
+                campaignTitle:
+                  campaignOwner?.title == null ? null : String(campaignOwner.title),
+              }),
+      };
     }
 
     await paymentRepo.updatePesaPalTxnStatus(
@@ -838,8 +973,9 @@ export async function paymentRoutes(app: FastifyInstance) {
           ]
         );
 
+        let smsJobs: any[] = [];
         if (statusSuccess.has(providerStatus)) {
-          await applyVerifiedCharge(
+          const settlement = await applyVerifiedCharge(
             client,
             {
               transactionId: chargeId ?? parsed.data.tx_ref,
@@ -848,6 +984,7 @@ export async function paymentRoutes(app: FastifyInstance) {
             },
             chargeResponse
           );
+          smsJobs = settlement?.smsJobs ?? [];
         } else if (statusFailure.has(providerStatus)) {
           await paymentRepo.updatePesaPalTxnStatus(
             client,
@@ -855,6 +992,39 @@ export async function paymentRoutes(app: FastifyInstance) {
             'FAILED',
             chargeId ?? undefined
           );
+          if (String(context.rawPayload.kind ?? '').toUpperCase() === 'WALLET_DEPOSIT') {
+            smsJobs = await planPaymentOutcomeNotification(client, {
+              userId: authUser,
+              txRef: parsed.data.tx_ref,
+              kind: 'WALLET_DEPOSIT',
+              status: 'FAILED',
+              amount: Number(context.txn.amount ?? 0),
+            });
+          } else {
+            const campaignRes = await client.query(
+              `
+              SELECT c.id, c.business_id, c.title
+              FROM escrow_ledger e
+              JOIN campaigns c ON c.id = e.campaign_id
+              WHERE e.id = $1
+              LIMIT 1
+              `,
+              [context.txn.escrow_id]
+            );
+            const campaign = campaignRes.rows[0] ?? null;
+            smsJobs = await planPaymentOutcomeNotification(client, {
+              userId: String(campaign?.business_id ?? authUser),
+              txRef: parsed.data.tx_ref,
+              kind: String(context.rawPayload.kind ?? 'CAMPAIGN_FUNDING')
+                .trim()
+                .toUpperCase(),
+              status: 'FAILED',
+              amount: Number(context.txn.amount ?? 0),
+              campaignId: campaign?.id ? String(campaign.id) : null,
+              campaignTitle:
+                campaign?.title == null ? null : String(campaign.title),
+            });
+          }
         } else {
           await paymentRepo.updatePesaPalTxnStatus(
             client,
@@ -864,11 +1034,14 @@ export async function paymentRoutes(app: FastifyInstance) {
           );
         }
 
-        return buildChargeResponse(
-          parsed.data.tx_ref,
-          parsed.data.payment_method,
-          chargeResponse
-        );
+        return {
+          response: buildChargeResponse(
+            parsed.data.tx_ref,
+            parsed.data.payment_method,
+            chargeResponse
+          ),
+          smsJobs,
+        };
       });
 
       const outcome: any = result;
@@ -890,18 +1063,19 @@ export async function paymentRoutes(app: FastifyInstance) {
         );
         return outcome;
       }
+      queueSmsDispatch(outcome.smsJobs ?? [], app.log, 'payments:initiate');
 
       app.log.info(
         {
           tx_ref: parsed.data.tx_ref,
           payment_method: parsed.data.payment_method,
-          charge_id: outcome.charge_id,
-          provider_status: outcome.provider_status,
-          instruction: outcome.instruction,
+          charge_id: outcome.response?.charge_id,
+          provider_status: outcome.response?.provider_status,
+          instruction: outcome.response?.instruction,
         },
         'yo_initiate_result'
       );
-      return outcome;
+      return outcome.response;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       app.log.error(
@@ -1017,6 +1191,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         reply.code(result.error === 'txn_not_found' ? 404 : 400);
         return result;
       }
+      queueSmsDispatch((result as any).smsJobs ?? [], app.log, 'payments:verify');
       return {
         ok: true,
         status: verifiedStatus,
