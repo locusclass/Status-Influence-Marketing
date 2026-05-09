@@ -936,7 +936,7 @@ async function loadManagedAdminTarget(client: any, rawUserId: string) {
       u.country_id,
       u.division_id,
       u.created_at AS user_created_at,
-      u.updated_at AS user_updated_at,
+      NULL::timestamptz AS user_updated_at,
       au.id AS admin_user_id,
       au.role AS admin_account_role,
       au.status AS admin_account_status,

@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildAuthClaims } from '../src/services/roles.js';
 import {
+  ensureAdminHandlerJazSchema,
+  listAdminHandlerJazMessages,
+  listAdminHandlerJazSignalEvents,
+} from '../src/services/adminHandlerJaz.js';
+import {
   CURRENT_PLATFORM_POLICY_VERSION,
   CURRENT_PRIVACY_POLICY_VERSION,
   ensurePolicyAcceptanceColumns,
@@ -235,6 +240,87 @@ describe('Admin handler jaz and viewer verification flows', () => {
     expect(live.statusCode).toBe(403);
     expect(live.json()).toMatchObject({
       error: 'forbidden',
+    });
+  });
+
+  it('returns the latest Handler Jaz message and signal window in chronological order', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const admin = await insertUser({
+      email: 'handler-window-admin@prime.test',
+      phone: '+256700100010',
+      full_name: 'Handler Window Admin',
+      role: 'ADMIN',
+      active_role: 'ADMIN',
+      admin_role: 'SUPER_ADMIN',
+      country_id: ug.id,
+    });
+
+    await ensureAdminHandlerJazSchema(pool);
+
+    for (let index = 1; index <= 100; index += 1) {
+      await pool!.query(
+        `
+        INSERT INTO admin_handler_jaz_messages (
+          sender_user_id,
+          sender_handle,
+          body,
+          created_at,
+          expires_at
+        )
+        VALUES (
+          $1,
+          'ops_window',
+          $2,
+          NOW() - (($3::int - 1) * INTERVAL '1 minute'),
+          NOW() + INTERVAL '24 hours'
+        )
+        `,
+        [admin.id, `message-${index}`, 101 - index]
+      );
+    }
+
+    for (let index = 1; index <= 75; index += 1) {
+      await pool!.query(
+        `
+        INSERT INTO admin_handler_jaz_signal_events (
+          sender_user_id,
+          sender_handle,
+          target_user_id,
+          event_type,
+          payload,
+          created_at,
+          expires_at
+        )
+        VALUES (
+          $1,
+          'ops_window',
+          $1,
+          'RTC_ICE',
+          jsonb_build_object('seq', $2::int),
+          NOW() - (($3::int - 1) * INTERVAL '1 minute'),
+          NOW() + INTERVAL '20 minutes'
+        )
+        `,
+        [admin.id, index, 76 - index]
+      );
+    }
+
+    const messages = await listAdminHandlerJazMessages(pool, { limit: 80 });
+    expect(messages).toHaveLength(80);
+    expect(messages[0]).toMatchObject({ body: 'message-21' });
+    expect(messages[messages.length - 1]).toMatchObject({
+      body: 'message-100',
+    });
+
+    const signals = await listAdminHandlerJazSignalEvents(pool, String(admin.id), {
+      limit: 60,
+    });
+    expect(signals).toHaveLength(60);
+    expect(signals[0]).toMatchObject({
+      payload: { seq: 16 },
+    });
+    expect(signals[signals.length - 1]).toMatchObject({
+      payload: { seq: 75 },
     });
   });
 
