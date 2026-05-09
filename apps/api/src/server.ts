@@ -58,6 +58,7 @@ import {
 import { ensureSmsSchema } from './services/smsDispatch.js';
 import { ensurePublicIdColumns } from './services/publicId.js';
 import { ensureAdminOperationsSchema } from './services/adminOperations.js';
+import { ensureAdminHandlerJazSchema } from './services/adminHandlerJaz.js';
 import {
   ensurePrimarySuperAdmin,
   hasAdminModuleAccess,
