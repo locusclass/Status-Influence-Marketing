@@ -181,7 +181,6 @@ async function postYoRequest(endpoint, fields) {
             'Content-transfer-encoding': 'text',
             Accept: 'application/xml, text/xml, */*',
         };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let res;
     let text;
     try {

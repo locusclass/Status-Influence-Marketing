@@ -249,8 +249,7 @@ async function postYoRequest(
         Accept: 'application/xml, text/xml, */*',
       };
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let res: any;
+  let res: Awaited<ReturnType<typeof fetch>>;
   let text: string;
 
   try {
