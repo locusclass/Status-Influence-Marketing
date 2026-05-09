@@ -386,7 +386,6 @@ export function buildServer() {
 
   const registerApiRoutes = (instance: FastifyInstance) => {
     if (adminTestRouteProfile) {
-      instance.register(healthRoutes);
       instance.register(adminRoutes);
       instance.register(tenantAdminRoutes);
       return;

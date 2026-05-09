@@ -88,6 +88,9 @@ export type ScopeFilterState = {
   idx: number;
 };
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function normalizeAccountRole(user: Record<string, unknown>) {
   return String(user.role ?? '').trim().toUpperCase();
 }
@@ -520,6 +523,10 @@ export async function loadDashboardAccessContext(
   client: PoolClient,
   userId: string
 ) {
+  if (!UUID_PATTERN.test(String(userId ?? '').trim())) {
+    return null;
+  }
+
   const res = await client.query(
     `
     SELECT

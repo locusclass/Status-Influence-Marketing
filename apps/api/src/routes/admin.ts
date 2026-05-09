@@ -725,6 +725,24 @@ function normalizeAssignableModuleKeys(
   return Array.from(new Set(normalized));
 }
 
+function sendManagedAdminMutationError(reply: any, error: unknown) {
+  const message = String((error as Error)?.message ?? 'admin_mutation_failed');
+  reply.code(
+    message === 'user_not_found'
+      ? 404
+      : message === 'email_taken' || message === 'phone_taken'
+        ? 409
+        : message === 'country_scope_not_found' ||
+            message === 'division_scope_not_found' ||
+            message === 'invalid_admin_role'
+          ? 400
+          : 500
+  );
+  return {
+    error: message === 'admin_mutation_failed' ? 'internal_server_error' : message,
+  };
+}
+
 async function ensureUniqueAdminIdentity(
   client: any,
   input: {
@@ -1353,13 +1371,9 @@ export async function adminRoutes(app: FastifyInstance) {
   const ensureAdminRoutesSchema = () => {
     if (!schemaReadyPromise) {
       schemaReadyPromise = withTransaction(async (client) => {
-        
-        
-        
+        await ensureCampaignDraftsTable(client);
         await ensureContractParticipantColumns(client);
         await ensureProofReviewColumns(client);
-        
-        
         await ensureUserProfilesTable(client);
         await ensureViewerVerificationSchema(client);
       }).catch((error) => {
@@ -1375,14 +1389,14 @@ export async function adminRoutes(app: FastifyInstance) {
       return;
     }
     try {
-      
+      await ensureAdminRoutesSchema();
     } catch (error) {
       app.log.error({ err: error }, 'startup warmup failed for admin schema');
     }
   });
 
   app.addHook('preHandler', async () => {
-    
+    await ensureAdminRoutesSchema();
   });
 
   app.get('/admin/me', { preHandler: [app.adminOnly] }, async (request, reply) => {
@@ -1486,108 +1500,112 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/admin/admins', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const body = CreateAdminSchema.parse(request.body);
     return withTransaction(async (client) => {
-      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
-      if (!actorAccess) {
-        return { error: 'forbidden' };
-      }
-
-      const role = body.role === ADMIN_ROLE_SUPER_ADMIN
-        ? ADMIN_ROLE_SUPER_ADMIN
-        : ADMIN_ROLE_ADMIN;
-      const validatedScopes =
-        role === ADMIN_ROLE_ADMIN
-          ? await validateAdminScopeAssignments(client, {
-              countryIds: body.country_ids,
-              divisionIds: body.division_ids,
-            })
-          : {
-              countryIds: [] as string[],
-              divisionIds: [] as string[],
-              countryRows: [] as AdminCountryRow[],
-              divisionRows: [] as AdminDivisionRow[],
-              primaryCountry: null,
-              primaryDivision: null,
-            };
-
-      let targetUserId: string;
-      if (body.user_id) {
-        const resolvedUserId = await resolveUserId(client, body.user_id);
-        if (!resolvedUserId) {
-          reply.code(404);
-          return { error: 'user_not_found' };
+      try {
+        const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+        if (!actorAccess) {
+          return { error: 'forbidden' };
         }
-        const existing = await loadDashboardAccessContext(client, resolvedUserId);
-        if (existing && existing.admin_role !== 'USER') {
-          reply.code(409);
-          return { error: 'admin_already_exists' };
+
+        const role = body.role === ADMIN_ROLE_SUPER_ADMIN
+          ? ADMIN_ROLE_SUPER_ADMIN
+          : ADMIN_ROLE_ADMIN;
+        const validatedScopes =
+          role === ADMIN_ROLE_ADMIN
+            ? await validateAdminScopeAssignments(client, {
+                countryIds: body.country_ids,
+                divisionIds: body.division_ids,
+              })
+            : {
+                countryIds: [] as string[],
+                divisionIds: [] as string[],
+                countryRows: [] as AdminCountryRow[],
+                divisionRows: [] as AdminDivisionRow[],
+                primaryCountry: null,
+                primaryDivision: null,
+              };
+
+        let targetUserId: string;
+        if (body.user_id) {
+          const resolvedUserId = await resolveUserId(client, body.user_id);
+          if (!resolvedUserId) {
+            reply.code(404);
+            return { error: 'user_not_found' };
+          }
+          const existing = await loadDashboardAccessContext(client, resolvedUserId);
+          if (existing && existing.admin_role !== 'USER') {
+            reply.code(409);
+            return { error: 'admin_already_exists' };
+          }
+          targetUserId = resolvedUserId;
+        } else {
+          const created = await createManagedAdminUser(client, {
+            full_name: body.full_name!,
+            email: body.email!,
+            phone: body.phone!,
+            password: body.password!,
+            role,
+            primaryCountry: validatedScopes.primaryCountry,
+            primaryDivision: validatedScopes.primaryDivision,
+          });
+          targetUserId = String(created.id);
         }
-        targetUserId = resolvedUserId;
-      } else {
-        const created = await createManagedAdminUser(client, {
-          full_name: body.full_name!,
-          email: body.email!,
-          phone: body.phone!,
-          password: body.password!,
+
+        const account = await ensureAdminAccountRecord(client, {
+          userId: targetUserId,
           role,
-          primaryCountry: validatedScopes.primaryCountry,
-          primaryDivision: validatedScopes.primaryDivision,
+          status: body.status,
+          createdBySuperAdminId: actorAccess.user_id,
         });
-        targetUserId = String(created.id);
-      }
 
-      const account = await ensureAdminAccountRecord(client, {
-        userId: targetUserId,
-        role,
-        status: body.status,
-        createdBySuperAdminId: actorAccess.user_id,
-      });
+        if (role === ADMIN_ROLE_ADMIN) {
+          await replaceAdminModuleAssignments(
+            client,
+            String(account.id),
+            role,
+            body.module_keys
+          );
+          await replaceAdminScopeAssignments(client, String(account.id), {
+            countryIds: validatedScopes.countryIds,
+            divisionIds: validatedScopes.divisionIds,
+          });
+        } else {
+          await replaceAdminModuleAssignments(client, String(account.id), role, []);
+          await replaceAdminScopeAssignments(client, String(account.id), {
+            countryIds: [],
+            divisionIds: [],
+          });
+        }
 
-      if (role === ADMIN_ROLE_ADMIN) {
-        await replaceAdminModuleAssignments(
-          client,
-          String(account.id),
-          role,
-          body.module_keys
-        );
-        await replaceAdminScopeAssignments(client, String(account.id), {
-          countryIds: validatedScopes.countryIds,
-          divisionIds: validatedScopes.divisionIds,
+        const target = await loadManagedAdminTarget(client, targetUserId);
+        if (!target?.access || target.access.admin_role === 'USER') {
+          reply.code(500);
+          return { error: 'admin_create_failed' };
+        }
+
+        await recordAdminAudit(client, {
+          actorId: actorAccess.user_id,
+          action: 'ADMIN_CREATED',
+          targetType: 'admin_user',
+          targetId: targetUserId,
+          meta: {
+            role: target.access.admin_role,
+            admin_status: target.access.admin_status,
+            permissions: target.access.permissions,
+            country_ids: target.access.country_ids,
+            division_ids: target.access.division_ids,
+          },
+          ...auditScopeFromAccess(target.access),
         });
-      } else {
-        await replaceAdminModuleAssignments(client, String(account.id), role, []);
-        await replaceAdminScopeAssignments(client, String(account.id), {
-          countryIds: [],
-          divisionIds: [],
-        });
+
+        return {
+          admin: serializeManagedAdminRecord({
+            row: target.row,
+            access: target.access,
+          }),
+        };
+      } catch (error) {
+        return sendManagedAdminMutationError(reply, error);
       }
-
-      const target = await loadManagedAdminTarget(client, targetUserId);
-      if (!target?.access || target.access.admin_role === 'USER') {
-        reply.code(500);
-        return { error: 'admin_create_failed' };
-      }
-
-      await recordAdminAudit(client, {
-        actorId: actorAccess.user_id,
-        action: 'ADMIN_CREATED',
-        targetType: 'admin_user',
-        targetId: targetUserId,
-        meta: {
-          role: target.access.admin_role,
-          admin_status: target.access.admin_status,
-          permissions: target.access.permissions,
-          country_ids: target.access.country_ids,
-          division_ids: target.access.division_ids,
-        },
-        ...auditScopeFromAccess(target.access),
-      });
-
-      return {
-        admin: serializeManagedAdminRecord({
-          row: target.row,
-          access: target.access,
-        }),
-      };
     });
   });
 
@@ -1595,150 +1613,154 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const body = UpdateAdminSchema.parse(request.body);
     return withTransaction(async (client) => {
-      const actorAccess = await requireSuperDashboardAccess(client, request, reply);
-      if (!actorAccess) {
-        return { error: 'forbidden' };
-      }
+      try {
+        const actorAccess = await requireSuperDashboardAccess(client, request, reply);
+        if (!actorAccess) {
+          return { error: 'forbidden' };
+        }
 
-      const target = await loadManagedAdminTarget(client, params.id);
-      if (!target?.access || target.access.admin_role === 'USER') {
-        reply.code(404);
-        return { error: 'admin_not_found' };
-      }
-      if (actorAccess.user_id === target.resolvedUserId) {
-        reply.code(403);
-        return { error: 'cannot_modify_own_admin_account' };
-      }
-      if (target.access.admin_status === 'DELETED') {
-        reply.code(409);
-        return { error: 'admin_deleted' };
-      }
+        const target = await loadManagedAdminTarget(client, params.id);
+        if (!target?.access || target.access.admin_role === 'USER') {
+          reply.code(404);
+          return { error: 'admin_not_found' };
+        }
+        if (actorAccess.user_id === target.resolvedUserId) {
+          reply.code(403);
+          return { error: 'cannot_modify_own_admin_account' };
+        }
+        if (target.access.admin_status === 'DELETED') {
+          reply.code(409);
+          return { error: 'admin_deleted' };
+        }
 
-      if (body.email !== undefined || body.phone !== undefined) {
-        await ensureUniqueAdminIdentity(
-          client,
-          {
-            email: body.email ?? null,
-            phone: body.phone ?? null,
-          },
-          target.resolvedUserId
-        );
-      }
+        if (body.email !== undefined || body.phone !== undefined) {
+          await ensureUniqueAdminIdentity(
+            client,
+            {
+              email: body.email ?? null,
+              phone: body.phone ?? null,
+            },
+            target.resolvedUserId
+          );
+        }
 
-      const profileUpdates: string[] = [];
-      const profileParams: unknown[] = [target.resolvedUserId];
-      let profileIdx = 2;
-      if (body.full_name !== undefined) {
-        profileUpdates.push(`full_name = $${profileIdx}`);
-        profileParams.push(body.full_name.trim());
-        profileIdx += 1;
-      }
-      if (body.email !== undefined) {
-        profileUpdates.push(`email = $${profileIdx}`);
-        profileParams.push(body.email.trim().toLowerCase());
-        profileIdx += 1;
-      }
-      if (body.phone !== undefined) {
-        profileUpdates.push(`phone = $${profileIdx}`);
-        profileParams.push(body.phone.trim());
-        profileIdx += 1;
-      }
-      if (profileUpdates.length > 0) {
-        await client.query(
-          `
-          UPDATE users
-          SET ${profileUpdates.join(', ')}
-          WHERE id = $1
-          `,
-          profileParams
-        );
-      }
+        const profileUpdates: string[] = [];
+        const profileParams: unknown[] = [target.resolvedUserId];
+        let profileIdx = 2;
+        if (body.full_name !== undefined) {
+          profileUpdates.push(`full_name = $${profileIdx}`);
+          profileParams.push(body.full_name.trim());
+          profileIdx += 1;
+        }
+        if (body.email !== undefined) {
+          profileUpdates.push(`email = $${profileIdx}`);
+          profileParams.push(body.email.trim().toLowerCase());
+          profileIdx += 1;
+        }
+        if (body.phone !== undefined) {
+          profileUpdates.push(`phone = $${profileIdx}`);
+          profileParams.push(body.phone.trim());
+          profileIdx += 1;
+        }
+        if (profileUpdates.length > 0) {
+          await client.query(
+            `
+            UPDATE users
+            SET ${profileUpdates.join(', ')}
+            WHERE id = $1
+            `,
+            profileParams
+          );
+        }
 
-      const currentRole =
-        target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN
-          ? ADMIN_ROLE_SUPER_ADMIN
-          : ADMIN_ROLE_ADMIN;
-      const nextRole =
-        body.role === ADMIN_ROLE_SUPER_ADMIN
-          ? ADMIN_ROLE_SUPER_ADMIN
-          : body.role === ADMIN_ROLE_ADMIN
-            ? ADMIN_ROLE_ADMIN
-            : currentRole;
-      const account = await ensureAdminAccountRecord(client, {
-        userId: target.resolvedUserId,
-        role: nextRole,
-        status:
-          target.access.admin_status === 'NONE'
-            ? 'ACTIVE'
-            : target.access.admin_status,
-        createdBySuperAdminId: target.access.created_by_super_admin_id,
-      });
-
-      const shouldReplaceScopes =
-        nextRole === ADMIN_ROLE_SUPER_ADMIN
-          ? true
-          : body.country_ids !== undefined || body.division_ids !== undefined;
-      if (shouldReplaceScopes) {
-        const nextCountryIds =
-          nextRole === ADMIN_ROLE_SUPER_ADMIN
-            ? []
-            : body.country_ids ?? target.access.country_scopes.map((scope) => scope.id);
-        const nextDivisionIds =
-          nextRole === ADMIN_ROLE_SUPER_ADMIN
-            ? []
-            : body.division_ids ?? target.access.division_scopes.map((scope) => scope.id);
-        const validatedScopes = await validateAdminScopeAssignments(client, {
-          countryIds: nextCountryIds,
-          divisionIds: nextDivisionIds,
+        const currentRole =
+          target.access.admin_role === ADMIN_ROLE_SUPER_ADMIN
+            ? ADMIN_ROLE_SUPER_ADMIN
+            : ADMIN_ROLE_ADMIN;
+        const nextRole =
+          body.role === ADMIN_ROLE_SUPER_ADMIN
+            ? ADMIN_ROLE_SUPER_ADMIN
+            : body.role === ADMIN_ROLE_ADMIN
+              ? ADMIN_ROLE_ADMIN
+              : currentRole;
+        const account = await ensureAdminAccountRecord(client, {
+          userId: target.resolvedUserId,
+          role: nextRole,
+          status:
+            target.access.admin_status === 'NONE'
+              ? 'ACTIVE'
+              : target.access.admin_status,
+          createdBySuperAdminId: target.access.created_by_super_admin_id,
         });
-        await replaceAdminScopeAssignments(client, String(account.id), {
-          countryIds: validatedScopes.countryIds,
-          divisionIds: validatedScopes.divisionIds,
-        });
-      }
 
-      const shouldReplaceModules =
-        nextRole === ADMIN_ROLE_SUPER_ADMIN || body.module_keys !== undefined;
-      if (shouldReplaceModules) {
-        await replaceAdminModuleAssignments(
-          client,
-          String(account.id),
-          nextRole,
-          nextRole === ADMIN_ROLE_SUPER_ADMIN ? [] : body.module_keys ?? target.access.permissions
-        );
-      }
+        const shouldReplaceScopes =
+          nextRole === ADMIN_ROLE_SUPER_ADMIN
+            ? true
+            : body.country_ids !== undefined || body.division_ids !== undefined;
+        if (shouldReplaceScopes) {
+          const nextCountryIds =
+            nextRole === ADMIN_ROLE_SUPER_ADMIN
+              ? []
+              : body.country_ids ?? target.access.country_scopes.map((scope) => scope.id);
+          const nextDivisionIds =
+            nextRole === ADMIN_ROLE_SUPER_ADMIN
+              ? []
+              : body.division_ids ?? target.access.division_scopes.map((scope) => scope.id);
+          const validatedScopes = await validateAdminScopeAssignments(client, {
+            countryIds: nextCountryIds,
+            divisionIds: nextDivisionIds,
+          });
+          await replaceAdminScopeAssignments(client, String(account.id), {
+            countryIds: validatedScopes.countryIds,
+            divisionIds: validatedScopes.divisionIds,
+          });
+        }
 
-      const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
-      if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
-        reply.code(500);
-        return { error: 'admin_update_failed' };
-      }
+        const shouldReplaceModules =
+          nextRole === ADMIN_ROLE_SUPER_ADMIN || body.module_keys !== undefined;
+        if (shouldReplaceModules) {
+          await replaceAdminModuleAssignments(
+            client,
+            String(account.id),
+            nextRole,
+            nextRole === ADMIN_ROLE_SUPER_ADMIN ? [] : body.module_keys ?? target.access.permissions
+          );
+        }
 
-      await recordAdminAudit(client, {
-        actorId: actorAccess.user_id,
-        action: 'ADMIN_UPDATED',
-        targetType: 'admin_user',
-        targetId: target.resolvedUserId,
-        meta: {
-          profile_fields: {
-            full_name: body.full_name ?? null,
-            email: body.email ?? null,
-            phone: body.phone ?? null,
+        const updatedTarget = await loadManagedAdminTarget(client, target.resolvedUserId);
+        if (!updatedTarget?.access || updatedTarget.access.admin_role === 'USER') {
+          reply.code(500);
+          return { error: 'admin_update_failed' };
+        }
+
+        await recordAdminAudit(client, {
+          actorId: actorAccess.user_id,
+          action: 'ADMIN_UPDATED',
+          targetType: 'admin_user',
+          targetId: target.resolvedUserId,
+          meta: {
+            profile_fields: {
+              full_name: body.full_name ?? null,
+              email: body.email ?? null,
+              phone: body.phone ?? null,
+            },
+            role: updatedTarget.access.admin_role,
+            permissions: updatedTarget.access.permissions,
+            country_ids: updatedTarget.access.country_ids,
+            division_ids: updatedTarget.access.division_ids,
           },
-          role: updatedTarget.access.admin_role,
-          permissions: updatedTarget.access.permissions,
-          country_ids: updatedTarget.access.country_ids,
-          division_ids: updatedTarget.access.division_ids,
-        },
-        ...auditScopeFromAccess(updatedTarget.access),
-      });
+          ...auditScopeFromAccess(updatedTarget.access),
+        });
 
-      return {
-        admin: serializeManagedAdminRecord({
-          row: updatedTarget.row,
-          access: updatedTarget.access,
-        }),
-      };
+        return {
+          admin: serializeManagedAdminRecord({
+            row: updatedTarget.row,
+            access: updatedTarget.access,
+          }),
+        };
+      } catch (error) {
+        return sendManagedAdminMutationError(reply, error);
+      }
     });
   });
 

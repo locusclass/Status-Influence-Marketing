@@ -1,10 +1,17 @@
 import { Pool, PoolClient } from 'pg';
 import { config } from './config.js';
 
+const isVitestRuntime =
+  String(process.env.VITEST ?? '').trim().toLowerCase() === 'true';
+const databaseUrl =
+  isVitestRuntime && String(process.env.TEST_DATABASE_URL ?? '').trim().length > 0
+    ? String(process.env.TEST_DATABASE_URL).trim()
+    : config.databaseUrl;
+
 /**
  * Validate DATABASE_URL early so failure is explicit.
  */
-if (!config.databaseUrl) {
+if (!databaseUrl) {
   throw new Error('FATAL_STARTUP_CONFIGURATION: DATABASE_URL is not defined.');
 }
 
@@ -13,9 +20,9 @@ if (!config.databaseUrl) {
  * rejectUnauthorized:false is required because Railway uses managed certificates.
  */
 export const pool = new Pool({
-  connectionString: config.databaseUrl,
+  connectionString: databaseUrl,
   ssl:
-    /localhost|127\.0\.0\.1/i.test(config.databaseUrl)
+    /localhost|127\.0\.0\.1/i.test(databaseUrl)
       ? false
       : {
           rejectUnauthorized: false

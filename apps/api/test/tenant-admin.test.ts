@@ -34,6 +34,9 @@ async function insertCountry(code: string, name: string) {
     `
     INSERT INTO countries (name, code, status)
     VALUES ($1,$2,'ACTIVE')
+    ON CONFLICT (code) DO UPDATE
+      SET name = EXCLUDED.name,
+          status = EXCLUDED.status
     RETURNING *
     `,
     [name, code]
@@ -417,6 +420,119 @@ describe('Tenant admin architecture', () => {
         'ADMIN_SUSPENDED',
       ])
     );
+  });
+
+  it('returns a conflict when a super admin creates a managed admin with a duplicate identity', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const superAdmin = await insertUser({
+      email: 'super-admin-dup@prime.test',
+      phone: '+256700000020',
+      admin_role: 'SUPER_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    await insertUser({
+      email: 'existing-admin@prime.test',
+      phone: '+256700000021',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const superToken = app.jwt.sign(
+      buildAuthClaims({
+        ...superAdmin,
+        country_id: ug.id,
+      })
+    );
+
+    const duplicateEmail = await app.inject({
+      method: 'POST',
+      url: '/admin/admins',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        full_name: 'Duplicate Email Admin',
+        email: 'existing-admin@prime.test',
+        phone: '+256700000022',
+        password: 'AdminPass123!',
+        role: 'ADMIN',
+        module_keys: [],
+        country_ids: [ug.id],
+      },
+    });
+    expect(duplicateEmail.statusCode).toBe(409);
+    expect(duplicateEmail.json()).toMatchObject({ error: 'email_taken' });
+
+    const duplicatePhone = await app.inject({
+      method: 'POST',
+      url: '/admin/admins',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        full_name: 'Duplicate Phone Admin',
+        email: 'fresh-admin@prime.test',
+        phone: '+256700000021',
+        password: 'AdminPass123!',
+        role: 'ADMIN',
+        module_keys: [],
+        country_ids: [ug.id],
+      },
+    });
+    expect(duplicatePhone.statusCode).toBe(409);
+    expect(duplicatePhone.json()).toMatchObject({ error: 'phone_taken' });
+  });
+
+  it('returns a bad request when admin scope assignments reference unknown tenants', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const superAdmin = await insertUser({
+      email: 'super-admin-scope@prime.test',
+      phone: '+256700000030',
+      admin_role: 'SUPER_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const superToken = app.jwt.sign(
+      buildAuthClaims({
+        ...superAdmin,
+        country_id: ug.id,
+      })
+    );
+
+    const invalidCountry = await app.inject({
+      method: 'POST',
+      url: '/admin/admins',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        full_name: 'Invalid Country Scope',
+        email: 'invalid-country-scope@prime.test',
+        phone: '+256700000031',
+        password: 'AdminPass123!',
+        role: 'ADMIN',
+        module_keys: [],
+        country_ids: ['11111111-1111-4111-8111-111111111111'],
+      },
+    });
+    expect(invalidCountry.statusCode).toBe(400);
+    expect(invalidCountry.json()).toMatchObject({
+      error: 'country_scope_not_found',
+    });
+
+    const invalidDivision = await app.inject({
+      method: 'POST',
+      url: '/admin/admins',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        full_name: 'Invalid Division Scope',
+        email: 'invalid-division-scope@prime.test',
+        phone: '+256700000032',
+        password: 'AdminPass123!',
+        role: 'ADMIN',
+        module_keys: [],
+        country_ids: [ug.id],
+        division_ids: ['22222222-2222-4222-8222-222222222222'],
+      },
+    });
+    expect(invalidDivision.statusCode).toBe(400);
+    expect(invalidDivision.json()).toMatchObject({
+      error: 'division_scope_not_found',
+    });
   });
 
   it('enforces RBAC boundaries for super, country, and division admins', async () => {
@@ -1187,9 +1303,7 @@ describe('Tenant admin architecture', () => {
       'SELECT balance_available, balance FROM wallets WHERE user_id = $1 LIMIT 1',
       [kampalaManager.id]
     );
-    expect(walletRes.rows[0]).toMatchObject({
-      balance_available: '25',
-      balance: '25',
-    });
+    expect(Number(walletRes.rows[0]?.balance_available ?? 0)).toBe(25);
+    expect(Number(walletRes.rows[0]?.balance ?? 0)).toBe(25);
   });
 });
