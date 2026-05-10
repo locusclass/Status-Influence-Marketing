@@ -3,7 +3,7 @@
 
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { withTransaction } from '../db.js';
+import { withTransaction, query } from '../db.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
 
@@ -86,15 +86,13 @@ export async function advertRoutes(app: FastifyInstance) {
   // GET /api/advert/categories
   app.get('/advert/categories', async (_request, reply) => {
     try {
-      const result = await withTransaction(async (client) => {
-        return client.query(`
-          SELECT id, slug, name, icon, sort_order
-          FROM advert_categories
-          WHERE is_active = TRUE
-          ORDER BY sort_order ASC, name ASC
-        `);
-      });
-      return reply.send({ categories: result.rows });
+      const categories = await query(`
+        SELECT id, slug, name, icon, sort_order
+        FROM advert_categories
+        WHERE is_active = TRUE
+        ORDER BY sort_order ASC, name ASC
+      `);
+      return reply.send({ categories });
     } catch (err) {
       app.log.error(err, 'advert.categories.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
@@ -105,16 +103,14 @@ export async function advertRoutes(app: FastifyInstance) {
   app.get('/advert/categories/:categoryId/subcategories', async (request, reply) => {
     const { categoryId } = request.params as { categoryId: string };
     try {
-      const result = await withTransaction(async (client) => {
-        return client.query(`
-          SELECT s.id, s.slug, s.name, s.sort_order, c.name AS category_name
-          FROM advert_subcategories s
-          JOIN advert_categories c ON c.id = s.category_id
-          WHERE s.category_id = $1 AND s.is_active = TRUE
-          ORDER BY s.sort_order ASC, s.name ASC
-        `, [categoryId]);
-      });
-      return reply.send({ subcategories: result.rows });
+      const subcategories = await query(`
+        SELECT s.id, s.slug, s.name, s.sort_order, c.name AS category_name
+        FROM advert_subcategories s
+        JOIN advert_categories c ON c.id = s.category_id
+        WHERE s.category_id = $1 AND s.is_active = TRUE
+        ORDER BY s.sort_order ASC, s.name ASC
+      `, [categoryId]);
+      return reply.send({ subcategories });
     } catch (err) {
       app.log.error(err, 'advert.subcategories.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
@@ -125,17 +121,15 @@ export async function advertRoutes(app: FastifyInstance) {
   app.get('/advert/categories/:categoryId/listing-types', async (request, reply) => {
     const { categoryId } = request.params as { categoryId: string };
     try {
-      const result = await withTransaction(async (client) => {
-        return client.query(`
-          SELECT lt.id, lt.slug, lt.name, lt.sort_order,
-                 s.id AS subcategory_id, s.name AS subcategory_name
-          FROM advert_listing_types lt
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          WHERE s.category_id = $1 AND lt.is_active = TRUE AND s.is_active = TRUE
-          ORDER BY s.sort_order ASC, lt.sort_order ASC, lt.name ASC
-        `, [categoryId]);
-      });
-      return reply.send({ listing_types: result.rows });
+      const listing_types = await query(`
+        SELECT lt.id, lt.slug, lt.name, lt.sort_order,
+               s.id AS subcategory_id, s.name AS subcategory_name
+        FROM advert_listing_types lt
+        JOIN advert_subcategories s ON s.id = lt.subcategory_id
+        WHERE s.category_id = $1 AND lt.is_active = TRUE AND s.is_active = TRUE
+        ORDER BY s.sort_order ASC, lt.sort_order ASC, lt.name ASC
+      `, [categoryId]);
+      return reply.send({ listing_types });
     } catch (err) {
       app.log.error(err, 'advert.listing_types.flat.error');
       return reply.code(500).send({ error: 'internal_server_error' });
@@ -146,16 +140,14 @@ export async function advertRoutes(app: FastifyInstance) {
   app.get('/advert/subcategories/:subcategoryId/listing-types', async (request, reply) => {
     const { subcategoryId } = request.params as { subcategoryId: string };
     try {
-      const result = await withTransaction(async (client) => {
-        return client.query(`
-          SELECT lt.id, lt.slug, lt.name, lt.sort_order, s.name AS subcategory_name
-          FROM advert_listing_types lt
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          WHERE lt.subcategory_id = $1 AND lt.is_active = TRUE
-          ORDER BY lt.sort_order ASC, lt.name ASC
-        `, [subcategoryId]);
-      });
-      return reply.send({ listing_types: result.rows });
+      const listing_types = await query(`
+        SELECT lt.id, lt.slug, lt.name, lt.sort_order, s.name AS subcategory_name
+        FROM advert_listing_types lt
+        JOIN advert_subcategories s ON s.id = lt.subcategory_id
+        WHERE lt.subcategory_id = $1 AND lt.is_active = TRUE
+        ORDER BY lt.sort_order ASC, lt.name ASC
+      `, [subcategoryId]);
+      return reply.send({ listing_types });
     } catch (err) {
       app.log.error(err, 'advert.listing_types.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
@@ -166,47 +158,35 @@ export async function advertRoutes(app: FastifyInstance) {
   app.get('/advert/listing-types/:listingTypeId/fields', async (request, reply) => {
     const { listingTypeId } = request.params as { listingTypeId: string };
     try {
-      const result = await withTransaction(async (client) => {
-        const fields = await client.query(`
-          SELECT
-            fd.id, fd.field_key, fd.label, fd.field_type,
-            fd.is_required, fd.sort_order, fd.placeholder,
-            fd.helper_text, fd.section_group,
-            fd.min_length, fd.max_length, fd.min_value, fd.max_value
-          FROM advert_field_definitions fd
-          WHERE fd.listing_type_id = $1
-          ORDER BY fd.sort_order ASC
-        `, [listingTypeId]);
+      const fieldRows = await query<any>(`
+        SELECT
+          fd.id, fd.field_key, fd.label, fd.field_type,
+          fd.is_required, fd.sort_order, fd.placeholder,
+          fd.helper_text, fd.section_group,
+          fd.min_length, fd.max_length, fd.min_value, fd.max_value
+        FROM advert_field_definitions fd
+        WHERE fd.listing_type_id = $1
+        ORDER BY fd.sort_order ASC
+      `, [listingTypeId]);
 
-        const fieldIds = fields.rows.map((f: any) => f.id);
-        let optionsByField: Record<string, any[]> = {};
-
-        if (fieldIds.length > 0) {
-          const options = await client.query(`
-            SELECT field_def_id, option_value, option_label, sort_order
-            FROM advert_field_options
-            WHERE field_def_id = ANY($1)
-            ORDER BY sort_order ASC
-          `, [fieldIds]);
-
-          for (const opt of options.rows) {
-            const fid = opt.field_def_id as string;
-            if (!optionsByField[fid]) {
-              optionsByField[fid] = [];
-            }
-            optionsByField[fid]!.push({
-              value: opt.option_value,
-              label: opt.option_label,
-            });
-          }
+      const optionsByField: Record<string, any[]> = {};
+      if (fieldRows.length > 0) {
+        const fieldIds = fieldRows.map((f: any) => f.id);
+        const optionRows = await query<any>(`
+          SELECT field_def_id, option_value, option_label, sort_order
+          FROM advert_field_options
+          WHERE field_def_id = ANY($1)
+          ORDER BY sort_order ASC
+        `, [fieldIds]);
+        for (const opt of optionRows) {
+          const fid = opt.field_def_id as string;
+          if (!optionsByField[fid]) optionsByField[fid] = [];
+          optionsByField[fid]!.push({ value: opt.option_value, label: opt.option_label });
         }
+      }
 
-        return fields.rows.map((f: any) => ({
-          ...f,
-          options: optionsByField[f.id] ?? [],
-        }));
-      });
-      return reply.send({ fields: result });
+      const fields = fieldRows.map((f: any) => ({ ...f, options: optionsByField[f.id] ?? [] }));
+      return reply.send({ fields });
     } catch (err) {
       app.log.error(err, 'advert.fields.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
@@ -368,48 +348,45 @@ export async function advertRoutes(app: FastifyInstance) {
 
         const listingId = listingRow.rows[0].id;
 
-        // Insert field values
-        for (const [key, value] of Object.entries(body.field_values)) {
-          if (value !== null && value !== undefined) {
-            await client.query(`
-              INSERT INTO advert_listing_field_values (id, listing_id, field_key, field_value)
-              VALUES ($1, $2, $3, $4)
-              ON CONFLICT (listing_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
-            `, [uuid(), listingId, key, String(value)]);
-          }
+        // Batch insert field values (single round-trip)
+        const fieldEntries = Object.entries(body.field_values).filter(([, v]) => v != null);
+        if (fieldEntries.length > 0) {
+          const params: any[] = [];
+          const rowPlaceholders = fieldEntries.map(([key, value], i) => {
+            const b = i * 4;
+            params.push(uuid(), listingId, key, String(value));
+            return `($${b+1},$${b+2},$${b+3},$${b+4})`;
+          });
+          await client.query(`
+            INSERT INTO advert_listing_field_values (id, listing_id, field_key, field_value)
+            VALUES ${rowPlaceholders.join(',')}
+            ON CONFLICT (listing_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
+          `, params);
         }
 
-        // Insert ambassador pack media (max 5)
-        const ambassadorMedia = body.ambassador_media.slice(0, 5);
-        for (let i = 0; i < ambassadorMedia.length; i++) {
-          const m = ambassadorMedia[i]!;
+        // Batch insert all media (ambassador pack + gallery) in one round-trip
+        const allMedia = [
+          ...body.ambassador_media.slice(0, 5).map((m, i) => ({ ...m, pack: 'AMBASSADOR_PACK', order: i })),
+          ...body.gallery_media.map((m, i) => ({ ...m, pack: 'PRODUCT_GALLERY', order: m.sort_order ?? i })),
+        ];
+        if (allMedia.length > 0) {
+          const params: any[] = [];
+          const rowPlaceholders = allMedia.map((m, i) => {
+            const b = i * 11;
+            params.push(
+              uuid(), listingId, m.pack, m.media_type, m.url,
+              m.thumbnail_url ?? null, m.file_name ?? null,
+              m.mime_type ?? null, m.file_size_bytes ?? null,
+              m.duration_secs ?? null, m.order
+            );
+            return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11})`;
+          });
           await client.query(`
             INSERT INTO advert_media (
               id, listing_id, media_pack, media_type, url, thumbnail_url,
               file_name, mime_type, file_size_bytes, duration_secs, sort_order
-            ) VALUES ($1,$2,'AMBASSADOR_PACK',$3,$4,$5,$6,$7,$8,$9,$10)
-          `, [
-            uuid(), listingId, m.media_type, m.url,
-            m.thumbnail_url ?? null, m.file_name ?? null,
-            m.mime_type ?? null, m.file_size_bytes ?? null,
-            m.duration_secs ?? null, i,
-          ]);
-        }
-
-        // Insert gallery media (no limit)
-        for (let i = 0; i < body.gallery_media.length; i++) {
-          const m = body.gallery_media[i]!;
-          await client.query(`
-            INSERT INTO advert_media (
-              id, listing_id, media_pack, media_type, url, thumbnail_url,
-              file_name, mime_type, file_size_bytes, duration_secs, sort_order
-            ) VALUES ($1,$2,'PRODUCT_GALLERY',$3,$4,$5,$6,$7,$8,$9,$10)
-          `, [
-            uuid(), listingId, m.media_type, m.url,
-            m.thumbnail_url ?? null, m.file_name ?? null,
-            m.mime_type ?? null, m.file_size_bytes ?? null,
-            m.duration_secs ?? null, m.sort_order ?? i,
-          ]);
+            ) VALUES ${rowPlaceholders.join(',')}
+          `, params);
         }
 
         return { ...listingRow.rows[0], updated: false, existing: false };

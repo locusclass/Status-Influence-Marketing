@@ -26,7 +26,10 @@ export const pool = new Pool({
       ? false
       : {
           rejectUnauthorized: false
-        }
+        },
+  max: 10,                   // cap concurrent DB connections (Railway free tier limit)
+  idleTimeoutMillis: 30000,  // release idle connections after 30 s
+  connectionTimeoutMillis: 5000, // fail fast if pool is exhausted
 });
 
 /**
