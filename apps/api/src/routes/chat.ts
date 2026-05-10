@@ -40,6 +40,7 @@ import {
   resolveMediaUploadError,
   storeMultipartMediaFile,
 } from '../services/mediaUploads.js';
+import { resolveUploadedFileUrl } from '../utils.js';
 import { createUserNotifications } from '../services/userSignals.js';
 import {
   buildActiveViewerVerificationJoin,
@@ -2723,7 +2724,7 @@ export async function chatRoutes(app: FastifyInstance) {
           kind: 'image',
           maxBytes: 10 * 1024 * 1024,
         });
-        logoUrl = uploaded.fileUrl;
+        logoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
       } catch (error) {
         const handled = resolveMediaUploadError(error);
         if (handled) {
@@ -2946,7 +2947,7 @@ export async function chatRoutes(app: FastifyInstance) {
           kind: 'image',
           maxBytes: 10 * 1024 * 1024,
         });
-        uploadedLogoUrl = uploaded.fileUrl;
+        uploadedLogoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
       } catch (error) {
         const handled = resolveMediaUploadError(error);
         if (handled) {

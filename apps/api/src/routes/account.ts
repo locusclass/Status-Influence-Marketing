@@ -49,6 +49,7 @@ import {
   hasYoClientCredentials,
   hasYoEncryptionKey,
 } from '../config.js';
+import { resolveUploadedFileUrl } from '../utils.js';
 import {
   buildActiveViewerVerificationJoin,
   buildViewerVerificationFields,
@@ -929,7 +930,7 @@ export async function accountRoutes(app: FastifyInstance) {
             kind: 'image',
             maxBytes: 10 * 1024 * 1024,
           });
-          avatarUrl = uploaded.fileUrl;
+          avatarUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
         } catch (error) {
           const handled = resolveMediaUploadError(error);
           if (handled) {
@@ -1285,7 +1286,7 @@ export async function accountRoutes(app: FastifyInstance) {
             maxBytes: 0,
             allowedMimeTypes: ['video/mp4'],
           });
-          videoUrl = uploaded.fileUrl;
+          videoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
         } catch (error) {
           const handled = resolveMediaUploadError(error);
           if (handled) {

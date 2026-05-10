@@ -108,6 +108,7 @@ import {
   resolveMediaUploadError,
   storeMultipartAttachmentFile,
 } from '../services/mediaUploads.js';
+import { resolveUploadedFileUrl } from '../utils.js';
 import { ensureUserProfilesTable } from '../services/userProfiles.js';
 import { ensureViewerVerificationSchema } from '../services/viewerVerification.js';
 
@@ -4208,7 +4209,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 prefix: 'handler-jaz-attachment',
                 maxBytes: 50 * 1024 * 1024,
               });
-              attachmentUrl = uploaded.fileUrl;
+              attachmentUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
               attachmentName = uploaded.fileName;
               attachmentMimeType = uploaded.mimeType;
             } else if (part.type === 'field') {

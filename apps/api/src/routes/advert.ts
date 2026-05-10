@@ -236,7 +236,6 @@ export async function advertRoutes(app: FastifyInstance) {
       cta_whatsapp: z.string().optional().nullable(),
       cta_phone: z.string().optional().nullable(),
       cta_email: z.string().email().optional().nullable(),
-      cta_url: z.string().url().optional().nullable(),
       expires_at: z.string().optional().nullable(),
       field_values: z.record(z.string()).default({}),
       ambassador_media: z.array(z.object({
@@ -360,7 +359,7 @@ export async function advertRoutes(app: FastifyInstance) {
           body.is_negotiable, body.location_text ?? null,
           body.latitude ?? null, body.longitude ?? null,
           body.cta_whatsapp ?? null, body.cta_phone ?? null,
-          body.cta_email ?? null, body.cta_url ?? null,
+          body.cta_email ?? null, `https://primestatus.site/listing/${slug}`,
           campaignEndAt,      // expires_at = campaign end
           campaignStartAt,    // campaign_start_at
           campaignEndAt,      // campaign_end_at
