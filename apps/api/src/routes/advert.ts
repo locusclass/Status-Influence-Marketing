@@ -121,6 +121,27 @@ export async function advertRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/advert/categories/:categoryId/listing-types — flat (all subcats merged)
+  app.get('/advert/categories/:categoryId/listing-types', async (request, reply) => {
+    const { categoryId } = request.params as { categoryId: string };
+    try {
+      const result = await withTransaction(async (client) => {
+        return client.query(`
+          SELECT lt.id, lt.slug, lt.name, lt.sort_order,
+                 s.id AS subcategory_id, s.name AS subcategory_name
+          FROM advert_listing_types lt
+          JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          WHERE s.category_id = $1 AND lt.is_active = TRUE AND s.is_active = TRUE
+          ORDER BY s.sort_order ASC, lt.sort_order ASC, lt.name ASC
+        `, [categoryId]);
+      });
+      return reply.send({ listing_types: result.rows });
+    } catch (err) {
+      app.log.error(err, 'advert.listing_types.flat.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
   // GET /api/advert/subcategories/:subcategoryId/listing-types
   app.get('/advert/subcategories/:subcategoryId/listing-types', async (request, reply) => {
     const { subcategoryId } = request.params as { subcategoryId: string };
@@ -1226,6 +1247,73 @@ export async function advertRoutes(app: FastifyInstance) {
     } catch (err: any) {
       if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
       app.log.error(err, 'advert.offer_messages.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: LISTINGS LIST ────────────────────────────────────────────────
+
+  // GET /api/admin/advert/listings — Admin: list all listings across all businesses
+  app.get('/admin/advert/listings', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as {
+      page?: string; limit?: string; status?: string; search?: string;
+    };
+    const page  = Math.max(1, parseInt(query.page ?? '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit ?? '30', 10)));
+    const offset = (page - 1) * limit;
+
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT
+            al.id, al.slug, al.title, al.status, al.admin_keep_alive,
+            al.views_total, al.views_unique, al.listing_quality_score,
+            al.campaign_start_at, al.campaign_end_at,
+            al.created_at,
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
+            u.full_name AS business_name, u.email AS business_email,
+            c.id AS campaign_id,
+            lt.name AS listing_type_name,
+            s.name AS subcategory_name,
+            cat.name AS category_name,
+            (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id AND o.status = 'PENDING') AS pending_offers
+          FROM advert_listings al
+          JOIN users u ON u.id = al.business_id
+          JOIN campaigns c ON c.id = al.campaign_id
+          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          JOIN advert_categories cat ON cat.id = s.category_id
+          WHERE ($3::text IS NULL OR al.status = $3)
+            AND ($4::text IS NULL OR
+                 al.title ILIKE '%' || $4 || '%' OR
+                 u.full_name ILIKE '%' || $4 || '%' OR
+                 al.slug ILIKE '%' || $4 || '%')
+          ORDER BY al.created_at DESC
+          LIMIT $1 OFFSET $2
+        `, [limit, offset, query.status ?? null, query.search ?? null]);
+
+        const countRow = await client.query(`
+          SELECT COUNT(*) FROM advert_listings al
+          JOIN users u ON u.id = al.business_id
+          WHERE ($1::text IS NULL OR al.status = $1)
+            AND ($2::text IS NULL OR
+                 al.title ILIKE '%' || $2 || '%' OR
+                 u.full_name ILIKE '%' || $2 || '%' OR
+                 al.slug ILIKE '%' || $2 || '%')
+        `, [query.status ?? null, query.search ?? null]);
+
+        return {
+          listings: rows.rows,
+          total: parseInt(countRow.rows[0]?.count ?? '0', 10),
+          page,
+          limit,
+        };
+      });
+      return reply.send(result);
+    } catch (err) {
+      app.log.error(err, 'admin.advert.listings.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
