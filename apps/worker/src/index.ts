@@ -42,6 +42,7 @@ const verifier =
 let lastContractExpirySweepAt = 0;
 let lastOpenAllocatorSweepAt = 0;
 let lastMonthlyPayoutSweepAt = 0;
+let lastAdvertRollupSweepAt = 0;
 
 type Eligibleambassador = {
   id: string;
@@ -1962,6 +1963,83 @@ async function runMonthlyManagerPayoutsIfDue() {
   });
 }
 
+async function expireEndedAdvertListingsIfDue() {
+  const TWO_MINUTES_MS = 2 * 60 * 1000;
+  // We use the advert rollup timestamp as a co-timer (runs every 2 min independently)
+  // Use a separate static tracker
+  if (!((expireEndedAdvertListingsIfDue as any).__lastAt)) {
+    (expireEndedAdvertListingsIfDue as any).__lastAt = 0;
+  }
+  if (Date.now() - (expireEndedAdvertListingsIfDue as any).__lastAt < TWO_MINUTES_MS) return;
+  (expireEndedAdvertListingsIfDue as any).__lastAt = Date.now();
+
+  const { rowCount } = await pool.query(`
+    UPDATE advert_listings
+    SET status = 'EXPIRED', updated_at = now()
+    WHERE status = 'ACTIVE'
+      AND admin_keep_alive = FALSE
+      AND campaign_end_at IS NOT NULL
+      AND campaign_end_at < now()
+  `);
+
+  if ((rowCount ?? 0) > 0) {
+    console.info(`advert_listings_expired count=${rowCount}`);
+  }
+}
+
+async function runAdvertAnalyticsRollupIfDue() {
+  const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+  if (Date.now() - lastAdvertRollupSweepAt < SIX_HOURS_MS) return;
+  lastAdvertRollupSweepAt = Date.now();
+
+  await withTransaction(async (client) => {
+    // Upsert daily rollup for yesterday and today across all active listings
+    await client.query(`
+      INSERT INTO advert_analytics_rollups
+        (id, listing_id, rollup_date, visits, unique_visitors, cta_taps,
+         whatsapp_taps, phone_taps, gallery_opens, offer_starts, avg_session_secs)
+      SELECT
+        gen_random_uuid(),
+        s.listing_id,
+        DATE(s.session_start) AS rollup_date,
+        COUNT(*) AS visits,
+        COUNT(*) FILTER (WHERE NOT s.is_return_visitor) AS unique_visitors,
+        COALESCE(e.cta_taps, 0),
+        COALESCE(e.whatsapp_taps, 0),
+        COALESCE(e.phone_taps, 0),
+        COALESCE(e.gallery_opens, 0),
+        COALESCE(e.offer_starts, 0),
+        COALESCE(AVG(s.session_duration_secs), 0) AS avg_session_secs
+      FROM advert_page_sessions s
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) FILTER (WHERE ev.event_type = 'CTA_TAP')       AS cta_taps,
+          COUNT(*) FILTER (WHERE ev.event_type = 'WHATSAPP_TAP')  AS whatsapp_taps,
+          COUNT(*) FILTER (WHERE ev.event_type = 'PHONE_TAP')     AS phone_taps,
+          COUNT(*) FILTER (WHERE ev.event_type = 'GALLERY_OPEN')  AS gallery_opens,
+          COUNT(*) FILTER (WHERE ev.event_type = 'OFFER_START')   AS offer_starts
+        FROM advert_engagement_events ev
+        WHERE ev.listing_id = s.listing_id
+          AND DATE(ev.occurred_at) = DATE(s.session_start)
+      ) e ON TRUE
+      WHERE DATE(s.session_start) >= CURRENT_DATE - INTERVAL '2 days'
+      GROUP BY s.listing_id, DATE(s.session_start), e.cta_taps, e.whatsapp_taps,
+               e.phone_taps, e.gallery_opens, e.offer_starts
+      ON CONFLICT (listing_id, rollup_date) DO UPDATE SET
+        visits          = EXCLUDED.visits,
+        unique_visitors = EXCLUDED.unique_visitors,
+        cta_taps        = EXCLUDED.cta_taps,
+        whatsapp_taps   = EXCLUDED.whatsapp_taps,
+        phone_taps      = EXCLUDED.phone_taps,
+        gallery_opens   = EXCLUDED.gallery_opens,
+        offer_starts    = EXCLUDED.offer_starts,
+        avg_session_secs = EXCLUDED.avg_session_secs
+    `);
+  });
+
+  console.info('advert_analytics_rollup_complete');
+}
+
 async function loop() {
   while (true) {
     try {
@@ -1980,6 +2058,18 @@ async function loop() {
       await runMonthlyManagerPayoutsIfDue();
     } catch (err) {
       console.error('monthly_manager_payouts_failed', err);
+    }
+
+    try {
+      await expireEndedAdvertListingsIfDue();
+    } catch (err) {
+      console.error('advert_listing_expiry_sweep_failed', err);
+    }
+
+    try {
+      await runAdvertAnalyticsRollupIfDue();
+    } catch (err) {
+      console.error('advert_analytics_rollup_failed', err);
     }
 
     const job = await fetchNextJob();

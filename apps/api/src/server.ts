@@ -49,7 +49,8 @@ import {
   chatRoutes,
   accountRoutes,
   adminRoutes,
-  tenantAdminRoutes
+  tenantAdminRoutes,
+  advertRoutes,
 } from './routes/index.js';
 import {
   ensureUserSignalSchema,
@@ -401,6 +402,7 @@ export function buildServer() {
     instance.register(accountRoutes);
     instance.register(adminRoutes);
     instance.register(tenantAdminRoutes);
+    instance.register(advertRoutes);
   };
 
   // Routes
