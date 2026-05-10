@@ -215,6 +215,19 @@ export function buildServer() {
     credentials: true,
   });
 
+  // Belt-and-suspenders: ensure CORS headers are present on every response
+  // including Fastify error responses which can bypass the cors plugin hooks.
+  app.addHook('onSend', async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin && isOriginAllowed(origin)) {
+      if (!reply.hasHeader('access-control-allow-origin')) {
+        reply.header('Access-Control-Allow-Origin', origin);
+        reply.header('Access-Control-Allow-Credentials', 'true');
+        reply.header('Vary', 'Origin');
+      }
+    }
+  });
+
   app.register(rateLimit, {
     max: 100,
     timeWindow: '1 minute',
