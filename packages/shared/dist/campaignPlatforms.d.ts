@@ -1,4 +1,4 @@
-export type CampaignPlatform = 'WHATSAPP_STATUS' | 'TIKTOK' | 'X';
+export type CampaignPlatform = 'WHATSAPP_STATUS';
 export type DeliveryModel = 'DETERMINISTIC' | 'PROBABILISTIC';
 type JsonRecord = Record<string, unknown>;
 export declare function normalizeCampaignPlatform(value: unknown): CampaignPlatform;

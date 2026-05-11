@@ -1,7 +1,10 @@
 import { z } from 'zod';
-import { ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, ADMIN_ROLE_SUPER_ADMIN, } from '@prime/shared';
+import countries from 'i18n-iso-countries';
+import { buildAuthClaims, buildUserSession } from '../services/roles.js';
+import { ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_COUNTRIES, ADMIN_MODULE_DIVISIONS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_USERS, ADMIN_ROLE_ADMIN, ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_DIVISION_ADMIN, ADMIN_ROLE_SUPER_ADMIN, LEGACY_COUNTRY_ADMIN_MODULE_KEYS, } from '@prime/shared';
 import { withTransaction } from '../db.js';
-import { assignCountryAdmin, assignDivisionAdmin, getRequestDashboardAccess, loadDashboardAccessContext, requireRole, } from '../services/adminTenant.js';
+import { appendDashboardTenantScope, assignCountryAdmin, assignDivisionAdmin, getRequestDashboardAccess, hasAdminModuleAccess, isSuperDashboardAccess, matchesDashboardTenantScope, requireRole, resolveLiveDashboardAccess, } from '../services/adminTenant.js';
+import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
 const CreateCountrySchema = z.object({
     name: z.string().trim().min(2).max(120),
     code: z.string().trim().min(2).max(20),
@@ -51,11 +54,81 @@ function parsePaging(query) {
     };
 }
 async function getLiveAccess(client, request) {
-    const access = getRequestDashboardAccess(request);
-    if (!access.user_id || access.user_id === 'ariaka-access') {
-        return access;
+    const attached = (request.adminAccess ?? null);
+    if (attached) {
+        return attached;
     }
-    return (await loadDashboardAccessContext(client, access.user_id)) ?? access;
+    const access = await resolveLiveDashboardAccess(client, request);
+    if (!access) {
+        throw new Error('dashboard_access_missing');
+    }
+    return access;
+}
+function appendTenantScope(state, access, scope) {
+    appendDashboardTenantScope(state, access, scope);
+}
+function matchesTenantScope(access, row) {
+    return matchesDashboardTenantScope(access, row);
+}
+async function requireModuleAccess(client, request, reply, moduleKey) {
+    const access = await getLiveAccess(client, request);
+    if (!hasAdminModuleAccess(access, moduleKey)) {
+        reply.code(403);
+        return null;
+    }
+    return access;
+}
+async function resolveAccessibleCountryId(client, request, reply, access) {
+    const requestedCountryId = String(request.query?.country_id ?? '')
+        .trim();
+    if (requestedCountryId) {
+        if (!isSuperDashboardAccess(access) &&
+            !access.country_ids.includes(requestedCountryId)) {
+            reply.code(403);
+            return null;
+        }
+        const countryRes = await client.query(`SELECT id FROM countries WHERE id = $1 LIMIT 1`, [requestedCountryId]);
+        if (!countryRes.rows[0]) {
+            reply.code(404);
+            return null;
+        }
+        return requestedCountryId;
+    }
+    if (access.country_id) {
+        return access.country_id;
+    }
+    if (isSuperDashboardAccess(access)) {
+        reply.code(400);
+        return null;
+    }
+    reply.code(400);
+    return null;
+}
+async function resolveAccessibleDivisionId(client, request, reply, access) {
+    const requestedDivisionId = String(request.query?.division_id ?? '')
+        .trim();
+    if (requestedDivisionId) {
+        if (!isSuperDashboardAccess(access) &&
+            !access.division_ids.includes(requestedDivisionId)) {
+            reply.code(403);
+            return null;
+        }
+        const divisionRes = await client.query(`SELECT id FROM divisions WHERE id = $1 LIMIT 1`, [requestedDivisionId]);
+        if (!divisionRes.rows[0]) {
+            reply.code(404);
+            return null;
+        }
+        return requestedDivisionId;
+    }
+    if (access.division_id) {
+        return access.division_id;
+    }
+    if (isSuperDashboardAccess(access)) {
+        reply.code(400);
+        return null;
+    }
+    reply.code(400);
+    return null;
 }
 async function ensureWalletForUser(client, userId) {
     const existing = await client.query(`SELECT * FROM wallets WHERE user_id = $1 LIMIT 1`, [userId]);
@@ -79,15 +152,89 @@ async function ensureWalletForUser(client, userId) {
     return created.rows[0];
 }
 export async function tenantAdminRoutes(app) {
-    app.get('/dashboard/access', {
-        preHandler: [
-            requireRole([
-                ADMIN_ROLE_SUPER_ADMIN,
-                ADMIN_ROLE_COUNTRY_ADMIN,
-                ADMIN_ROLE_DIVISION_ADMIN,
-            ]),
-        ],
-    }, async (request) => {
+    app.get('/admin/available-countries', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async () => {
+        return {
+            countries: Object.entries(countries.getNames('en', { select: 'official' })).map(([code, name]) => ({ code, name })),
+        };
+    });
+    app.post('/admin/countries/:id/access', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
+        const params = request.params;
+        return withTransaction(async (client) => {
+            const countryRes = await client.query('SELECT id, name, code FROM countries WHERE id = $1 LIMIT 1', [params.id]);
+            const country = countryRes.rows[0];
+            if (!country) {
+                reply.code(404);
+                return { error: 'country_not_found' };
+            }
+            const access = getRequestDashboardAccess(request);
+            let user;
+            const userRes = await client.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [access.user_id]);
+            user = userRes.rows[0];
+            if (!user) {
+                reply.code(404);
+                return { error: 'user_not_found' };
+            }
+            const scopedModules = [
+                ADMIN_MODULE_OVERVIEW,
+                ...LEGACY_COUNTRY_ADMIN_MODULE_KEYS,
+            ];
+            const countryCode = country.code == null ? null : String(country.code);
+            const countryName = country.name == null ? null : String(country.name);
+            const claims = {
+                ...buildAuthClaims(user),
+                email: String(user.email ?? ''),
+                admin_role: ADMIN_ROLE_ADMIN,
+                legacy_admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+                admin_status: 'ACTIVE',
+                permissions: scopedModules,
+                module_keys: scopedModules,
+                country_id: country.id,
+                division_id: null,
+                country_code: countryCode,
+                country_name: countryName,
+                division_name: null,
+                country_ids: [country.id],
+                division_ids: [],
+                country_scopes: [
+                    {
+                        id: country.id,
+                        code: countryCode,
+                        name: countryName,
+                    },
+                ],
+                division_scopes: [],
+                dashboard_scope_mode: 'COUNTRY',
+            };
+            const token = app.jwt.sign(claims);
+            return {
+                token,
+                user: {
+                    ...buildUserSession(user),
+                    admin_role: ADMIN_ROLE_ADMIN,
+                    legacy_admin_role: ADMIN_ROLE_COUNTRY_ADMIN,
+                    admin_status: 'ACTIVE',
+                    permissions: scopedModules,
+                    module_keys: scopedModules,
+                    country_id: country.id,
+                    division_id: null,
+                    country_name: countryName,
+                    country_code: countryCode,
+                    division_name: null,
+                    country_ids: [country.id],
+                    division_ids: [],
+                    country_scopes: [
+                        {
+                            id: country.id,
+                            code: countryCode,
+                            name: countryName,
+                        },
+                    ],
+                    division_scopes: [],
+                },
+            };
+        });
+    });
+    app.get('/dashboard/access', { preHandler: [app.adminOnly] }, async (request) => {
         return withTransaction(async (client) => {
             const access = await getLiveAccess(client, request);
             return { access };
@@ -113,8 +260,24 @@ export async function tenantAdminRoutes(app) {
             return { country: inserted.rows[0] };
         });
     });
-    app.get('/admin/countries', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async () => {
+    app.get('/admin/countries', { preHandler: [app.adminOnly] }, async (request, reply) => {
         return withTransaction(async (client) => {
+            const access = await getLiveAccess(client, request);
+            if (!hasAdminModuleAccess(access, ADMIN_MODULE_COUNTRIES)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
+            const state = {
+                conditions: [],
+                params: [],
+                idx: 1,
+            };
+            appendTenantScope(state, access, {
+                country: 'c.id',
+            });
+            const where = state.conditions.length
+                ? `WHERE ${state.conditions.join(' AND ')}`
+                : '';
             const res = await client.query(`
           SELECT
             c.*,
@@ -149,8 +312,9 @@ export async function tenantAdminRoutes(app) {
             FROM earnings_ledger
             GROUP BY country_id
           ) revenue_stats ON revenue_stats.country_id = c.id
+          ${where}
           ORDER BY c.created_at DESC, c.name ASC
-          `);
+          `, state.params);
             return { countries: res.rows };
         });
     });
@@ -159,7 +323,23 @@ export async function tenantAdminRoutes(app) {
         const body = AssignCountryAdminSchema.parse(request.body);
         return withTransaction(async (client) => {
             try {
-                const result = await assignCountryAdmin(client, params.id, body, body.role);
+                const result = await assignCountryAdmin(client, params.id, body, body.role, {
+                    createdBySuperAdminId: String(request.user?.sub ?? ''),
+                });
+                if (result.access) {
+                    await recordAdminAudit(client, {
+                        actorId: String(request.user?.sub ?? ''),
+                        action: 'ASSIGN_COUNTRY_ADMIN',
+                        targetType: 'admin_user',
+                        targetId: String(result.access.user_id),
+                        meta: {
+                            country_id: params.id,
+                            assignment_role: body.role,
+                            permissions: result.access.permissions,
+                        },
+                        ...auditScopeFromAccess(result.access),
+                    });
+                }
                 return result;
             }
             catch (error) {
@@ -231,10 +411,35 @@ export async function tenantAdminRoutes(app) {
             };
         });
     });
-    app.get('/admin/payouts', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request) => {
+    app.get('/admin/payouts', {
+        preHandler: [
+            requireRole([
+                ADMIN_ROLE_SUPER_ADMIN,
+                ADMIN_ROLE_COUNTRY_ADMIN,
+                ADMIN_ROLE_DIVISION_ADMIN,
+            ]),
+        ],
+    }, async (request, reply) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         return withTransaction(async (client) => {
+            const access = await getLiveAccess(client, request);
+            if (!hasAdminModuleAccess(access, ADMIN_MODULE_MANAGER_PAYOUTS)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
+            const state = {
+                conditions: [],
+                params: [],
+                idx: 1,
+            };
+            appendTenantScope(state, access, {
+                country: 'p.country_id',
+                division: 'p.division_id',
+            });
+            const where = state.conditions.length
+                ? `WHERE ${state.conditions.join(' AND ')}`
+                : '';
             const res = await client.query(`
           SELECT
             p.*,
@@ -247,16 +452,29 @@ export async function tenantAdminRoutes(app) {
           JOIN users u ON u.id = p.user_id
           LEFT JOIN countries c ON c.id = p.country_id
           LEFT JOIN divisions d ON d.id = p.division_id
+          ${where}
           ORDER BY p.created_at DESC
-          LIMIT $1 OFFSET $2
-          `, [limit, offset]);
+          LIMIT $${state.idx} OFFSET $${state.idx + 1}
+          `, [...state.params, limit, offset]);
             return { payouts: res.rows };
         });
     });
-    app.post('/admin/payouts/:id/pay', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
+    app.post('/admin/payouts/:id/pay', {
+        preHandler: [
+            requireRole([
+                ADMIN_ROLE_SUPER_ADMIN,
+                ADMIN_ROLE_COUNTRY_ADMIN,
+                ADMIN_ROLE_DIVISION_ADMIN,
+            ]),
+        ],
+    }, async (request, reply) => {
         const params = request.params;
         return withTransaction(async (client) => {
             const access = await getLiveAccess(client, request);
+            if (!hasAdminModuleAccess(access, ADMIN_MODULE_MANAGER_PAYOUTS)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
             const payoutRes = await client.query(`
           SELECT *
           FROM payouts
@@ -265,6 +483,10 @@ export async function tenantAdminRoutes(app) {
           `, [params.id]);
             const payout = payoutRes.rows[0];
             if (!payout) {
+                reply.code(404);
+                return { error: 'payout_not_found' };
+            }
+            if (!matchesTenantScope(access, payout)) {
                 reply.code(404);
                 return { error: 'payout_not_found' };
             }
@@ -304,10 +526,15 @@ export async function tenantAdminRoutes(app) {
     });
     app.get('/country/analytics', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.country_id) {
-                reply.code(400);
-                return { error: 'country_scope_missing' };
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_OVERVIEW);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const countryId = await resolveAccessibleCountryId(client, request, reply, access);
+            if (!countryId) {
+                return {
+                    error: reply.statusCode === 404 ? 'country_not_found' : 'country_scope_missing',
+                };
             }
             const summary = await client.query(`
           SELECT
@@ -317,7 +544,7 @@ export async function tenantAdminRoutes(app) {
             COALESCE((SELECT ROUND(SUM(gross_amount)::numeric, 2) FROM earnings_ledger WHERE country_id = $1), 0)::numeric AS gross_revenue,
             COALESCE((SELECT ROUND(SUM(platform_fee)::numeric, 2) FROM earnings_ledger WHERE country_id = $1), 0)::numeric AS platform_fee,
             COALESCE((SELECT ROUND(SUM(net_platform_revenue)::numeric, 2) FROM earnings_ledger WHERE country_id = $1), 0)::numeric AS net_platform_revenue
-          `, [access.country_id]);
+          `, [countryId]);
             const divisions = await client.query(`
           SELECT
             d.id,
@@ -333,8 +560,12 @@ export async function tenantAdminRoutes(app) {
           WHERE d.country_id = $1
           GROUP BY d.id, d.name, d.type
           ORDER BY d.created_at DESC
-          `, [access.country_id]);
-            const country = await client.query(`SELECT id, name, code, status FROM countries WHERE id = $1 LIMIT 1`, [access.country_id]);
+          `, [countryId]);
+            const country = await client.query(`SELECT id, name, code, status FROM countries WHERE id = $1 LIMIT 1`, [countryId]);
+            if (!country.rows[0]) {
+                reply.code(404);
+                return { error: 'country_not_found' };
+            }
             return {
                 country: country.rows[0] ?? null,
                 analytics: summary.rows[0] ?? {},
@@ -346,12 +577,17 @@ export async function tenantAdminRoutes(app) {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.country_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_USERS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const countryId = await resolveAccessibleCountryId(client, request, reply, access);
+            if (!countryId) {
                 reply.code(400);
                 return { error: 'country_scope_missing' };
             }
-            const res = await client.query(`
+            return {
+                users: (await client.query(`
           SELECT
             u.id,
             u.full_name,
@@ -367,16 +603,20 @@ export async function tenantAdminRoutes(app) {
           WHERE u.country_id = $1
           ORDER BY u.created_at DESC
           LIMIT $2 OFFSET $3
-          `, [access.country_id, limit, offset]);
-            return { users: res.rows };
+          `, [countryId, limit, offset])).rows,
+            };
         });
     });
     app.get('/country/campaigns', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.country_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_CAMPAIGNS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const countryId = await resolveAccessibleCountryId(client, request, reply, access);
+            if (!countryId) {
                 reply.code(400);
                 return { error: 'country_scope_missing' };
             }
@@ -392,22 +632,26 @@ export async function tenantAdminRoutes(app) {
             c.start_date,
             c.end_date,
             d.name AS division_name,
-            adv.email AS advertiser_email,
+            adv.email AS business_email,
             c.created_at
           FROM campaigns c
-          JOIN users adv ON adv.id = c.advertiser_id
+          JOIN users adv ON adv.id = c.business_id
           LEFT JOIN divisions d ON d.id = c.division_id
           WHERE c.country_id = $1
           ORDER BY c.created_at DESC
           LIMIT $2 OFFSET $3
-          `, [access.country_id, limit, offset]);
+          `, [countryId, limit, offset]);
             return { campaigns: res.rows };
         });
     });
     app.get('/country/divisions', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.country_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_DIVISIONS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const countryId = await resolveAccessibleCountryId(client, request, reply, access);
+            if (!countryId) {
                 reply.code(400);
                 return { error: 'country_scope_missing' };
             }
@@ -424,15 +668,19 @@ export async function tenantAdminRoutes(app) {
           WHERE d.country_id = $1
           GROUP BY d.id
           ORDER BY d.created_at DESC
-          `, [access.country_id]);
+          `, [countryId]);
             return { divisions: res.rows };
         });
     });
     app.post('/country/divisions', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
         const body = CreateDivisionSchema.parse(request.body);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.country_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_DIVISIONS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const countryId = await resolveAccessibleCountryId(client, request, reply, access);
+            if (!countryId) {
                 reply.code(400);
                 return { error: 'country_scope_missing' };
             }
@@ -441,7 +689,7 @@ export async function tenantAdminRoutes(app) {
           VALUES ($1,$2,$3,$4)
           RETURNING *
           `, [
-                access.country_id,
+                countryId,
                 body.name.trim(),
                 body.type,
                 access.user_id || null,
@@ -449,28 +697,39 @@ export async function tenantAdminRoutes(app) {
             return { division: inserted.rows[0] };
         });
     });
-    app.post('/country/divisions/:id/assign-admin', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
+    app.post('/country/divisions/:id/assign-admin', { preHandler: [requireRole([ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
         const params = request.params;
         const body = AssignDivisionAdminSchema.parse(request.body);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.country_id) {
-                reply.code(400);
-                return { error: 'country_scope_missing' };
-            }
             const division = await client.query(`
-          SELECT id
+          SELECT id, country_id
           FROM divisions
           WHERE id = $1
-            AND country_id = $2
           LIMIT 1
-          `, [params.id, access.country_id]);
+          `, [params.id]);
             if (!division.rows[0]) {
                 reply.code(404);
                 return { error: 'division_not_found' };
             }
             try {
-                const result = await assignDivisionAdmin(client, params.id, body, body.role);
+                const result = await assignDivisionAdmin(client, params.id, body, body.role, {
+                    createdBySuperAdminId: String(request.user?.sub ?? ''),
+                });
+                if (result.access) {
+                    await recordAdminAudit(client, {
+                        actorId: String(request.user?.sub ?? ''),
+                        action: 'ASSIGN_DIVISION_ADMIN',
+                        targetType: 'admin_user',
+                        targetId: String(result.access.user_id),
+                        meta: {
+                            division_id: params.id,
+                            country_id: String(division.rows[0].country_id),
+                            assignment_role: body.role,
+                            permissions: result.access.permissions,
+                        },
+                        ...auditScopeFromAccess(result.access),
+                    });
+                }
                 return result;
             }
             catch (error) {
@@ -490,8 +749,12 @@ export async function tenantAdminRoutes(app) {
     });
     app.get('/division/overview', { preHandler: [requireRole([ADMIN_ROLE_DIVISION_ADMIN])] }, async (request, reply) => {
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.division_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_OVERVIEW);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const divisionId = await resolveAccessibleDivisionId(client, request, reply, access);
+            if (!divisionId) {
                 reply.code(400);
                 return { error: 'division_scope_missing' };
             }
@@ -506,7 +769,7 @@ export async function tenantAdminRoutes(app) {
           JOIN countries c ON c.id = d.country_id
           WHERE d.id = $1
           LIMIT 1
-          `, [access.division_id]);
+          `, [divisionId]);
             const analytics = await client.query(`
           SELECT
             (SELECT COUNT(*)::int FROM users WHERE division_id = $1) AS total_users,
@@ -514,7 +777,7 @@ export async function tenantAdminRoutes(app) {
             (SELECT COUNT(*)::int FROM campaigns WHERE division_id = $1) AS total_campaigns,
             COALESCE((SELECT ROUND(SUM(gross_amount)::numeric, 2) FROM earnings_ledger WHERE division_id = $1), 0)::numeric AS gross_revenue,
             COALESCE((SELECT ROUND(SUM(division_share)::numeric, 2) FROM earnings_ledger WHERE division_id = $1), 0)::numeric AS division_manager_earnings
-          `, [access.division_id]);
+          `, [divisionId]);
             return {
                 division: division.rows[0] ?? null,
                 analytics: analytics.rows[0] ?? {},
@@ -525,8 +788,12 @@ export async function tenantAdminRoutes(app) {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.division_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_USERS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const divisionId = await resolveAccessibleDivisionId(client, request, reply, access);
+            if (!divisionId) {
                 reply.code(400);
                 return { error: 'division_scope_missing' };
             }
@@ -544,7 +811,7 @@ export async function tenantAdminRoutes(app) {
           WHERE division_id = $1
           ORDER BY created_at DESC
           LIMIT $2 OFFSET $3
-          `, [access.division_id, limit, offset]);
+          `, [divisionId, limit, offset]);
             return { users: res.rows };
         });
     });
@@ -552,8 +819,12 @@ export async function tenantAdminRoutes(app) {
         const query = request.query;
         const { limit, offset } = parsePaging(query);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.division_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_CAMPAIGNS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const divisionId = await resolveAccessibleDivisionId(client, request, reply, access);
+            if (!divisionId) {
                 reply.code(400);
                 return { error: 'division_scope_missing' };
             }
@@ -568,14 +839,14 @@ export async function tenantAdminRoutes(app) {
             c.payout_amount,
             c.start_date,
             c.end_date,
-            adv.email AS advertiser_email,
+            adv.email AS business_email,
             c.created_at
           FROM campaigns c
-          JOIN users adv ON adv.id = c.advertiser_id
+          JOIN users adv ON adv.id = c.business_id
           WHERE c.division_id = $1
           ORDER BY c.created_at DESC
           LIMIT $2 OFFSET $3
-          `, [access.division_id, limit, offset]);
+          `, [divisionId, limit, offset]);
             return { campaigns: res.rows };
         });
     });
@@ -583,8 +854,12 @@ export async function tenantAdminRoutes(app) {
         const params = request.params;
         const body = ModerateDivisionCampaignSchema.parse(request.body);
         return withTransaction(async (client) => {
-            const access = await getLiveAccess(client, request);
-            if (!access.division_id) {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_CAMPAIGNS);
+            if (!access) {
+                return { error: 'forbidden' };
+            }
+            const divisionId = await resolveAccessibleDivisionId(client, request, reply, access);
+            if (!divisionId) {
                 reply.code(400);
                 return { error: 'division_scope_missing' };
             }
@@ -594,7 +869,7 @@ export async function tenantAdminRoutes(app) {
           WHERE id = $1
             AND division_id = $3
           RETURNING *
-          `, [params.id, body.status, access.division_id]);
+          `, [params.id, body.status, divisionId]);
             if (!updated.rows[0]) {
                 reply.code(404);
                 return { error: 'campaign_not_found' };

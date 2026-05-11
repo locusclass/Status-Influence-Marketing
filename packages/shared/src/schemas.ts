@@ -1,8 +1,9 @@
 import { z } from 'zod';
 
-export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS', 'TIKTOK', 'X']);
+export const PlatformAdapterSchema = z.enum(['WHATSAPP_STATUS']);
 export const MediaTypeSchema = z.enum(['IMAGE', 'VIDEO', 'TEXT']);
 export const DeliveryModelSchema = z.enum(['DETERMINISTIC', 'PROBABILISTIC']);
+export const PricePrivacyModeSchema = z.enum(['NEGOTIABLE', 'FIXED']);
 
 export const CreateVerificationSessionSchema = z.object({
   user_id: z.string().trim().min(3),
@@ -28,22 +29,30 @@ export const CampaignBundleItemSchema = z
     visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
     counterparty_contact: z.string().trim().min(7).max(20).optional(),
     beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+    beneficiary_user_ids: z.array(z.string().uuid()).optional(),
+    beneficiary_group_id: z.string().uuid().optional(),
     start_date: z.string(),
     end_date: z.string(),
     media_type: MediaTypeSchema,
     media_url: z.string().url().optional(),
+    media_urls: z.array(z.string().url()).max(8).optional(),
     media_text: z.string().trim().min(3).max(4000).optional(),
     execution_meta: z.record(z.any()).optional(),
     impression_target: z.number().int().min(1).optional(),
     platform_fee_percent: z.number().min(0).max(100).optional(),
-    advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
+    business_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
     terms_keep_hours: z.number().int().min(1).max(168).optional(),
     terms_min_views: z.number().int().min(1).optional().nullable(),
     terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional()
   })
   .superRefine((value, ctx) => {
     const hasMediaUrl =
-      typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+      (typeof value.media_url === 'string' &&
+        value.media_url.trim().length > 0) ||
+      (Array.isArray(value.media_urls) &&
+        value.media_urls.some(
+          (entry) => String(entry ?? '').trim().length > 0
+        ));
     const hasMediaText =
       typeof value.media_text === 'string' &&
       value.media_text.trim().length > 0;
@@ -69,15 +78,18 @@ export const CreateCampaignSchema = z
     visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
     counterparty_contact: z.string().trim().min(7).max(20).optional(),
     beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+    beneficiary_user_ids: z.array(z.string().uuid()).optional(),
+    beneficiary_group_id: z.string().uuid().optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
     media_type: MediaTypeSchema.optional(),
     media_url: z.string().url().optional(),
+    media_urls: z.array(z.string().url()).max(8).optional(),
     media_text: z.string().trim().min(3).max(4000).optional(),
     execution_meta: z.record(z.any()).optional(),
     impression_target: z.number().int().min(1).optional(),
     platform_fee_percent: z.number().min(0).max(100).optional(),
-    advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
+    business_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
     terms_keep_hours: z.number().int().min(1).max(168).optional(),
     terms_min_views: z.number().int().min(1).optional().nullable(),
     terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional()
@@ -90,7 +102,12 @@ export const CreateCampaignSchema = z
     const hasTitle =
       typeof value.title === 'string' && value.title.trim().length > 0;
     const hasMediaUrl =
-      typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+      (typeof value.media_url === 'string' &&
+        value.media_url.trim().length > 0) ||
+      (Array.isArray(value.media_urls) &&
+        value.media_urls.some(
+          (entry) => String(entry ?? '').trim().length > 0
+        ));
     const hasMediaText =
       typeof value.media_text === 'string' &&
       value.media_text.trim().length > 0;
@@ -200,3 +217,5 @@ export const TrustScoreEventSchema = z.object({
   event_type: z.enum(['VERIFIED', 'REJECTED', 'MANUAL_REVIEW']),
   delta: z.number().int()
 });
+
+

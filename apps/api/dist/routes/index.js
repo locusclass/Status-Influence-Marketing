@@ -8,3 +8,4 @@ export * from './uploads.js';
 export * from './account.js';
 export * from './admin.js';
 export * from './tenantAdmin.js';
+export * from './chat.js';

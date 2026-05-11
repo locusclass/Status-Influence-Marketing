@@ -1,2 +1,2 @@
 ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS current_advertiser_viewers INTEGER NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS current_business_viewers INTEGER NOT NULL DEFAULT 0;

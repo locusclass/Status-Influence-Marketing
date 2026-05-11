@@ -6,12 +6,11 @@ import {
 } from '@prime/shared';
 import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
-import { JobRepo } from '../repositories/jobRepo.js';
 import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from '../utils.js';
 import { randomInt } from 'crypto';
 import { config } from '../config.js';
 import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
-import { canAccessDistributorFeatures } from '../services/roles.js';
+import { canAccessAmbassadorFeatures } from '../services/roles.js';
 
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
@@ -31,24 +30,6 @@ const platformInstructionPool: Record<string, string[]> = {
     'Open profile card then close it.',
     'Switch to another status briefly and return.',
     'Long-press the media preview for 2 seconds.',
-  ],
-  TIKTOK: [
-    'Open the public video post and keep the creator profile visible.',
-    'Open the metrics area and hold steady for 3 seconds.',
-    'Refresh the page once, then return to the metrics view.',
-    'Open the comments sheet briefly, then close it.',
-    'Show the share sheet for 2 seconds and dismiss it.',
-    'Scroll the caption area down and back up once.',
-    'Keep the post URL and post ID visible before returning to the video.',
-  ],
-  X: [
-    'Open the live post and keep the full tweet in frame.',
-    'Open the analytics or metrics row and hold steady for 3 seconds.',
-    'Refresh the post once, then return to the metrics view.',
-    'Open the repost or quote detail briefly, then close it.',
-    'Scroll through the thread or replies down and back up once.',
-    'Hold the timestamp and account handle visible for 2 seconds.',
-    'Return to the main post and keep impressions visible before the next step.',
   ],
 };
 
@@ -116,6 +97,14 @@ function validateStrictClientMeta(clientMeta: any, script: any): string | null {
     return 'client_meta_recording_window_invalid';
   }
   const duration = Math.round((stoppedAt - startedAt) / 1000);
+
+  // Simplified recording mode: no scripted steps — accept any recording between 10s and 10 min.
+  const hasSteps = Array.isArray(clientMeta?.steps) && (clientMeta.steps as unknown[]).length > 0;
+  if (!hasSteps) {
+    if (duration < 10 || duration > 600) return 'client_meta_recording_duration_invalid';
+    return null;
+  }
+
   if (duration < MIN_RECORDING_SECONDS || duration > MAX_RECORDING_SECONDS) {
     return 'client_meta_recording_duration_invalid';
   }
@@ -158,7 +147,7 @@ function validateStrictClientMeta(clientMeta: any, script: any): string | null {
   return null;
 }
 
-async function getActiveDistributorContract(
+async function getActiveAmbassadorContract(
   client: any,
   campaignId: string,
   userId: string
@@ -167,7 +156,7 @@ async function getActiveDistributorContract(
     `SELECT id, post_deadline_at, contract_deadline_at
      FROM contracts
      WHERE campaign_id=$1
-       AND distributor_id=$2
+       AND ambassador_id=$2
        AND status='ACTIVE'
      LIMIT 1`,
     [campaignId, userId]
@@ -184,14 +173,14 @@ function hasDeadlinePassed(raw: unknown) {
 function isAllowedProofVideoUrl(value: string): boolean {
   if (value.startsWith('/uploads/files/') || value.startsWith('/api/uploads/files/')) {
     const parsed = new URL(value, 'http://local.test');
-    const mime = String(parsed.searchParams.get('mime') ?? '');
-    return mime.startsWith('video/');
+    const mime = String(parsed.searchParams.get('mime') ?? '').trim().toLowerCase();
+    return mime === 'video/mp4';
   }
   try {
     const parsed = new URL(value);
     if (!parsed.pathname.includes('/uploads/files/')) return false;
-    const mime = String(parsed.searchParams.get('mime') ?? '');
-    if (!mime.startsWith('video/')) return false;
+    const mime = String(parsed.searchParams.get('mime') ?? '').trim().toLowerCase();
+    if (mime !== 'video/mp4') return false;
     if (!config.apiBaseUrl) return true;
     const allowed = new URL(config.apiBaseUrl);
     return parsed.host === allowed.host;
@@ -214,12 +203,35 @@ async function ensureVerificationSessionColumns(client: any) {
 }
 
 export async function verificationRoutes(app: FastifyInstance) {
-  await withTransaction(async (client) => {
-    await ensureVerificationSessionColumns(client);
+  let schemaReadyPromise: Promise<void> | null = null;
+  const ensureVerificationRoutesSchema = () => {
+    if (!schemaReadyPromise) {
+      schemaReadyPromise = withTransaction(async (client) => {
+        await ensureVerificationSessionColumns(client);
+      }).catch((error) => {
+        schemaReadyPromise = null;
+        throw error;
+      });
+    }
+    return schemaReadyPromise;
+  };
+
+  app.addHook('onListen', async () => {
+    if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+      return;
+    }
+    try {
+      await ensureVerificationRoutesSchema();
+    } catch (error) {
+      app.log.error({ err: error }, 'startup warmup failed for verification schema');
+    }
+  });
+
+  app.addHook('preHandler', async () => {
+    await ensureVerificationRoutesSchema();
   });
 
   const verificationRepo = new VerificationRepo();
-  const jobRepo = new JobRepo();
 
   app.post('/verification/sessions', { preHandler: [app.authenticate] }, async (request, reply) => {
     const body = CreateVerificationSessionSchema.parse(request.body);
@@ -229,7 +241,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       reply.code(401);
       return { error: 'unauthorized' } as any;
     }
-    if (!canAccessDistributorFeatures(role)) {
+    if (!canAccessAmbassadorFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' } as any;
     }
@@ -263,7 +275,7 @@ export async function verificationRoutes(app: FastifyInstance) {
         return script;
       }
 
-      const contract = await getActiveDistributorContract(
+      const contract = await getActiveAmbassadorContract(
         client,
         body.campaign_id,
         authUser
@@ -355,7 +367,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       );
       if (existingForSession.rows[0]) return { error: 'proof_already_submitted' } as any;
 
-      const contract = await getActiveDistributorContract(
+      const contract = await getActiveAmbassadorContract(
         client,
         session.campaign_id,
         authUser
@@ -400,8 +412,6 @@ export async function verificationRoutes(app: FastifyInstance) {
         meta: body.client_meta ?? null
       });
       await verificationRepo.insertDeviceFingerprint(client, authUser, fingerprintHash);
-
-      await jobRepo.enqueue(client, 'VERIFY_PROOF', { proof_id: created.id });
       return created;
     });
 

@@ -73,15 +73,19 @@ CREATE TABLE IF NOT EXISTS users (
   whatsapp_verified_at TIMESTAMPTZ,
   whatsapp_jid TEXT,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN')),
-  active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR' CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN')),
+  role TEXT NOT NULL CHECK (role IN ('BUSINESS', 'AMBASSADOR', 'DUAL_USER', 'ADMIN')),
+  active_role TEXT NOT NULL DEFAULT 'AMBASSADOR' CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED')),
   country TEXT NOT NULL DEFAULT 'UG',
   preferred_currency TEXT NOT NULL DEFAULT 'UGX',
   can_multi_contract BOOLEAN NOT NULL DEFAULT FALSE,
   max_status_viewers_12h INTEGER NOT NULL DEFAULT 0,
   private_contract_rate_ugx INTEGER NOT NULL DEFAULT 0,
-  current_advertiser_viewers INTEGER NOT NULL DEFAULT 0,
+  current_business_viewers INTEGER NOT NULL DEFAULT 0,
+  privacy_policy_accepted_version TEXT,
+  privacy_policy_accepted_at TIMESTAMPTZ,
+  platform_policy_accepted_version TEXT,
+  platform_policy_accepted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -92,15 +96,15 @@ DO $$ BEGIN
     WHERE table_name = 'users' AND column_name = 'active_role'
   ) THEN
     ALTER TABLE users
-      ADD COLUMN active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
-      CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+      ADD COLUMN active_role TEXT NOT NULL DEFAULT 'AMBASSADOR'
+      CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN'));
   END IF;
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
   ALTER TABLE users
-    ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN'));
+    ADD CONSTRAINT users_role_check CHECK (role IN ('BUSINESS', 'AMBASSADOR', 'DUAL_USER', 'ADMIN'));
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_role_check;
   ALTER TABLE users
-    ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'));
+    ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN'));
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
   ALTER TABLE users
     ADD CONSTRAINT users_status_check CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BANNED'));
@@ -155,15 +159,15 @@ DO $$ BEGIN
   UPDATE users
   SET active_role = CASE
       WHEN role = 'ADMIN' THEN 'ADMIN'
-      WHEN role = 'ADVERTISER' THEN 'ADVERTISER'
-      WHEN role = 'DUAL_USER' AND (active_role IS NULL OR btrim(active_role) = '') THEN 'DISTRIBUTOR'
-      ELSE COALESCE(NULLIF(active_role, ''), 'DISTRIBUTOR')
+      WHEN role = 'BUSINESS' THEN 'BUSINESS'
+      WHEN role = 'DUAL_USER' AND (active_role IS NULL OR btrim(active_role) = '') THEN 'AMBASSADOR'
+      ELSE COALESCE(NULLIF(active_role, ''), 'AMBASSADOR')
     END
   WHERE active_role IS NULL
      OR btrim(active_role) = ''
      OR (role = 'ADMIN' AND active_role <> 'ADMIN')
-     OR (role = 'ADVERTISER' AND active_role NOT IN ('ADVERTISER', 'ADMIN'))
-     OR (role = 'DISTRIBUTOR' AND active_role NOT IN ('DISTRIBUTOR', 'ADMIN'));
+     OR (role = 'BUSINESS' AND active_role NOT IN ('BUSINESS', 'ADMIN'))
+     OR (role = 'AMBASSADOR' AND active_role NOT IN ('AMBASSADOR', 'ADMIN'));
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -207,10 +211,42 @@ DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
-    WHERE table_name = 'users' AND column_name = 'current_advertiser_viewers'
+    WHERE table_name = 'users' AND column_name = 'current_business_viewers'
   ) THEN
     ALTER TABLE users
-      ADD COLUMN current_advertiser_viewers INTEGER NOT NULL DEFAULT 0;
+      ADD COLUMN current_business_viewers INTEGER NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'privacy_policy_accepted_version'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN privacy_policy_accepted_version TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'privacy_policy_accepted_at'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN privacy_policy_accepted_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'platform_policy_accepted_version'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN platform_policy_accepted_version TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'platform_policy_accepted_at'
+  ) THEN
+    ALTER TABLE users
+      ADD COLUMN platform_policy_accepted_at TIMESTAMPTZ;
   END IF;
   IF NOT EXISTS (
     SELECT 1
@@ -241,19 +277,19 @@ END $$;
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   public_id TEXT NOT NULL DEFAULT generate_pronounceable_public_id('cmp'),
-  advertiser_id UUID NOT NULL REFERENCES users(id),
+  business_id UUID NOT NULL REFERENCES users(id),
   parent_campaign_id UUID REFERENCES campaigns(id),
-  assigned_distributor_id UUID REFERENCES users(id),
+  assigned_ambassador_id UUID REFERENCES users(id),
   assigned_phone TEXT,
   title TEXT NOT NULL,
-  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X')),
+  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS')),
   execution_mode TEXT NOT NULL DEFAULT 'PRIVATE_CONTRACT' CHECK (execution_mode IN ('PRIVATE_CONTRACT', 'OPEN_BUDGET')),
   visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK (visibility IN ('PUBLIC', 'PRIVATE')),
   payout_amount INTEGER NOT NULL,
   budget_total INTEGER NOT NULL,
   impression_target INTEGER,
   platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
-  advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY',
+  business_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY',
   last_allocated_at TIMESTAMPTZ,
   allocation_round INTEGER NOT NULL DEFAULT 0,
   media_type TEXT NOT NULL CHECK (media_type IN ('TEXT', 'IMAGE', 'VIDEO')),
@@ -291,10 +327,10 @@ DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
-    WHERE table_name = 'campaigns' AND column_name = 'assigned_distributor_id'
+    WHERE table_name = 'campaigns' AND column_name = 'assigned_ambassador_id'
   ) THEN
     ALTER TABLE campaigns
-      ADD COLUMN assigned_distributor_id UUID REFERENCES users(id);
+      ADD COLUMN assigned_ambassador_id UUID REFERENCES users(id);
   END IF;
   IF NOT EXISTS (
     SELECT 1
@@ -341,10 +377,10 @@ DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.columns
-    WHERE table_name = 'campaigns' AND column_name = 'advertiser_wallet_mode'
+    WHERE table_name = 'campaigns' AND column_name = 'business_wallet_mode'
   ) THEN
     ALTER TABLE campaigns
-      ADD COLUMN advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY';
+      ADD COLUMN business_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY';
   END IF;
   IF NOT EXISTS (
     SELECT 1
@@ -425,13 +461,13 @@ END $$;
 DO $$ BEGIN
   ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
   ALTER TABLE campaigns
-    ADD CONSTRAINT campaigns_platform_check CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X'));
+    ADD CONSTRAINT campaigns_platform_check CHECK (platform IN ('WHATSAPP_STATUS'));
 END $$;
 
 CREATE TABLE IF NOT EXISTS contracts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   campaign_id UUID NOT NULL REFERENCES campaigns(id),
-  distributor_id UUID NOT NULL REFERENCES users(id),
+  ambassador_id UUID NOT NULL REFERENCES users(id),
   status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   post_deadline_at TIMESTAMPTZ,
@@ -488,7 +524,7 @@ CREATE TABLE IF NOT EXISTS verification_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id),
   campaign_id UUID NOT NULL REFERENCES campaigns(id),
-  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X')),
+  platform TEXT NOT NULL CHECK (platform IN ('WHATSAPP_STATUS')),
   challenge_code TEXT NOT NULL,
   challenge_phrase TEXT NOT NULL,
   script JSONB,
@@ -542,7 +578,7 @@ END $$;
 DO $$ BEGIN
   ALTER TABLE verification_sessions DROP CONSTRAINT IF EXISTS verification_sessions_platform_check;
   ALTER TABLE verification_sessions
-    ADD CONSTRAINT verification_sessions_platform_check CHECK (platform IN ('WHATSAPP_STATUS', 'TIKTOK', 'X'));
+    ADD CONSTRAINT verification_sessions_platform_check CHECK (platform IN ('WHATSAPP_STATUS'));
 END $$;
 
 CREATE TABLE IF NOT EXISTS trust_scores (
@@ -644,6 +680,9 @@ CREATE TABLE IF NOT EXISTS payout_requests (
   proof_id UUID NOT NULL UNIQUE REFERENCES proofs(id),
   user_id UUID NOT NULL REFERENCES users(id),
   amount INTEGER NOT NULL,
+  platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 15,
+  platform_fee_amount INTEGER NOT NULL DEFAULT 0,
+  net_amount INTEGER,
   status payout_status NOT NULL DEFAULT 'REQUESTED',
   pesapal_reference TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -782,6 +821,146 @@ CREATE TABLE IF NOT EXISTS division_admins (
   UNIQUE (user_id, division_id)
 );
 
+CREATE TABLE IF NOT EXISTS admin_users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('SUPER_ADMIN', 'ADMIN')),
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'DELETED')),
+  created_by_super_admin_id UUID REFERENCES users(id),
+  suspended_at TIMESTAMPTZ,
+  deleted_at TIMESTAMPTZ,
+  last_login_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS admin_user_modules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_user_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  module_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (admin_user_id, module_key)
+);
+
+CREATE TABLE IF NOT EXISTS admin_user_country_scopes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_user_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  country_id UUID NOT NULL REFERENCES countries(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (admin_user_id, country_id)
+);
+
+CREATE TABLE IF NOT EXISTS admin_user_division_scopes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_user_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  division_id UUID NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (admin_user_id, division_id)
+);
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'admin_audit_logs' AND column_name = 'country_id'
+  ) THEN
+    ALTER TABLE admin_audit_logs
+      ADD COLUMN country_id UUID REFERENCES countries(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'admin_audit_logs' AND column_name = 'division_id'
+  ) THEN
+    ALTER TABLE admin_audit_logs
+      ADD COLUMN division_id UUID REFERENCES divisions(id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'escrow_ledger' AND column_name = 'country_id'
+  ) THEN
+    ALTER TABLE escrow_ledger
+      ADD COLUMN country_id UUID REFERENCES countries(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'escrow_ledger' AND column_name = 'division_id'
+  ) THEN
+    ALTER TABLE escrow_ledger
+      ADD COLUMN division_id UUID REFERENCES divisions(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'payout_requests' AND column_name = 'country_id'
+  ) THEN
+    ALTER TABLE payout_requests
+      ADD COLUMN country_id UUID REFERENCES countries(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'payout_requests' AND column_name = 'division_id'
+  ) THEN
+    ALTER TABLE payout_requests
+      ADD COLUMN division_id UUID REFERENCES divisions(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'wallet_withdrawals' AND column_name = 'country_id'
+  ) THEN
+    ALTER TABLE wallet_withdrawals
+      ADD COLUMN country_id UUID REFERENCES countries(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'wallet_withdrawals' AND column_name = 'division_id'
+  ) THEN
+    ALTER TABLE wallet_withdrawals
+      ADD COLUMN division_id UUID REFERENCES divisions(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'proofs' AND column_name = 'country_id'
+  ) THEN
+    ALTER TABLE proofs
+      ADD COLUMN country_id UUID REFERENCES countries(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'proofs' AND column_name = 'division_id'
+  ) THEN
+    ALTER TABLE proofs
+      ADD COLUMN division_id UUID REFERENCES divisions(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'verification_sessions' AND column_name = 'country_id'
+  ) THEN
+    ALTER TABLE verification_sessions
+      ADD COLUMN country_id UUID REFERENCES countries(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'verification_sessions' AND column_name = 'division_id'
+  ) THEN
+    ALTER TABLE verification_sessions
+      ADD COLUMN division_id UUID REFERENCES divisions(id);
+  END IF;
+END $$;
+
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1
@@ -811,7 +990,7 @@ DO $$ BEGIN
   ALTER TABLE users DROP CONSTRAINT IF EXISTS users_admin_role_check;
   ALTER TABLE users
     ADD CONSTRAINT users_admin_role_check
-    CHECK (admin_role IN ('SUPER_ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN', 'USER'));
+    CHECK (admin_role IN ('SUPER_ADMIN', 'ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN', 'USER'));
 END $$;
 
 DO $$ BEGIN
@@ -894,17 +1073,129 @@ WHERE u.admin_role = 'COUNTRY_ADMIN'
   AND u.country_id IS NOT NULL
 ON CONFLICT (user_id, country_id) DO NOTHING;
 
+INSERT INTO admin_users (
+  user_id,
+  role,
+  status,
+  created_by_super_admin_id
+)
+SELECT
+  u.id,
+  CASE
+    WHEN UPPER(COALESCE(u.admin_role, '')) = 'SUPER_ADMIN' THEN 'SUPER_ADMIN'
+    WHEN UPPER(COALESCE(u.admin_role, '')) IN ('ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN') THEN 'ADMIN'
+    WHEN u.role = 'ADMIN' OR u.active_role = 'ADMIN' THEN 'SUPER_ADMIN'
+    ELSE NULL
+  END AS role,
+  CASE
+    WHEN UPPER(COALESCE(u.status, '')) = 'SUSPENDED' THEN 'SUSPENDED'
+    WHEN UPPER(COALESCE(u.status, '')) = 'BANNED' THEN 'DELETED'
+    ELSE 'ACTIVE'
+  END AS status,
+  NULL::uuid
+FROM users u
+WHERE (
+  UPPER(COALESCE(u.admin_role, '')) IN ('SUPER_ADMIN', 'ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN')
+  OR u.role = 'ADMIN'
+  OR u.active_role = 'ADMIN'
+)
+ON CONFLICT (user_id) DO UPDATE
+SET
+  role = EXCLUDED.role,
+  status = EXCLUDED.status,
+  updated_at = NOW();
+
+INSERT INTO admin_user_modules (admin_user_id, module_key)
+SELECT
+  au.id,
+  module_key
+FROM admin_users au
+CROSS JOIN UNNEST(
+  ARRAY[
+    'OPERATIONS',
+    'COUNTRIES',
+    'DIVISIONS',
+    'USERS',
+    'CAMPAIGNS',
+    'DRAFTS',
+    'PROOFS',
+    'SESSIONS',
+    'RISK',
+    'WALLETS',
+    'WITHDRAWALS',
+    'FINANCE',
+    'PAYOUT_REQUESTS',
+    'MANAGER_PAYOUTS',
+    'ESCROWS',
+    'CONTRACTS',
+    'GATEWAY',
+    'JOBS',
+    'AUDIT_LOGS'
+  ]::text[]
+) AS module_key
+ON CONFLICT (admin_user_id, module_key) DO NOTHING;
+
+INSERT INTO admin_user_modules (admin_user_id, module_key)
+SELECT au.id, 'ADMIN_MANAGEMENT'
+FROM admin_users au
+WHERE au.role = 'SUPER_ADMIN'
+ON CONFLICT (admin_user_id, module_key) DO NOTHING;
+
+INSERT INTO admin_user_country_scopes (admin_user_id, country_id)
+SELECT DISTINCT
+  au.id,
+  ca.country_id
+FROM admin_users au
+JOIN country_admins ca ON ca.user_id = au.user_id
+ON CONFLICT (admin_user_id, country_id) DO NOTHING;
+
+INSERT INTO admin_user_country_scopes (admin_user_id, country_id)
+SELECT DISTINCT
+  au.id,
+  u.country_id
+FROM admin_users au
+JOIN users u ON u.id = au.user_id
+LEFT JOIN admin_user_country_scopes scopes
+  ON scopes.admin_user_id = au.id
+ AND scopes.country_id = u.country_id
+WHERE UPPER(COALESCE(u.admin_role, '')) = 'COUNTRY_ADMIN'
+  AND u.country_id IS NOT NULL
+  AND scopes.id IS NULL
+ON CONFLICT (admin_user_id, country_id) DO NOTHING;
+
+INSERT INTO admin_user_division_scopes (admin_user_id, division_id)
+SELECT DISTINCT
+  au.id,
+  da.division_id
+FROM admin_users au
+JOIN division_admins da ON da.user_id = au.user_id
+ON CONFLICT (admin_user_id, division_id) DO NOTHING;
+
+INSERT INTO admin_user_division_scopes (admin_user_id, division_id)
+SELECT DISTINCT
+  au.id,
+  u.division_id
+FROM admin_users au
+JOIN users u ON u.id = au.user_id
+LEFT JOIN admin_user_division_scopes scopes
+  ON scopes.admin_user_id = au.id
+ AND scopes.division_id = u.division_id
+WHERE UPPER(COALESCE(u.admin_role, '')) = 'DIVISION_ADMIN'
+  AND u.division_id IS NOT NULL
+  AND scopes.id IS NULL
+ON CONFLICT (admin_user_id, division_id) DO NOTHING;
+
 UPDATE campaigns c
-SET country_id = COALESCE(c.country_id, advertiser.country_id, fallback.id),
-    division_id = COALESCE(c.division_id, advertiser.division_id)
-FROM users advertiser
+SET country_id = COALESCE(c.country_id, business.country_id, fallback.id),
+    division_id = COALESCE(c.division_id, business.division_id)
+FROM users business
 CROSS JOIN LATERAL (
   SELECT id
   FROM countries
   WHERE code = 'GLOBAL_TEMP'
   LIMIT 1
 ) AS fallback
-WHERE advertiser.id = c.advertiser_id
+WHERE business.id = c.business_id
   AND (c.country_id IS NULL OR c.division_id IS NULL);
 
 CREATE OR REPLACE FUNCTION ensure_country_scope(input_code TEXT)
@@ -989,8 +1280,8 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  advertiser_country_id UUID;
-  advertiser_division_id UUID;
+  business_country_id UUID;
+  business_division_id UUID;
   division_country_id UUID;
 BEGIN
   IF NEW.division_id IS NOT NULL THEN
@@ -1005,19 +1296,19 @@ BEGIN
     END IF;
   END IF;
 
-  IF NEW.advertiser_id IS NOT NULL THEN
+  IF NEW.business_id IS NOT NULL THEN
     SELECT country_id, division_id
-    INTO advertiser_country_id, advertiser_division_id
+    INTO business_country_id, business_division_id
     FROM users
-    WHERE id = NEW.advertiser_id
+    WHERE id = NEW.business_id
     LIMIT 1;
 
     IF NEW.country_id IS NULL THEN
-      NEW.country_id := advertiser_country_id;
+      NEW.country_id := business_country_id;
     END IF;
 
     IF NEW.division_id IS NULL THEN
-      NEW.division_id := advertiser_division_id;
+      NEW.division_id := business_division_id;
     END IF;
   END IF;
 
@@ -1031,7 +1322,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_campaigns_sync_tenant_scope ON campaigns;
 CREATE TRIGGER trg_campaigns_sync_tenant_scope
-BEFORE INSERT OR UPDATE OF advertiser_id, country_id, division_id
+BEFORE INSERT OR UPDATE OF business_id, country_id, division_id
 ON campaigns
 FOR EACH ROW
 EXECUTE FUNCTION sync_campaign_tenant_scope();
@@ -1058,6 +1349,23 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_division_id ON campaigns(division_id);
 CREATE INDEX IF NOT EXISTS idx_divisions_country_id ON divisions(country_id);
 CREATE INDEX IF NOT EXISTS idx_country_admins_country_id ON country_admins(country_id);
 CREATE INDEX IF NOT EXISTS idx_division_admins_division_id ON division_admins(division_id);
+CREATE INDEX IF NOT EXISTS idx_admin_users_role_status ON admin_users(role, status);
+CREATE INDEX IF NOT EXISTS idx_admin_users_created_by ON admin_users(created_by_super_admin_id);
+CREATE INDEX IF NOT EXISTS idx_admin_user_modules_module_key ON admin_user_modules(module_key);
+CREATE INDEX IF NOT EXISTS idx_admin_user_country_scopes_country_id ON admin_user_country_scopes(country_id);
+CREATE INDEX IF NOT EXISTS idx_admin_user_division_scopes_division_id ON admin_user_division_scopes(division_id);
 CREATE INDEX IF NOT EXISTS idx_earnings_ledger_country_id ON earnings_ledger(country_id);
 CREATE INDEX IF NOT EXISTS idx_earnings_ledger_division_id ON earnings_ledger(division_id);
 CREATE INDEX IF NOT EXISTS idx_payouts_role_status ON payouts(role, status);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_country_id ON admin_audit_logs(country_id);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_division_id ON admin_audit_logs(division_id);
+CREATE INDEX IF NOT EXISTS idx_escrow_ledger_country_id ON escrow_ledger(country_id);
+CREATE INDEX IF NOT EXISTS idx_escrow_ledger_division_id ON escrow_ledger(division_id);
+CREATE INDEX IF NOT EXISTS idx_payout_requests_country_id ON payout_requests(country_id);
+CREATE INDEX IF NOT EXISTS idx_payout_requests_division_id ON payout_requests(division_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_withdrawals_country_id ON wallet_withdrawals(country_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_withdrawals_division_id ON wallet_withdrawals(division_id);
+CREATE INDEX IF NOT EXISTS idx_proofs_country_id ON proofs(country_id);
+CREATE INDEX IF NOT EXISTS idx_proofs_division_id ON proofs(division_id);
+CREATE INDEX IF NOT EXISTS idx_verification_sessions_country_id ON verification_sessions(country_id);
+CREATE INDEX IF NOT EXISTS idx_verification_sessions_division_id ON verification_sessions(division_id);

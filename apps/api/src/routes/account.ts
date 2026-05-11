@@ -5,52 +5,88 @@ import { withTransaction } from '../db.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import {
   requestPayout,
-} from '../services/flutterwave.js';
-import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+} from '../services/yoUganda.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { whatsappVerificationService } from '../services/whatsappVerification.js';
 import {
   deleteFromFirebaseStorage,
   extractFirebaseObjectNameFromUrl,
 } from '../services/firebaseStorage.js';
+import {
+  resolveMediaUploadError,
+  storeMultipartMediaFile,
+} from '../services/mediaUploads.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
 import {
-  ACCOUNT_ROLE_ADVERTISER,
-  ACCOUNT_ROLE_DISTRIBUTOR,
+  ACCOUNT_ROLE_BUSINESS,
+  ACCOUNT_ROLE_AMBASSADOR,
   buildAuthClaims,
   buildUserSession,
-  canAccessAdvertiserFeatures,
-  canAccessDistributorFeatures,
+  canAccessBusinessFeatures,
+  canAccessAmbassadorFeatures,
   normalizeAccountRole,
   normalizeActiveRole,
+  normalizeRequestedUserRole,
 } from '../services/roles.js';
 import {
   deleteUserNotification,
   ensureUserSignalSchema,
+  getActiveBlockingNotice,
   listUserNotifications,
   markAllUserNotificationsRead,
   updateUserNotificationReadState,
 } from '../services/userSignals.js';
 import {
+  buildCurrentPolicyDocuments,
+  buildPolicyAcceptanceState,
+  CURRENT_PLATFORM_POLICY_VERSION,
+  CURRENT_PRIVACY_POLICY_VERSION,
+  ensurePolicyAcceptanceColumns,
+  policyAcceptanceSelectSql,
+} from '../services/policies.js';
+import {
   config,
-  hasFlutterwaveClientCredentials,
-  hasFlutterwaveEncryptionKey,
+  hasYoClientCredentials,
+  hasYoEncryptionKey,
 } from '../config.js';
+import { resolveUploadedFileUrl } from '../utils.js';
+import {
+  buildActiveViewerVerificationJoin,
+  buildViewerVerificationFields,
+  ensureViewerVerificationSchema,
+} from '../services/viewerVerification.js';
 
-const accountProfileSchema = z.object({
-  full_name: z.string().trim().min(2).max(120),
-  country: z.string().trim().min(2).max(3).optional(),
-  current_advertiser_viewers: z.number().int().min(0).optional(),
-  private_contract_rate_ugx: z.number().int().min(0).optional(),
-  promoter_platforms: z
-    .array(
-      z.object({
-        platform: z.enum(['TIKTOK', 'X']),
-        profile_url: z.string().trim().url().max(1024),
-      })
-    )
-    .max(2)
-    .optional(),
-});
+const roleInputSchema = z
+  .string()
+  .trim()
+  .transform((value, ctx) => {
+    const normalized = normalizeRequestedUserRole(value);
+    if (normalized != null) {
+      return normalized;
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Invalid role.',
+    });
+    return z.NEVER;
+  });
+
+const accountProfileSchema = z
+  .object({
+    full_name: z.string().trim().min(2).max(120),
+    country: z.string().trim().min(2).max(3).optional(),
+    current_advertiser_viewers: z.number().int().min(0).optional(),
+    current_business_viewers: z.number().int().min(0).optional(),
+    private_contract_rate_ugx: z.number().int().min(0).optional(),
+    private_contract_rate_24h_ugx: z.number().int().min(0).optional(),
+    price_privacy_mode: z.enum(['NEGOTIABLE', 'FIXED']).optional(),
+    beneficiary_listing_mode: z.enum(['LISTED', 'DIRECT_ONLY']).optional(),
+  })
+  .transform((body) => ({
+    ...body,
+    current_business_viewers:
+      body.current_business_viewers ?? body.current_business_viewers,
+  }));
 
 const accountPasswordSchema = z.object({
   current_password: z.string().min(8),
@@ -62,16 +98,25 @@ const accountAvatarSchema = z.object({
 });
 
 const accountRoleSchema = z.object({
-  role: z.enum(['ADVERTISER', 'DISTRIBUTOR']),
+  role: roleInputSchema,
   max_status_viewers_12h: z.number().int().nonnegative().optional(),
 });
 
-const distributorCapacitySchema = z.object({
+const ambassadorCapacitySchema = z.object({
   max_status_viewers_12h: z.number().int().positive(),
+  rate_12h_ugx: z.number().int().min(0).optional(),
+  rate_24h_ugx: z.number().int().min(0).optional(),
 });
 
 const accountWhatsappVerifySchema = z.object({
   phone: z.string().trim().min(7).max(20).optional(),
+});
+
+const accountPolicyAcceptanceSchema = z.object({
+  privacy_policy_version: z.string().trim().min(1),
+  platform_policy_version: z.string().trim().min(1),
+  accept_privacy_policy: z.boolean().optional(),
+  accept_platform_policy: z.boolean().optional(),
 });
 
 const accountNotificationUpdateSchema = z.object({
@@ -91,7 +136,7 @@ const walletDepositSchema = z.object({
   network: z.enum(['MTN', 'AIRTEL']).optional(),
 });
 
-const MIN_WALLET_WITHDRAW_UGX = 10_000;
+const MIN_WALLET_WITHDRAW_UGX = 1;
 
 type WalletPayoutPayload = {
   amount: number;
@@ -219,49 +264,6 @@ function normalizeStringList(values: unknown[]) {
   );
 }
 
-function normalizePromoterPlatformProfiles(
-  value: unknown
-): Array<{ platform: 'TIKTOK' | 'X'; profile_url: string }> {
-  if (!Array.isArray(value)) return [];
-  const normalized = new Map<'TIKTOK' | 'X', { platform: 'TIKTOK' | 'X'; profile_url: string }>();
-  for (const entry of value) {
-    const platform =
-      String((entry as any)?.platform ?? '')
-        .trim()
-        .toUpperCase() === 'X'
-        ? 'X'
-        : String((entry as any)?.platform ?? '')
-              .trim()
-              .toUpperCase() === 'TIKTOK'
-          ? 'TIKTOK'
-          : null;
-    const profileUrl = String((entry as any)?.profile_url ?? '').trim();
-    if (!platform || !profileUrl) continue;
-    normalized.set(platform, { platform, profile_url: profileUrl });
-  }
-  return [...normalized.values()];
-}
-
-function extractCreatorHandle(profileUrl: string) {
-  try {
-    const url = new URL(profileUrl);
-    const segments = url.pathname
-      .split('/')
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0);
-    for (const segment of segments) {
-      if (segment.startsWith('@') && segment.length > 1) {
-        return segment.slice(1);
-      }
-    }
-    const reserved = new Set(['home', 'explore', 'search', 'status', 'video', 'embed', 'i']);
-    const candidate = segments.find((segment) => !reserved.has(segment.toLowerCase()));
-    return candidate?.replace(/^@+/, '') || null;
-  } catch {
-    return null;
-  }
-}
-
 async function deleteAccountMedia(urls: string[]) {
   const objectNames = Array.from(
     new Set(
@@ -294,146 +296,6 @@ async function ensureUserProfilesTable(client: any) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-}
-
-async function ensureCreatorMarketingTables(client: any) {
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS creators (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      creator_score NUMERIC(6,2) NOT NULL DEFAULT 50,
-      historical_performance NUMERIC(6,2) NOT NULL DEFAULT 50,
-      delivery_reliability NUMERIC(6,2) NOT NULL DEFAULT 50,
-      engagement_consistency NUMERIC(6,2) NOT NULL DEFAULT 50,
-      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-      last_active_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS creator_accounts (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      creator_id UUID NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
-      platform TEXT NOT NULL,
-      handle TEXT,
-      profile_url TEXT,
-      average_views INTEGER NOT NULL DEFAULT 0,
-      average_engagement_rate NUMERIC(8,4) NOT NULL DEFAULT 0,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await client.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS creator_accounts_creator_platform_unique
-    ON creator_accounts (creator_id, platform)
-  `);
-}
-
-async function ensureCreatorForUser(client: any, userId: string) {
-  const existing = await client.query(
-    `
-    SELECT id
-    FROM creators
-    WHERE user_id=$1
-    LIMIT 1
-    `,
-    [userId]
-  );
-  if (existing.rows[0]?.id) {
-    return String(existing.rows[0].id);
-  }
-
-  const inserted = await client.query(
-    `
-    INSERT INTO creators (
-      user_id,
-      creator_score,
-      historical_performance,
-      delivery_reliability,
-      engagement_consistency,
-      last_active_at
-    )
-    VALUES ($1, 50, 50, 50, 50, NOW())
-    ON CONFLICT (user_id)
-    DO UPDATE SET
-      updated_at = NOW(),
-      last_active_at = NOW()
-    RETURNING id
-    `,
-    [userId]
-  );
-  return String(inserted.rows[0].id);
-}
-
-async function replacePromoterPlatformProfiles(
-  client: any,
-  userId: string,
-  profiles: Array<{ platform: 'TIKTOK' | 'X'; profile_url: string }>
-) {
-  await ensureCreatorMarketingTables(client);
-  const creatorId = await ensureCreatorForUser(client, userId);
-  const requestedPlatforms = profiles.map((entry) => entry.platform);
-
-  if (requestedPlatforms.length > 0) {
-    await client.query(
-      `
-      DELETE FROM creator_accounts
-      WHERE creator_id=$1
-        AND platform IN ('TIKTOK', 'X')
-        AND NOT (platform = ANY($2::text[]))
-      `,
-      [creatorId, requestedPlatforms]
-    );
-  } else {
-    await client.query(
-      `
-      DELETE FROM creator_accounts
-      WHERE creator_id=$1
-        AND platform IN ('TIKTOK', 'X')
-      `,
-      [creatorId]
-    );
-  }
-
-  for (const profile of profiles) {
-    const handle = extractCreatorHandle(profile.profile_url);
-    await client.query(
-      `
-      INSERT INTO creator_accounts (
-        creator_id,
-        platform,
-        handle,
-        profile_url,
-        active,
-        metadata,
-        updated_at
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        TRUE,
-        jsonb_build_object(
-          'qualified_via', 'profile_link',
-          'profile_link_submitted_at', NOW()
-        ),
-        NOW()
-      )
-      ON CONFLICT (creator_id, platform)
-      DO UPDATE SET
-        handle = EXCLUDED.handle,
-        profile_url = EXCLUDED.profile_url,
-        active = TRUE,
-        metadata = COALESCE(creator_accounts.metadata, '{}'::jsonb) || EXCLUDED.metadata,
-        updated_at = NOW()
-      `,
-      [creatorId, profile.platform, handle, profile.profile_url]
-    );
-  }
 }
 
 async function usersHasColumn(client: any, columnName: string) {
@@ -539,7 +401,7 @@ async function ensureAccountSchema(client: any) {
   await ensureUserSignalSchema(client);
   await ensureWhatsappColumns(client);
   await ensureUserProfilesTable(client);
-  await ensureCreatorMarketingTables(client);
+  await ensureViewerVerificationSchema(client);
   await client.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
@@ -558,7 +420,7 @@ async function ensureAccountSchema(client: any) {
   `);
   await client.query(`
     ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS active_role TEXT NOT NULL DEFAULT 'DISTRIBUTOR'
+      ADD COLUMN IF NOT EXISTS active_role TEXT NOT NULL DEFAULT 'AMBASSADOR'
   `);
   await client.query(`
     ALTER TABLE users
@@ -570,35 +432,61 @@ async function ensureAccountSchema(client: any) {
   `);
   await client.query(`
     ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS current_advertiser_viewers INTEGER NOT NULL DEFAULT 0
+      ADD COLUMN IF NOT EXISTS private_contract_rate_24h_ugx INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS current_business_viewers INTEGER NOT NULL DEFAULT 0
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS price_privacy_mode TEXT NOT NULL DEFAULT 'NEGOTIABLE'
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS beneficiary_listing_mode TEXT NOT NULL DEFAULT 'LISTED'
   `);
   await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check
   `);
   await client.query(`
     ALTER TABLE users
-      ADD CONSTRAINT users_role_check CHECK (role IN ('ADVERTISER', 'DISTRIBUTOR', 'DUAL_USER', 'ADMIN'))
+      ADD CONSTRAINT users_role_check CHECK (role IN ('BUSINESS', 'AMBASSADOR', 'DUAL_USER', 'ADMIN'))
   `);
   await client.query(`
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_role_check
   `);
   await client.query(`
     ALTER TABLE users
-      ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('ADVERTISER', 'DISTRIBUTOR', 'ADMIN'))
+      ADD CONSTRAINT users_active_role_check CHECK (active_role IN ('BUSINESS', 'AMBASSADOR', 'ADMIN'))
+  `);
+  await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_price_privacy_mode_check
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_price_privacy_mode_check CHECK (price_privacy_mode IN ('NEGOTIABLE', 'FIXED'))
+  `);
+  await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_beneficiary_listing_mode_check
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_beneficiary_listing_mode_check CHECK (beneficiary_listing_mode IN ('LISTED', 'DIRECT_ONLY'))
   `);
   await client.query(`
     UPDATE users
     SET active_role = CASE
       WHEN role='ADMIN' THEN 'ADMIN'
-      WHEN role='ADVERTISER' THEN 'ADVERTISER'
-      WHEN role='DUAL_USER' AND (active_role IS NULL OR btrim(active_role)='') THEN 'DISTRIBUTOR'
-      ELSE COALESCE(NULLIF(active_role, ''), 'DISTRIBUTOR')
+      WHEN role='BUSINESS' THEN 'BUSINESS'
+      WHEN role='DUAL_USER' AND (active_role IS NULL OR btrim(active_role)='') THEN 'AMBASSADOR'
+      ELSE COALESCE(NULLIF(active_role, ''), 'AMBASSADOR')
     END
     WHERE active_role IS NULL
        OR btrim(active_role)=''
        OR (role='ADMIN' AND active_role<>'ADMIN')
-       OR (role='ADVERTISER' AND active_role NOT IN ('ADVERTISER', 'ADMIN'))
-       OR (role='DISTRIBUTOR' AND active_role NOT IN ('DISTRIBUTOR', 'ADMIN'))
+       OR (role='BUSINESS' AND active_role NOT IN ('BUSINESS', 'ADMIN'))
+       OR (role='AMBASSADOR' AND active_role NOT IN ('AMBASSADOR', 'ADMIN'))
   `);
   await ensureWalletTables(client);
 }
@@ -676,8 +564,33 @@ async function refundWalletWithdrawal(
 }
 
 export async function accountRoutes(app: FastifyInstance) {
-  await withTransaction(async (client) => {
-    await ensureAccountSchema(client);
+  let schemaReadyPromise: Promise<void> | null = null;
+  const ensureAccountRoutesSchema = () => {
+    if (!schemaReadyPromise) {
+      schemaReadyPromise = withTransaction(async (client) => {
+        await ensureAccountSchema(client);
+        await ensurePolicyAcceptanceColumns(client);
+      }).catch((error) => {
+        schemaReadyPromise = null;
+        throw error;
+      });
+    }
+    return schemaReadyPromise;
+  };
+
+  app.addHook('onListen', async () => {
+    if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+      return;
+    }
+    try {
+      await ensureAccountRoutesSchema();
+    } catch (error) {
+      app.log.error({ err: error }, 'startup warmup failed for account schema');
+    }
+  });
+
+  app.addHook('preHandler', async () => {
+    await ensureAccountRoutesSchema();
   });
 
   const parsePaging = (query: any) => {
@@ -721,7 +634,12 @@ export async function accountRoutes(app: FastifyInstance) {
           u.preferred_currency AS currency,
           COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
           COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
-          COALESCE(u.current_advertiser_viewers, 0)::int AS current_advertiser_viewers,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+          COALESCE(u.current_business_viewers, 0)::int AS current_business_viewers,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${buildViewerVerificationFields()},
+          ${policyAcceptanceSelectSql('u')},
           u.last_login_at,
           u.last_seen_at,
           CASE
@@ -737,6 +655,7 @@ export async function accountRoutes(app: FastifyInstance) {
         LEFT JOIN user_profiles p ON p.user_id = u.id
         LEFT JOIN countries country_meta ON country_meta.id = u.country_id
         LEFT JOIN divisions division_meta ON division_meta.id = u.division_id
+        ${buildActiveViewerVerificationJoin('u')}
         LEFT JOIN LATERAL (
           SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS engagements_24h
           FROM proofs pr
@@ -751,22 +670,7 @@ export async function accountRoutes(app: FastifyInstance) {
         `,
         [userId]
       );
-      const platformProfilesRes = await client.query(
-        `
-        SELECT
-          ca.platform,
-          ca.profile_url,
-          ca.handle,
-          ca.active
-        FROM creators c
-        JOIN creator_accounts ca ON ca.creator_id = c.id
-        WHERE c.user_id = $1
-          AND ca.platform IN ('TIKTOK', 'X')
-        ORDER BY ca.platform ASC
-        `,
-        [userId]
-      );
-      const promoterPlatforms = [
+      const ambassadorPlatforms = [
         {
           platform: 'WHATSAPP_STATUS',
           active: true,
@@ -774,26 +678,121 @@ export async function accountRoutes(app: FastifyInstance) {
           profile_url: null,
           handle: null,
         },
-        ...platformProfilesRes.rows.map((row: any) => ({
-          platform: String(row.platform ?? '').trim().toUpperCase(),
-          active: Boolean(row.active),
-          qualified:
-            Boolean(row.active) &&
-            String(row.profile_url ?? row.handle ?? '').trim().length > 0,
-          profile_url: row.profile_url ? String(row.profile_url) : null,
-          handle: row.handle ? String(row.handle) : null,
-        })),
       ];
+      const profile = res.rows[0] ?? null;
+      const activeAdminNotice = profile
+        ? await getActiveBlockingNotice(client, userId)
+        : null;
       return {
-        profile: res.rows[0]
+        profile: profile
           ? {
-              ...res.rows[0],
-              promoter_platforms: promoterPlatforms,
+              ...profile,
+              ...buildPolicyAcceptanceState(profile),
+              active_admin_notice: activeAdminNotice,
+              ambassador_platforms: ambassadorPlatforms,
             }
           : null,
       };
     });
   });
+
+  app.get('/account/policies', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const userSub = (request.user as any).sub as string;
+    const userId =
+      userSub === 'ariaka-access'
+        ? '00000000-0000-0000-0000-000000000000'
+        : userSub;
+
+    return withTransaction(async (client) => {
+      await ensurePolicyAcceptanceColumns(client);
+      const res = await client.query(
+        `
+        SELECT
+          id,
+          ${policyAcceptanceSelectSql('u')}
+        FROM users u
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [userId]
+      );
+      const user = res.rows[0];
+      if (!user) {
+        reply.code(404);
+        return { error: 'user_not_found' };
+      }
+
+      return {
+        policies: buildCurrentPolicyDocuments(),
+        acceptance: buildPolicyAcceptanceState(user),
+      };
+    });
+  });
+
+  app.post(
+    '/account/policies/accept',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userSub = (request.user as any).sub as string;
+      const userId =
+        userSub === 'ariaka-access'
+          ? '00000000-0000-0000-0000-000000000000'
+          : userSub;
+      const parsed = accountPolicyAcceptanceSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: 'validation_failed', issues: parsed.error.issues };
+      }
+
+      if (
+        parsed.data.privacy_policy_version !== CURRENT_PRIVACY_POLICY_VERSION ||
+        parsed.data.platform_policy_version !== CURRENT_PLATFORM_POLICY_VERSION
+      ) {
+        reply.code(409);
+        return {
+          error: 'policy_version_mismatch',
+          policies: buildCurrentPolicyDocuments(),
+        };
+      }
+
+      return withTransaction(async (client) => {
+        await ensurePolicyAcceptanceColumns(client);
+        const updated = await client.query(
+          `
+          UPDATE users
+          SET privacy_policy_accepted_version = $2,
+              privacy_policy_accepted_at = NOW(),
+              platform_policy_accepted_version = $3,
+              platform_policy_accepted_at = NOW()
+          WHERE id = $1
+          RETURNING *
+          `,
+          [
+            userId,
+            CURRENT_PRIVACY_POLICY_VERSION,
+            CURRENT_PLATFORM_POLICY_VERSION,
+          ]
+        );
+        const user = updated.rows[0];
+        if (!user) {
+          reply.code(404);
+          return { error: 'user_not_found' };
+        }
+
+        const acceptance = buildPolicyAcceptanceState(user);
+        const token = app.jwt.sign(buildAuthClaims(user));
+        return {
+          ok: true,
+          token,
+          user: {
+            ...buildUserSession(user),
+            ...acceptance,
+          },
+          acceptance,
+        };
+      });
+    }
+  );
 
   app.patch(
     '/account/me',
@@ -807,10 +806,6 @@ export async function accountRoutes(app: FastifyInstance) {
         return { error: 'validation_failed', issues: parsed.error.issues };
       }
       const body = parsed.data;
-      const shouldSyncPromoterPlatforms = Array.isArray(body.promoter_platforms);
-      const promoterPlatforms = normalizePromoterPlatformProfiles(
-        body.promoter_platforms
-      );
       return withTransaction(async (client) => {
         await client.query(
           `
@@ -831,7 +826,7 @@ export async function accountRoutes(app: FastifyInstance) {
           ]);
         }
 
-        if (typeof body.current_advertiser_viewers === 'number') {
+        if (typeof body.current_business_viewers === 'number') {
           const roleRes = await client.query(
             `
             SELECT role, active_role
@@ -846,13 +841,13 @@ export async function accountRoutes(app: FastifyInstance) {
             user?.active_role,
             user?.role
           );
-          if (!canAccessAdvertiserFeatures(user?.role) || activeRole !== ACCOUNT_ROLE_ADVERTISER) {
+          if (!canAccessBusinessFeatures(user?.role) || activeRole !== ACCOUNT_ROLE_BUSINESS) {
             reply.code(403);
-            return { error: 'advertiser_profile_required' };
+            return { error: 'business_profile_required' };
           }
           await client.query(
-            'UPDATE users SET current_advertiser_viewers=$2 WHERE id=$1',
-            [userId, Math.max(0, body.current_advertiser_viewers)]
+            'UPDATE users SET current_business_viewers=$2 WHERE id=$1',
+            [userId, Math.max(0, body.current_business_viewers)]
           );
         }
 
@@ -867,9 +862,9 @@ export async function accountRoutes(app: FastifyInstance) {
             [userId]
           );
           const user = roleRes.rows[0];
-          if (!canAccessDistributorFeatures(user?.role)) {
+          if (!canAccessAmbassadorFeatures(user?.role)) {
             reply.code(403);
-            return { error: 'distributor_profile_required' };
+            return { error: 'ambassador_profile_required' };
           }
           await client.query(
             'UPDATE users SET private_contract_rate_ugx=$2 WHERE id=$1',
@@ -877,11 +872,37 @@ export async function accountRoutes(app: FastifyInstance) {
           );
         }
 
-        if (shouldSyncPromoterPlatforms) {
-          await replacePromoterPlatformProfiles(
-            client,
-            userId,
-            promoterPlatforms
+        if (typeof body.private_contract_rate_24h_ugx === 'number') {
+          const roleRes = await client.query(
+            `
+            SELECT role
+            FROM users
+            WHERE id=$1
+            LIMIT 1
+            `,
+            [userId]
+          );
+          const user = roleRes.rows[0];
+          if (!canAccessAmbassadorFeatures(user?.role)) {
+            reply.code(403);
+            return { error: 'ambassador_profile_required' };
+          }
+          await client.query(
+            'UPDATE users SET private_contract_rate_24h_ugx=$2 WHERE id=$1',
+            [userId, Math.max(0, body.private_contract_rate_24h_ugx)]
+          );
+        }
+
+        if (typeof body.price_privacy_mode === 'string') {
+          await client.query(
+            'UPDATE users SET price_privacy_mode=$2 WHERE id=$1',
+            [userId, body.price_privacy_mode]
+          );
+        }
+        if (typeof body.beneficiary_listing_mode === 'string') {
+          await client.query(
+            'UPDATE users SET beneficiary_listing_mode=$2 WHERE id=$1',
+            [userId, body.beneficiary_listing_mode]
           );
         }
 
@@ -896,12 +917,36 @@ export async function accountRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const userSub = (request.user as any).sub as string;
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
-      const parsed = accountAvatarSchema.safeParse(request.body);
-      if (!parsed.success) {
-        reply.code(400);
-        return { error: 'validation_failed', issues: parsed.error.issues };
+      const isMultipart = String(request.headers['content-type'] ?? '')
+        .toLowerCase()
+        .includes('multipart/form-data');
+      let avatarUrl = '';
+      if (isMultipart) {
+        try {
+          const part = await request.file();
+          const uploaded = await storeMultipartMediaFile({
+            part,
+            prefix: 'avatar',
+            kind: 'image',
+            maxBytes: 10 * 1024 * 1024,
+          });
+          avatarUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
+        } catch (error) {
+          const handled = resolveMediaUploadError(error);
+          if (handled) {
+            reply.code(handled.statusCode);
+            return handled.payload;
+          }
+          throw error;
+        }
+      } else {
+        const parsed = accountAvatarSchema.safeParse(request.body);
+        if (!parsed.success) {
+          reply.code(400);
+          return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        avatarUrl = parsed.data.avatar_url;
       }
-      const body = parsed.data;
       return withTransaction(async (client) => {
         await client.query(
           `
@@ -912,9 +957,9 @@ export async function accountRoutes(app: FastifyInstance) {
             avatar_url = EXCLUDED.avatar_url,
             updated_at = NOW()
           `,
-          [userId, body.avatar_url]
+          [userId, avatarUrl]
         );
-        return { ok: true };
+        return { ok: true, avatar_url: avatarUrl };
       });
     }
   );
@@ -1134,7 +1179,9 @@ export async function accountRoutes(app: FastifyInstance) {
             preferred_currency AS currency,
             ${canMultiSelect},
             COALESCE(max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
-            COALESCE(private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx
+            COALESCE(private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+            COALESCE(private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+            ${policyAcceptanceSelectSql('users')}
           FROM users
           WHERE id=$1
           LIMIT 1
@@ -1158,13 +1205,10 @@ export async function accountRoutes(app: FastifyInstance) {
     }
   );
 
-  app.patch(
-    '/account/distributor-capacity',
-    { preHandler: [app.authenticate] },
-    async (request, reply) => {
+  const handleAmbassadorCapacityUpdate = async (request: any, reply: any) => {
       const userSub = (request.user as any).sub as string;
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
-      const parsed = distributorCapacitySchema.safeParse(request.body);
+      const parsed = ambassadorCapacitySchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400);
         return { error: 'validation_failed', issues: parsed.error.issues };
@@ -1174,11 +1218,18 @@ export async function accountRoutes(app: FastifyInstance) {
         const updated = await client.query(
           `
           UPDATE users
-          SET max_status_viewers_12h=$2
+          SET max_status_viewers_12h=$2,
+              private_contract_rate_ugx    = COALESCE($3, private_contract_rate_ugx),
+              private_contract_rate_24h_ugx = COALESCE($4, private_contract_rate_24h_ugx)
           WHERE id=$1
-          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx
+          RETURNING id, public_id, email, status, status_reason, status_reason_updated_at, role, active_role, phone, country, preferred_currency AS currency, can_multi_contract, max_status_viewers_12h, private_contract_rate_ugx, private_contract_rate_24h_ugx, privacy_policy_accepted_version, privacy_policy_accepted_at, platform_policy_accepted_version, platform_policy_accepted_at
           `,
-          [userId, parsed.data.max_status_viewers_12h]
+          [
+            userId,
+            parsed.data.max_status_viewers_12h,
+            parsed.data.rate_12h_ugx ?? null,
+            parsed.data.rate_24h_ugx ?? null,
+          ]
         );
         const user = updated.rows[0];
         if (!user) {
@@ -1192,6 +1243,123 @@ export async function accountRoutes(app: FastifyInstance) {
           user: buildUserSession(user),
         };
       });
+    };
+
+  app.patch(
+    '/account/ambassador-capacity',
+    { preHandler: [app.authenticate] },
+    handleAmbassadorCapacityUpdate
+  );
+
+  // ── Ambassador account verification recording ─────────────────────────────────
+  // Ambassadors submit a WhatsApp status screen recording for admin to review
+  // and set their verified 12h viewer count (max_status_viewers_12h).
+  app.post(
+    '/account/verification/recording',
+    { preHandler: [app.authenticate] },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const isMultipart = String(request.headers['content-type'] ?? '')
+        .toLowerCase()
+        .includes('multipart/form-data');
+
+      let videoUrl = '';
+      if (isMultipart) {
+        const pending = await withTransaction(async (client) => {
+          const existing = await client.query(
+            `SELECT id FROM ambassador_verification_recordings
+             WHERE user_id=$1 AND status='PENDING' LIMIT 1`,
+            [userId]
+          );
+          return existing.rows[0] ?? null;
+        });
+        if (pending) {
+          reply.code(409);
+          return { error: 'verification_recording_pending' };
+        }
+        try {
+          const part = await request.file();
+          const uploaded = await storeMultipartMediaFile({
+            part,
+            prefix: 'verification',
+            kind: 'video',
+            maxBytes: 0,
+            allowedMimeTypes: ['video/mp4'],
+          });
+          videoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
+        } catch (error) {
+          const handled = resolveMediaUploadError(error);
+          if (handled) {
+            reply.code(handled.statusCode);
+            return handled.payload;
+          }
+          throw error;
+        }
+      } else {
+        const body = z
+          .object({
+            video_url: z
+              .string()
+              .url()
+              .max(2048)
+              .refine((value) => {
+                try {
+                  const parsed = new URL(value);
+                  return (
+                    parsed.pathname.includes('/uploads/files/') &&
+                    String(parsed.searchParams.get('mime') ?? '')
+                      .trim()
+                      .toLowerCase() === 'video/mp4'
+                  );
+                } catch {
+                  return false;
+                }
+              }, 'video_url must point to an uploaded mp4 file'),
+          })
+          .safeParse(request.body);
+        if (!body.success) {
+          reply.code(400);
+          return { error: 'validation_failed', issues: body.error.issues };
+        }
+        videoUrl = body.data.video_url;
+      }
+      return withTransaction(async (client) => {
+        // One pending submission at a time per user
+        const existing = await client.query(
+          `SELECT id FROM ambassador_verification_recordings
+           WHERE user_id=$1 AND status='PENDING' LIMIT 1`,
+          [userId]
+        );
+        if (existing.rows[0]) {
+          reply.code(409);
+          return { error: 'verification_recording_pending' };
+        }
+        const res = await client.query(
+          `INSERT INTO ambassador_verification_recordings (user_id, video_url)
+           VALUES ($1, $2)
+           RETURNING id, status, created_at`,
+          [userId, videoUrl]
+        );
+        return { recording: res.rows[0], video_url: videoUrl };
+      });
+    }
+  );
+
+  app.get(
+    '/account/verification/recording',
+    { preHandler: [app.authenticate] },
+    async (request) => {
+      const userId = (request.user as any).sub as string;
+      return withTransaction(async (client) => {
+        const res = await client.query(
+          `SELECT id, status, approved_viewer_count, admin_note, reviewed_at, created_at
+           FROM ambassador_verification_recordings
+           WHERE user_id=$1
+           ORDER BY created_at DESC LIMIT 5`,
+          [userId]
+        );
+        return { recordings: res.rows };
+      });
     }
   );
 
@@ -1200,12 +1368,13 @@ export async function accountRoutes(app: FastifyInstance) {
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     const deletion = await withTransaction(async (client) => {
       await ensureUserProfilesTable(client);
+  await ensureViewerVerificationSchema(client);
 
       const rootCampaignRes = await client.query(
         `
         SELECT id
         FROM campaigns
-        WHERE advertiser_id=$1
+        WHERE business_id=$1
         `,
         [userId]
       );
@@ -1240,7 +1409,7 @@ export async function accountRoutes(app: FastifyInstance) {
         `
         SELECT id, parent_campaign_id
         FROM campaigns
-        WHERE assigned_distributor_id=$1
+        WHERE assigned_ambassador_id=$1
         `,
         [userId]
       );
@@ -1365,7 +1534,7 @@ export async function accountRoutes(app: FastifyInstance) {
       await client.query(
         `
         DELETE FROM contracts
-        WHERE distributor_id=$1 OR campaign_id = ANY($2::uuid[])
+        WHERE ambassador_id=$1 OR campaign_id = ANY($2::uuid[])
         `,
         [userId, campaignIds]
       );
@@ -1379,9 +1548,9 @@ export async function accountRoutes(app: FastifyInstance) {
       await client.query(
         `
         UPDATE campaigns
-        SET assigned_distributor_id = NULL,
+        SET assigned_ambassador_id = NULL,
             assigned_phone = NULL
-        WHERE assigned_distributor_id=$1
+        WHERE assigned_ambassador_id=$1
         `,
         [userId]
       );
@@ -1437,20 +1606,107 @@ export async function accountRoutes(app: FastifyInstance) {
         `,
         [wallet?.id]
       );
+      const contractFundingRes =
+        activeRole === ACCOUNT_ROLE_BUSINESS && wallet?.id
+          ? await client.query(
+              `
+              WITH funding_events AS (
+                SELECT
+                  wt.id,
+                  wt.amount,
+                  wt.created_at,
+                  wt.reference,
+                  CASE
+                    WHEN wt.reference LIKE 'ESCROW_FUND:BUNDLE:%' THEN 'BUNDLE'
+                    ELSE 'CAMPAIGN'
+                  END AS funding_type,
+                  CASE
+                    WHEN wt.reference LIKE 'ESCROW_FUND:BUNDLE:%'
+                      THEN NULLIF(SPLIT_PART(wt.reference, ':', 3), '')
+                    ELSE NULLIF(SPLIT_PART(wt.reference, ':', 2), '')
+                  END AS funding_key
+                FROM wallet_txns wt
+                WHERE wt.wallet_id = $1
+                  AND wt.direction = 'DEBIT'
+                  AND wt.reference LIKE 'ESCROW_FUND:%'
+                ORDER BY wt.created_at DESC
+                LIMIT 20
+              )
+              SELECT
+                event.id,
+                event.amount,
+                event.created_at,
+                event.reference,
+                event.funding_type,
+                CASE
+                  WHEN event.funding_type = 'BUNDLE'
+                    THEN COALESCE(bundle_meta.title, 'Campaign bundle')
+                  ELSE COALESCE(campaign_meta.title, 'Campaign')
+                END AS campaign_title,
+                CASE
+                  WHEN event.funding_type = 'BUNDLE'
+                    THEN bundle_meta.public_id
+                  ELSE campaign_meta.public_id
+                END AS campaign_public_id,
+                COALESCE(bundle_meta.campaign_count, 1)::int AS campaign_count
+              FROM funding_events event
+              LEFT JOIN LATERAL (
+                SELECT c.id, c.title, c.public_id
+                FROM campaigns c
+                WHERE event.funding_type = 'CAMPAIGN'
+                  AND c.id::text = event.funding_key
+                LIMIT 1
+              ) campaign_meta ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT
+                  COALESCE(
+                    MAX(
+                      CASE
+                        WHEN c.bundle_root_campaign_id IS NULL
+                          OR c.bundle_root_campaign_id = c.id
+                          THEN c.title
+                        ELSE NULL
+                      END
+                    ),
+                    MAX(c.title),
+                    'Campaign bundle'
+                  ) AS title,
+                  COALESCE(
+                    MAX(
+                      CASE
+                        WHEN c.bundle_root_campaign_id IS NULL
+                          OR c.bundle_root_campaign_id = c.id
+                          THEN c.public_id
+                        ELSE NULL
+                      END
+                    ),
+                    MAX(c.public_id)
+                  ) AS public_id,
+                  COUNT(*)::int AS campaign_count
+                FROM campaigns c
+                WHERE event.funding_type = 'BUNDLE'
+                  AND c.campaign_bundle_id::text = event.funding_key
+              ) bundle_meta ON TRUE
+              ORDER BY event.created_at DESC
+              `,
+              [wallet.id]
+            )
+          : { rows: [] as any[] };
       return {
         wallet: wallet
             ? {
                 ...wallet,
                 minimum_withdrawal_amount: MIN_WALLET_WITHDRAW_UGX,
-                wallet_mode: activeRole === ACCOUNT_ROLE_ADVERTISER ? 'CAMPAIGN_ONLY' : 'STANDARD',
+                wallet_mode: activeRole === ACCOUNT_ROLE_BUSINESS ? 'CAMPAIGN_ONLY' : 'STANDARD',
                 wallet_notice:
-                  activeRole === ACCOUNT_ROLE_ADVERTISER
-                    ? 'Use wallet balance for Flutterwave deposits, campaign funding, and withdrawals.'
-                    : 'Withdraw from UGX 10,000.',
+                  activeRole === ACCOUNT_ROLE_BUSINESS
+                    ? 'Use wallet balance for YO Uganda deposits, campaign funding, and withdrawals.'
+                    : 'Withdraw any available wallet balance from UGX 1 upward.',
               }
             : wallet,
         txns: txnsRes.rows,
         withdrawals: withdrawalsRes.rows,
+        contract_funding: contractFundingRes.rows,
       };
     });
     return data;
@@ -1475,9 +1731,9 @@ export async function accountRoutes(app: FastifyInstance) {
       return { error: 'payment_redirect_urls_invalid' };
     }
 
-    if (!hasFlutterwaveClientCredentials()) {
+    if (!hasYoClientCredentials()) {
       reply.code(503);
-      return { error: 'flutterwave_not_configured' };
+      return { error: 'yo_uganda_not_configured' };
     }
 
     const result = await withTransaction(async (client) => {
@@ -1491,9 +1747,9 @@ export async function accountRoutes(app: FastifyInstance) {
         return { error: 'user_email_missing' };
       }
 
-      const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
         user.country,
-        { cardEnabled: hasFlutterwaveEncryptionKey() }
+        { cardEnabled: hasYoEncryptionKey() }
       );
       const wallet = await ensureWalletForUser(client, userId);
       const reference = `WDP-${uuid()}`;
@@ -1559,7 +1815,7 @@ export async function accountRoutes(app: FastifyInstance) {
       );
 
       const checkoutPayload = {
-        provider: 'FLUTTERWAVE_V4',
+        provider: 'YO_UGANDA',
         mode: 'DIRECT_CHARGE',
         tx_ref: reference,
         amount: parsed.data.amount,
@@ -1635,13 +1891,6 @@ export async function accountRoutes(app: FastifyInstance) {
       }
 
       const amount = parsed.data.amount;
-      if (amount < MIN_WALLET_WITHDRAW_UGX) {
-        reply.code(400);
-        return {
-          error: 'minimum_withdrawal_not_met',
-          detail: `Minimum withdrawal amount is UGX ${MIN_WALLET_WITHDRAW_UGX}.`,
-        };
-      }
       const lockedWalletRes = await client.query(
         `SELECT * FROM wallets WHERE id=$1 FOR UPDATE`,
         [wallet.id]
@@ -1722,7 +1971,7 @@ export async function accountRoutes(app: FastifyInstance) {
     const payout = payoutPayload as WalletPayoutPayload;
 
     try {
-      await requestPayout({
+      const payoutResponse = await requestPayout({
         amount: payout.amount,
         currency: payout.currency,
         narration: `Wallet withdrawal ${payout.reference}`,
@@ -1731,6 +1980,70 @@ export async function accountRoutes(app: FastifyInstance) {
         receiverPhone: payout.receiverPhone,
         receiverNetwork: payout.receiverNetwork,
       });
+
+      const payoutStatus = String(
+        (payoutResponse as any).transactionStatus ??
+          (payoutResponse as any).status ??
+          ''
+      )
+        .trim()
+        .toUpperCase();
+
+      if (
+        payoutStatus === 'SUCCEEDED' ||
+        payoutStatus === 'SUCCESSFUL' ||
+        payoutStatus === 'COMPLETED' ||
+        payoutStatus === 'OK'
+      ) {
+        await withTransaction(async (client) => {
+          await ensureWalletTables(client);
+          await client.query(
+            `
+            UPDATE wallet_withdrawals
+            SET status='PAID',
+                paid_at=NOW(),
+                failure_reason=NULL
+            WHERE pesapal_reference=$1
+            `,
+            [payout.reference]
+          );
+        });
+      } else if (
+        payoutStatus === 'FAILED' ||
+        payoutStatus === 'FAILURE' ||
+        payoutStatus === 'ERROR' ||
+        payoutStatus === 'CANCELLED' ||
+        payoutStatus === 'CANCELED' ||
+        payoutStatus === 'REJECTED'
+      ) {
+        await withTransaction(async (client) => {
+          await ensureWalletTables(client);
+          const withdrawalRes = await client.query(
+            `SELECT * FROM wallet_withdrawals WHERE pesapal_reference=$1 LIMIT 1`,
+            [payout.reference]
+          );
+          const withdrawal = withdrawalRes.rows[0];
+          if (!withdrawal) return;
+          await refundWalletWithdrawal(
+            client,
+            withdrawal,
+            (payoutResponse as any).errorMessage ?? 'withdrawal_request_failed'
+          );
+        });
+        reply.code(502);
+        return {
+          error: 'withdrawal_request_failed',
+          detail:
+            (payoutResponse as any).errorMessage ??
+            (payoutResponse as any).statusMessage ??
+            'Withdrawal provider rejected the request.',
+        };
+      }
+
+      return {
+        ...(result as any),
+        provider_status: payoutStatus || 'PROCESSING',
+      };
     } catch (error: any) {
       await withTransaction(async (client) => {
         await ensureWalletTables(client);
@@ -1752,8 +2065,6 @@ export async function accountRoutes(app: FastifyInstance) {
         detail: error?.message ?? 'Withdrawal provider rejected the request.',
       };
     }
-
-    return result;
   });
 
   app.get('/proofs', { preHandler: [app.authenticate] }, async (request) => {
@@ -1798,12 +2109,12 @@ export async function accountRoutes(app: FastifyInstance) {
       );
       if (userId === 'ariaka-access') {
         return {
-          advertiser_campaigns: [],
-          distributor: { pending_or_review_count: 0 }
+          business_campaigns: [],
+          ambassador: { pending_or_review_count: 0 }
         };
       }
       return withTransaction(async (client) => {
-      if (activeRole === ACCOUNT_ROLE_ADVERTISER && canAccessAdvertiserFeatures(accountRole)) {
+      if (activeRole === ACCOUNT_ROLE_BUSINESS && canAccessBusinessFeatures(accountRole)) {
         const campaignsRes = await client.query(
           `SELECT c.id,
                   c.title,
@@ -1816,15 +2127,15 @@ export async function accountRoutes(app: FastifyInstance) {
              JOIN verification_sessions s ON s.id = p.session_id
              WHERE s.campaign_id = c.id
            ) latest ON true
-           WHERE c.advertiser_id=$1
+           WHERE c.business_id=$1
            ORDER BY c.created_at DESC
            LIMIT 200`,
           [userId]
         );
-        return { advertiser_campaigns: campaignsRes.rows };
+        return { business_campaigns: campaignsRes.rows };
       }
 
-      const distributorRes = await client.query(
+      const ambassadorRes = await client.query(
         `SELECT
            COUNT(*) FILTER (WHERE status='PENDING' OR status='MANUAL_REVIEW')::int AS pending_or_review_count
          FROM proofs
@@ -1832,8 +2143,8 @@ export async function accountRoutes(app: FastifyInstance) {
         [userId]
       );
       return {
-        distributor: {
-          pending_or_review_count: distributorRes.rows[0]?.pending_or_review_count ?? 0
+        ambassador: {
+          pending_or_review_count: ambassadorRes.rows[0]?.pending_or_review_count ?? 0
         }
       };
     });
@@ -1862,7 +2173,7 @@ export async function accountRoutes(app: FastifyInstance) {
       const userId = userSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : userSub;
     return withTransaction(async (client) => {
       const updated = await markAllUserNotificationsRead(client, userId);
-      return { ok: true, updated };
+      return { ok: true, updated, unread_count: 0 };
     });
   });
 
@@ -1964,7 +2275,7 @@ export async function accountRoutes(app: FastifyInstance) {
     const status = (query?.status ?? '').toString().toUpperCase();
     return withTransaction(async (client) => {
       const params: any[] = [userId];
-      let where = 'WHERE ctr.distributor_id=$1';
+      let where = 'WHERE ctr.ambassador_id=$1';
       if (status) {
         params.push(status);
         where += ` AND ctr.status=$${params.length}`;
@@ -1996,7 +2307,7 @@ export async function accountRoutes(app: FastifyInstance) {
            FROM proofs p
            JOIN verification_sessions s ON s.id = p.session_id
            WHERE s.campaign_id = ctr.campaign_id
-             AND p.user_id = ctr.distributor_id
+             AND p.user_id = ctr.ambassador_id
            ORDER BY p.created_at DESC
            LIMIT 1
          ) p ON TRUE
@@ -2039,3 +2350,6 @@ export async function accountRoutes(app: FastifyInstance) {
     });
   });
 }
+
+
+

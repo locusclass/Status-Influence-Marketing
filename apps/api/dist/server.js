@@ -6,23 +6,100 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
-import { ADMIN_ROLE_SUPER_ADMIN, normalizeAdminDashboardRole, } from '@prime/shared';
-import { config, hasFlutterwaveClientCredentials, hasFlutterwaveSecretKey, hasValidFlutterwaveKeys, resolveFlutterwaveBaseUrl, } from './config.js';
+import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_CONTRACTS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_JOBS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PUBLIC_COMMUNICATION, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WALLETS, ADMIN_MODULE_WITHDRAWALS, } from '@prime/shared';
+import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
-import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
+import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
+import { ensureSmsSchema } from './services/smsDispatch.js';
+import { ensurePrimarySuperAdmin, hasAdminModuleAccess, resolveLiveDashboardAccess, } from './services/adminTenant.js';
+import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
+    const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
+    const adminTestRouteProfile = process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() === 'admin';
+    const resolveAdminModuleForPath = (value) => {
+        const path = value.split('?')[0] ?? value;
+        const normalized = path.startsWith('/api/') ? path.slice(4) : path;
+        if (normalized === '/admin/overview')
+            return ADMIN_MODULE_OVERVIEW;
+        if (normalized.startsWith('/admin/operations'))
+            return ADMIN_MODULE_OPERATIONS;
+        if (normalized.startsWith('/admin/audit'))
+            return ADMIN_MODULE_AUDIT_LOGS;
+        if (normalized.startsWith('/admin/finance'))
+            return ADMIN_MODULE_FINANCE;
+        if (normalized.startsWith('/admin/verification-sessions')) {
+            return ADMIN_MODULE_SESSIONS;
+        }
+        if (normalized.startsWith('/admin/campaign-drafts'))
+            return ADMIN_MODULE_DRAFTS;
+        if (normalized.startsWith('/admin/trust') ||
+            normalized.startsWith('/admin/device-fingerprints')) {
+            return ADMIN_MODULE_RISK;
+        }
+        if (normalized.startsWith('/admin/wallet-withdrawals')) {
+            return ADMIN_MODULE_WITHDRAWALS;
+        }
+        if (normalized.startsWith('/admin/user-notices')) {
+            return ADMIN_MODULE_PUBLIC_COMMUNICATION;
+        }
+        if (normalized.startsWith('/admin/users'))
+            return ADMIN_MODULE_USERS;
+        if (normalized.startsWith('/admin/admins')) {
+            return ADMIN_MODULE_ADMIN_MANAGEMENT;
+        }
+        if (normalized.startsWith('/admin/campaigns'))
+            return ADMIN_MODULE_CAMPAIGNS;
+        if (normalized.startsWith('/admin/proofs'))
+            return ADMIN_MODULE_PROOFS;
+        if (normalized.startsWith('/admin/wallets'))
+            return ADMIN_MODULE_WALLETS;
+        if (normalized.startsWith('/admin/escrows'))
+            return ADMIN_MODULE_ESCROWS;
+        if (normalized.startsWith('/admin/payouts'))
+            return ADMIN_MODULE_MANAGER_PAYOUTS;
+        if (normalized.startsWith('/admin/payout-requests')) {
+            return ADMIN_MODULE_PAYOUT_REQUESTS;
+        }
+        if (normalized.startsWith('/admin/contracts'))
+            return ADMIN_MODULE_CONTRACTS;
+        if (normalized.startsWith('/admin/jobs'))
+            return ADMIN_MODULE_JOBS;
+        if (normalized.startsWith('/admin/yo-uganda') ||
+            normalized.startsWith('/admin/flutterwave')) {
+            return ADMIN_MODULE_GATEWAY;
+        }
+        return null;
+    };
     const app = Fastify({
         pluginTimeout: Number(process.env.FASTIFY_PLUGIN_TIMEOUT ?? 30000),
         logger: {
             level: process.env.LOG_LEVEL ?? 'info'
         }
     });
+    const runStartupWarmups = async (source) => {
+        if (skipOptionalStartupWarmups) {
+            return;
+        }
+        try {
+            await withTransaction(async (client) => {
+                await ensureUserSignalSchema(client);
+                await ensureSmsSchema(client);
+                await ensurePolicyAcceptanceColumns(client);
+                await ensurePrimarySuperAdmin(client);
+            });
+        }
+        catch (error) {
+            app.log.error({ err: error, source }, 'startup warmup failed for user signal, policy, and sms schema');
+        }
+    };
     const defaultAllowedOrigins = [
         'https://primestatus.site',
         'https://*.primestatus.site',
         'https://prime-status-1f0ad.firebaseapp.com',
         'https://prime-status-1f0ad.web.app',
+        'https://admindashboard-77cc3.firebaseapp.com',
+        'https://admindashboard-77cc3.web.app',
         'http://localhost:*',
         'http://127.0.0.1:*',
     ];
@@ -82,6 +159,9 @@ export function buildServer() {
         secret: config.jwtSecret,
     });
     app.register(multipart);
+    app.addHook('onListen', async () => {
+        await runStartupWarmups('server:onListen:core');
+    });
     app.addContentTypeParser(/^application\/([a-z0-9.+-]+\+)?json(?:;.*)?$/i, { parseAs: 'string' }, (request, body, done) => {
         request.rawBody = body;
         if (!body) {
@@ -138,42 +218,78 @@ export function buildServer() {
     app.decorate('authenticate', async (request, reply) => {
         try {
             await request.jwtVerify();
-            const userId = String(request.user?.sub ?? '').trim();
-            if (userId) {
-                void touchUserPresence(userId).catch(() => { });
-            }
         }
         catch {
             reply.code(401).send({ error: 'unauthorized' });
+            return;
+        }
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId) {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
+        void touchUserPresence(userId).catch(() => { });
+        if (isPolicyAcceptanceBypassRoute(request)) {
+            return;
+        }
+        const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
+        if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+            return reply.code(428).send({
+                error: 'policy_acceptance_required',
+                ...buildPolicyAcceptanceState(acceptance ?? {}),
+            });
         }
     });
     app.decorate('adminOnly', async (request, reply) => {
         try {
             await request.jwtVerify();
-            const userId = String(request.user?.sub ?? '').trim();
-            if (userId) {
-                void touchUserPresence(userId).catch(() => { });
-            }
-            const role = request.user?.role;
-            const adminRole = normalizeAdminDashboardRole(request.user?.admin_role);
-            if (adminRole !== ADMIN_ROLE_SUPER_ADMIN && role !== 'ADMIN') {
-                return reply.code(403).send({ error: 'forbidden' });
-            }
         }
         catch {
             return reply.code(401).send({ error: 'unauthorized' });
         }
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId) {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
+        void touchUserPresence(userId).catch(() => { });
+        // Admin dashboard access is enforced by RBAC and admin-account status.
+        // End-user policy acceptance should not block internal dashboard access.
+        const access = await withTransaction(async (client) => resolveLiveDashboardAccess(client, request));
+        if (!access || access.admin_role === 'USER') {
+            return reply.code(403).send({ error: 'forbidden' });
+        }
+        if (access.admin_status !== 'ACTIVE') {
+            return reply.code(403).send({
+                error: access.admin_status === 'SUSPENDED' ? 'admin_suspended' : 'forbidden',
+            });
+        }
+        const requiredModule = resolveAdminModuleForPath(request.url);
+        if (requiredModule && !hasAdminModuleAccess(access, requiredModule)) {
+            return reply.code(403).send({ error: 'forbidden' });
+        }
+        request.adminAccess = access;
     });
-    app.register(swagger, {
-        openapi: {
-            info: {
-                title: 'Prime API',
-                version: '0.1.0',
+    if (!skipOptionalStartupWarmups) {
+        app.register(swagger, {
+            openapi: {
+                info: {
+                    title: 'Prime API',
+                    version: '0.1.0',
+                },
             },
-        },
-    });
-    app.register(swaggerUi, { routePrefix: '/docs' });
-    const registerRoutes = (instance) => {
+        });
+        app.register(swaggerUi, { routePrefix: '/docs' });
+    }
+    const registerRootRoutes = (instance) => {
+        instance.register(healthRoutes);
+        instance.register(uploadRoutes);
+    };
+    const registerApiRoutes = (instance) => {
+        if (adminTestRouteProfile) {
+            instance.register(healthRoutes);
+            instance.register(adminRoutes);
+            instance.register(tenantAdminRoutes);
+            return;
+        }
         instance.register(healthRoutes);
         instance.register(authRoutes);
         instance.register(campaignRoutes);
@@ -181,33 +297,49 @@ export function buildServer() {
         instance.register(verificationRoutes);
         instance.register(uploadRoutes);
         instance.register(paymentRoutes);
+        instance.register(chatRoutes);
         instance.register(accountRoutes);
         instance.register(adminRoutes);
         instance.register(tenantAdminRoutes);
     };
     // Routes
-    registerRoutes(app);
-    app.register(async (instance) => registerRoutes(instance), { prefix: '/api' });
+    registerRootRoutes(app);
+    if (!adminTestRouteProfile) {
+        app.register(async (instance) => registerApiRoutes(instance), { prefix: '/api' });
+    }
+    else {
+        registerApiRoutes(app);
+    }
     // Final payment-provider configuration
-    app.addHook('onReady', async () => {
-        await withTransaction(async (client) => {
-            await ensureUserSignalSchema(client);
-        });
-        const hasSecret = hasFlutterwaveSecretKey();
-        const hasClientCreds = hasFlutterwaveClientCredentials();
+    app.addHook('onListen', async () => {
+        await runStartupWarmups('server:onListen:payments');
+        const hasSecret = hasYoSecretKey();
+        const hasClientCreds = hasYoClientCredentials();
         app.log.info({
-            provider: 'FLUTTERWAVE',
-            base_url: resolveFlutterwaveBaseUrl(),
-            auth_mode: hasSecret ? 'secret_key' : hasClientCreds ? 'client_credentials' : 'none',
+            provider: 'YO_UGANDA',
+            base_url: resolveYoBaseUrl(),
+            fallback_base_url: resolveYoFallbackBaseUrl(),
+            auth_mode: hasClientCreds ? 'api_credentials' : 'none',
             has_secret: hasSecret,
             has_client_creds: hasClientCreds,
-        }, 'flutterwave_config');
-        if (!hasValidFlutterwaveKeys()) {
-            app.log.warn('Flutterwave credentials are incomplete. Payments will fail.');
+            allow_direct_api_bypass: config.yo.allowDirectApiBypass,
+        }, 'yo_uganda_config');
+        if (!hasValidYoKeys()) {
+            app.log.warn('YO Uganda credentials are incomplete. Payments will fail.');
         }
-        if (!config.flutterwave.webhookSecretHash) {
-            app.log.warn('FLUTTERWAVE_WEBHOOK_SECRET_HASH is not set. Webhook verification is disabled.');
+        if (!config.yo.webhookSecretHash) {
+            app.log.info('YO Uganda collection uses status polling. Webhook verification is not active.');
         }
+        if (config.yo.allowDirectApiBypass) {
+            app.log.warn('YO_ALLOW_DIRECT_API_BYPASS is enabled. Direct YO hosts can bypass the static-IP gateway.');
+        }
+        app.log.info({
+            provider: 'AFRICAS_TALKING',
+            environment: config.africaTalking.environment,
+            sender_id: config.africaTalking.senderId || null,
+            configured: config.africaTalking.username.trim().length > 0 &&
+                config.africaTalking.apiKey.trim().length > 0,
+        }, 'sms_config');
     });
     return app;
 }

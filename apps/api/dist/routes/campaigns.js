@@ -4,19 +4,122 @@ import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
-import { config, hasFlutterwaveClientCredentials, hasFlutterwaveEncryptionKey, } from '../config.js';
-import { resolveAvailableFlutterwaveCheckoutProfile } from '../services/flutterwaveCheckoutProfile.js';
+import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
+import { ensureChatSchema } from '../services/chat.js';
+import { buildPhoneLookupVariants, normalizePhoneSearchInput, splitSearchTerms, } from '../services/contactLookup.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
-import { canAccessAdvertiserFeatures, canAccessDistributorFeatures, normalizeActiveRole, } from '../services/roles.js';
+import { canAccessBusinessFeatures, canAccessAmbassadorFeatures, normalizeActiveRole, } from '../services/roles.js';
+import { createUserNotifications, ensureUserSignalSchema, } from '../services/userSignals.js';
+import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
+import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, ensureViewerVerificationSchema, } from '../services/viewerVerification.js';
+import { ensureUserProfilesTable } from '../services/userProfiles.js';
+import { queueSmsDispatch } from '../services/smsDispatch.js';
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
 const CREATOR_DEFAULT_TARGET_METRIC = 100;
+const ACTIVE_CAMPAIGN_PLATFORM = 'WHATSAPP_STATUS';
+const PUBLIC_CONTRACT_ACTIVE_AMBASSADOR_THRESHOLD = 5000;
+const PUBLIC_CONTRACT_ELIGIBLE_ROLES = [
+    'ADMIN',
+    'AMBASSADOR',
+    'DUAL_USER',
+];
+const TEMPORARY_PLATFORM_INCORPORATION_DETAIL = 'Support for TikTok and X campaigns is coming soon. WhatsApp Status is the only supported campaign platform right now.';
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
     .map((platform) => `'${platform}'`)
     .join(', ')}))`;
+function collectAssignmentNotice(target, userId, campaignTitle) {
+    const normalizedUserId = String(userId ?? '').trim();
+    const title = String(campaignTitle ?? '').trim();
+    if (!normalizedUserId || !title) {
+        return;
+    }
+    const current = target.get(normalizedUserId) ?? [];
+    current.push(title);
+    target.set(normalizedUserId, current);
+}
+async function planCampaignPendingReviewDelivery(client, businessUserId, campaignId, campaignTitle) {
+    const body = `Your campaign "${campaignTitle}" was submitted and is pending admin review. We will notify you once the review is complete.`;
+    const plan = await createUserNotificationsWithSmsPlan(client, [businessUserId], {
+        category: 'CAMPAIGN_PENDING_REVIEW',
+        title: 'Campaign pending review',
+        body,
+        targetType: 'campaign',
+        targetId: campaignId,
+        meta: {
+            approval_status: 'PENDING_APPROVAL',
+        },
+    }, {
+        sms: {
+            enabled: true,
+            message: body,
+        },
+    });
+    return plan.smsJobs;
+}
+async function planCampaignAssignmentDeliveries(client, assignments, campaignId, pendingApproval) {
+    const smsJobs = [];
+    for (const [userId, titles] of assignments.entries()) {
+        if (titles.length === 0) {
+            continue;
+        }
+        const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} campaigns`;
+        const body = pendingApproval
+            ? `You have been assigned to ${subject} on Prime Status. The assignment is pending admin approval and will become active after review.`
+            : `You have been assigned to ${subject} on Prime Status. Open the app to review the details. The campaign will go live once funding is confirmed.`;
+        const plan = await createUserNotificationsWithSmsPlan(client, [userId], {
+            category: 'CAMPAIGN_ASSIGNMENT',
+            title: pendingApproval
+                ? 'Campaign assignment pending approval'
+                : 'New campaign assignment',
+            body,
+            targetType: 'campaign',
+            targetId: campaignId,
+            meta: {
+                assigned_campaign_titles: titles,
+                pending_admin_review: pendingApproval,
+            },
+        }, {
+            sms: {
+                enabled: true,
+                message: body,
+            },
+        });
+        smsJobs.push(...plan.smsJobs);
+    }
+    return smsJobs;
+}
 function normalizePhone(input) {
-    return input.replace(/[^\d+]/g, '').trim();
+    return normalizePhoneSearchInput(input);
+}
+function normalizeDigits(input) {
+    return String(input ?? '').replace(/\D/g, '').trim();
+}
+function isUuidLike(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+function normalizePricePrivacyMode(value) {
+    return String(value ?? 'NEGOTIABLE').trim().toUpperCase() === 'FIXED'
+        ? 'FIXED'
+        : 'NEGOTIABLE';
+}
+function roundPercent(value) {
+    return Math.round(value * 100) / 100;
+}
+function resolveGroupPricePrivacyMode(values) {
+    let negotiableCount = 0;
+    let fixedCount = 0;
+    for (const value of values) {
+        if (normalizePricePrivacyMode(value) === 'FIXED') {
+            fixedCount += 1;
+        }
+        else {
+            negotiableCount += 1;
+        }
+    }
+    return negotiableCount > fixedCount ? 'NEGOTIABLE' : 'FIXED';
 }
 function normalizeUserAccountStatus(value) {
     const status = String(value ?? 'ACTIVE').trim().toUpperCase();
@@ -30,9 +133,9 @@ function buildAccountRestrictionResult(status, audience) {
     if (normalizedStatus === 'ACTIVE') {
         return null;
     }
-    const actionText = audience === 'advertiser'
-        ? 'create adverts'
-        : 'view or accept promoter opportunities';
+    const actionText = audience === 'business'
+        ? 'create campaigns'
+        : 'view or accept ambassador opportunities';
     const detail = normalizedStatus === 'BANNED'
         ? `Your account is banned. You cannot ${actionText}.`
         : `Your account is suspended. You cannot ${actionText} until an administrator reactivates it.`;
@@ -124,16 +227,291 @@ function getCampaignBundleId(campaign) {
     const value = String(campaign?.campaign_bundle_id ?? '').trim();
     return value.length > 0 ? value : null;
 }
+function buildEscrowCampaignIdSql(campaignAlias) {
+    return `
+    COALESCE(
+      NULLIF(${campaignAlias}.execution_meta #>> '{contract_reissue,source_escrow_campaign_id}', ''),
+      COALESCE(
+        ${campaignAlias}.bundle_root_campaign_id,
+        ${campaignAlias}.parent_campaign_id,
+        ${campaignAlias}.id
+      )::text
+    )
+  `;
+}
 function getEscrowCampaignId(campaign) {
+    const executionMeta = campaign?.execution_meta && typeof campaign.execution_meta === 'object'
+        ? campaign.execution_meta
+        : null;
+    const contractReissue = executionMeta?.contract_reissue &&
+        typeof executionMeta.contract_reissue === 'object'
+        ? executionMeta.contract_reissue
+        : null;
+    const sourceEscrowCampaignId = String(contractReissue?.source_escrow_campaign_id ?? '').trim();
+    if (sourceEscrowCampaignId.length > 0) {
+        return sourceEscrowCampaignId;
+    }
     return String(campaign?.bundle_root_campaign_id ??
         campaign?.parent_campaign_id ??
         campaign?.id ??
         '').trim();
 }
+const confirmedEscrowFundingStatuses = [
+    'FUNDED',
+    'PARTIALLY_DISBURSED',
+    'COMPLETED',
+];
+function isConfirmedEscrowFundingStatus(value) {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    return confirmedEscrowFundingStatuses.includes(normalized);
+}
+function buildConfirmedEscrowEvidenceSql(campaignAlias, escrowAlias) {
+    return `
+    ${escrowAlias}.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+    AND (
+      EXISTS (
+        SELECT 1
+        FROM pesapal_transactions pt
+        WHERE pt.id = ${escrowAlias}.pesapal_txn_id
+          AND pt.type = 'FUNDING'
+          AND pt.status = 'COMPLETED'
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM wallet_txns wt
+        WHERE wt.direction = 'DEBIT'
+          AND (
+            wt.reference =
+              'ESCROW_FUND:' ||
+              ${buildEscrowCampaignIdSql(campaignAlias)}
+            OR (
+              ${campaignAlias}.campaign_bundle_id IS NOT NULL
+              AND wt.reference =
+                'ESCROW_FUND:BUNDLE:' ||
+                ${campaignAlias}.campaign_bundle_id::text
+            )
+          )
+      )
+    )
+  `;
+}
+async function hasConfirmedEscrowFunding(client, campaignId) {
+    await ensureCampaignExecutionMetaColumn(client);
+    const fundingRes = await client.query(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM campaigns c
+      LEFT JOIN escrow_ledger e
+        ON e.campaign_id::text = ${buildEscrowCampaignIdSql('c')}
+      WHERE c.id = $1
+        AND ${buildConfirmedEscrowEvidenceSql('c', 'e')}
+    ) AS funding_confirmed
+    `, [campaignId]);
+    return fundingRes.rows[0]?.funding_confirmed === true;
+}
+async function ensureCampaignDraftsTable(client) {
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_drafts (
+      id UUID PRIMARY KEY,
+      business_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      payload JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaign_creation_drafts_updated_at_idx
+      ON campaign_creation_drafts (updated_at DESC)
+  `);
+    await client.query(`
+    ALTER TABLE campaign_creation_drafts
+      ADD COLUMN IF NOT EXISTS advertiser_id UUID
+  `);
+    await client.query(`
+    ALTER TABLE campaign_creation_drafts
+      ADD COLUMN IF NOT EXISTS business_id UUID
+  `);
+    await client.query(`
+    UPDATE campaign_creation_drafts
+    SET business_id = COALESCE(business_id, advertiser_id),
+        advertiser_id = COALESCE(advertiser_id, business_id)
+    WHERE business_id IS NULL
+       OR advertiser_id IS NULL
+       OR business_id IS DISTINCT FROM advertiser_id
+  `);
+    await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS campaign_creation_drafts_business_id_key
+      ON campaign_creation_drafts (business_id)
+  `);
+    await client.query(`
+    CREATE OR REPLACE FUNCTION sync_campaign_creation_draft_owner_columns()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      resolved_owner UUID;
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.business_id IS DISTINCT FROM OLD.business_id THEN
+          resolved_owner := NEW.business_id;
+        ELSIF NEW.advertiser_id IS DISTINCT FROM OLD.advertiser_id THEN
+          resolved_owner := NEW.advertiser_id;
+        ELSE
+          resolved_owner := COALESCE(NEW.business_id, NEW.advertiser_id);
+        END IF;
+      ELSE
+        resolved_owner := COALESCE(NEW.business_id, NEW.advertiser_id);
+      END IF;
+
+      NEW.business_id := resolved_owner;
+      NEW.advertiser_id := resolved_owner;
+      RETURN NEW;
+    END;
+    $$;
+  `);
+    await client.query(`
+    DROP TRIGGER IF EXISTS campaign_creation_drafts_sync_owner_columns
+    ON campaign_creation_drafts
+  `);
+    await client.query(`
+    CREATE TRIGGER campaign_creation_drafts_sync_owner_columns
+    BEFORE INSERT OR UPDATE ON campaign_creation_drafts
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_campaign_creation_draft_owner_columns()
+  `);
+}
+async function ensureCampaignExecutionMetaColumn(client) {
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS execution_meta JSONB
+  `);
+}
+function extractContractReissueMeta(executionMeta) {
+    if (!executionMeta || typeof executionMeta !== 'object') {
+        return null;
+    }
+    const raw = executionMeta.contract_reissue;
+    if (!raw || typeof raw !== 'object') {
+        return null;
+    }
+    const value = raw;
+    const sourceCampaignId = String(value.source_campaign_id ?? '').trim();
+    const sourceEscrowCampaignId = String(value.source_escrow_campaign_id ?? '').trim();
+    if (sourceCampaignId.length === 0 || sourceEscrowCampaignId.length === 0) {
+        return null;
+    }
+    return {
+        sourceCampaignId,
+        sourceEscrowCampaignId,
+    };
+}
+async function tryReuseDeclinedPrivateContractFunding(input) {
+    const reissue = extractContractReissueMeta(input.executionMeta);
+    if (!reissue) {
+        return null;
+    }
+    const sourceRes = await input.client.query(`
+    SELECT
+      c.id,
+      c.business_id,
+      c.execution_mode,
+      c.visibility,
+      e.id AS escrow_id,
+      e.status AS escrow_status,
+      COALESCE(e.amount_total, 0)::int AS amount_total,
+      COALESCE(e.amount_available, 0)::int AS amount_available
+    FROM campaigns c
+    LEFT JOIN escrow_ledger e
+      ON e.campaign_id::text = $2
+    WHERE c.id = $1
+      AND c.business_id = $3
+    LIMIT 1
+    `, [
+        reissue.sourceCampaignId,
+        reissue.sourceEscrowCampaignId,
+        input.businessId,
+    ]);
+    const source = sourceRes.rows[0];
+    if (!source) {
+        return null;
+    }
+    if (source.execution_mode !== 'PRIVATE_CONTRACT' ||
+        source.visibility !== 'PRIVATE' ||
+        !source.escrow_id ||
+        !isConfirmedEscrowFundingStatus(source.escrow_status)) {
+        return null;
+    }
+    const requiredAmount = Math.max(0, Math.round(input.requiredAmount));
+    if (requiredAmount <= 0 || Number(source.amount_available ?? 0) < requiredAmount) {
+        return null;
+    }
+    const latestFundingTxnRes = await input.client.query(`
+    SELECT id, merchant_reference, raw_payload
+    FROM pesapal_transactions
+    WHERE escrow_id = $1
+      AND type = 'FUNDING'
+    ORDER BY
+      CASE WHEN status = 'COMPLETED' THEN 0 ELSE 1 END,
+      created_at DESC
+    LIMIT 1
+    `, [source.escrow_id]);
+    const latestFundingTxn = latestFundingTxnRes.rows[0];
+    if (latestFundingTxn) {
+        const rawPayload = latestFundingTxn.raw_payload &&
+            typeof latestFundingTxn.raw_payload === 'object'
+            ? { ...latestFundingTxn.raw_payload }
+            : {};
+        const previousReissues = Array.isArray(rawPayload.reissued_campaign_ids)
+            ? rawPayload.reissued_campaign_ids
+                .map((value) => String(value ?? '').trim())
+                .filter((value) => value.length > 0)
+            : [];
+        const nextReissues = Array.from(new Set([...previousReissues, input.rootCampaignId]));
+        rawPayload.reissued_campaign_ids = nextReissues;
+        rawPayload.last_reissued_campaign_id = input.rootCampaignId;
+        rawPayload.last_reissue_source_campaign_id = reissue.sourceCampaignId;
+        rawPayload.last_reused_amount_ugx = requiredAmount;
+        rawPayload.last_reused_at = new Date().toISOString();
+        await input.client.query(`
+      UPDATE pesapal_transactions
+      SET raw_payload = $2::jsonb
+      WHERE id = $1
+      `, [latestFundingTxn.id, JSON.stringify(rawPayload)]);
+    }
+    return {
+        escrowCampaignId: reissue.sourceEscrowCampaignId,
+        escrowId: source.escrow_id,
+        amountAvailable: Number(source.amount_available ?? 0),
+    };
+}
 function normalizePlatformList(values) {
     return Array.from(new Set(values
         .map((value) => String(value ?? '').trim().toUpperCase())
         .filter((value) => value.length > 0)));
+}
+function hasOnlyActiveCampaignPlatforms(platforms) {
+    return platforms.every((platform) => platform === ACTIVE_CAMPAIGN_PLATFORM);
+}
+function buildPublicContractEligibilityDetail(activeAmbassadorCount) {
+    if (activeAmbassadorCount >= PUBLIC_CONTRACT_ACTIVE_AMBASSADOR_THRESHOLD) {
+        return `Backend confirmed ${activeAmbassadorCount} active ambassadors. Public contracts are available.`;
+    }
+    return `Public contracts unlock once the backend confirms at least ${PUBLIC_CONTRACT_ACTIVE_AMBASSADOR_THRESHOLD} active ambassadors. Current confirmed active ambassadors: ${activeAmbassadorCount}.`;
+}
+async function getPublicContractEligibility(client) {
+    const ambassadorCountRes = await client.query(`
+    SELECT COUNT(*)::int AS count
+    FROM users
+    WHERE status = 'ACTIVE'
+      AND role = ANY($1::text[])
+    `, [PUBLIC_CONTRACT_ELIGIBLE_ROLES]);
+    const activeAmbassadorCount = Math.max(0, Number(ambassadorCountRes.rows[0]?.count ?? 0));
+    return {
+        eligible: activeAmbassadorCount >= PUBLIC_CONTRACT_ACTIVE_AMBASSADOR_THRESHOLD,
+        active_ambassadors: activeAmbassadorCount,
+        required_active_ambassadors: PUBLIC_CONTRACT_ACTIVE_AMBASSADOR_THRESHOLD,
+        detail: buildPublicContractEligibilityDetail(activeAmbassadorCount),
+    };
 }
 function resolveRequestedPlatforms(body) {
     const bundleItemPlatforms = Array.isArray(body?.bundle_items)
@@ -180,11 +558,11 @@ async function ensureWalletForUser(client, userId, preferredCurrency) {
     `, [userId, currency]);
     return created.rows[0];
 }
-async function creditAdvertiserWallet(client, advertiserId, amount, reference, preferredCurrency) {
+async function creditBusinessWallet(client, businessId, amount, reference, preferredCurrency) {
     if (amount <= 0) {
         return null;
     }
-    const wallet = await ensureWalletForUser(client, advertiserId, preferredCurrency);
+    const wallet = await ensureWalletForUser(client, businessId, preferredCurrency);
     const updated = await client.query(`
     UPDATE wallets
     SET balance_available = balance_available + $2,
@@ -198,7 +576,7 @@ async function creditAdvertiserWallet(client, advertiserId, amount, reference, p
     `, [wallet.id, amount, reference]);
     return updated.rows[0] ?? wallet;
 }
-async function refundEscrowAmountToAdvertiser(client, escrowId, advertiserId, refundAmount, reference, preferredCurrency) {
+async function refundEscrowAmountToBusiness(client, escrowId, businessId, refundAmount, reference, preferredCurrency) {
     if (refundAmount <= 0) {
         return { refunded_amount: 0, wallet: null };
     }
@@ -215,11 +593,64 @@ async function refundEscrowAmountToAdvertiser(client, escrowId, advertiserId, re
     if (!escrowUpdate.rows[0]) {
         return { refunded_amount: 0, wallet: null };
     }
-    const wallet = await creditAdvertiserWallet(client, advertiserId, refundAmount, reference, preferredCurrency);
+    const wallet = await creditBusinessWallet(client, businessId, refundAmount, reference, preferredCurrency);
     return { refunded_amount: refundAmount, wallet };
 }
 async function ensureCampaignColumns(client) {
     await ensurePublicIdColumns(client);
+    await ensureCampaignDraftsTable(client);
+    await client.query(`
+    ALTER TABLE contracts
+      ADD COLUMN IF NOT EXISTS ambassador_id UUID
+  `);
+    await client.query(`
+    ALTER TABLE contracts
+      ADD COLUMN IF NOT EXISTS distributor_id UUID
+  `);
+    await client.query(`
+    UPDATE contracts
+    SET ambassador_id = COALESCE(ambassador_id, distributor_id),
+        distributor_id = COALESCE(distributor_id, ambassador_id)
+    WHERE ambassador_id IS NULL
+       OR distributor_id IS NULL
+       OR ambassador_id IS DISTINCT FROM distributor_id
+  `);
+    await client.query(`
+    CREATE OR REPLACE FUNCTION sync_contract_participant_columns()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      resolved_participant UUID;
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.ambassador_id IS DISTINCT FROM OLD.ambassador_id THEN
+          resolved_participant := NEW.ambassador_id;
+        ELSIF NEW.distributor_id IS DISTINCT FROM OLD.distributor_id THEN
+          resolved_participant := NEW.distributor_id;
+        ELSE
+          resolved_participant := COALESCE(NEW.ambassador_id, NEW.distributor_id);
+        END IF;
+      ELSE
+        resolved_participant := COALESCE(NEW.ambassador_id, NEW.distributor_id);
+      END IF;
+
+      NEW.ambassador_id := resolved_participant;
+      NEW.distributor_id := resolved_participant;
+      RETURN NEW;
+    END;
+    $$;
+  `);
+    await client.query(`
+    DROP TRIGGER IF EXISTS contracts_sync_participant_columns
+    ON contracts
+  `);
+    await client.query(`
+    CREATE TRIGGER contracts_sync_participant_columns
+    BEFORE INSERT OR UPDATE ON contracts
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_contract_participant_columns()
+  `);
     await client.query(`
     ALTER TABLE campaigns
       ADD COLUMN IF NOT EXISTS parent_campaign_id UUID REFERENCES campaigns(id)
@@ -234,7 +665,7 @@ async function ensureCampaignColumns(client) {
   `);
     await client.query(`
     ALTER TABLE campaigns
-      ADD COLUMN IF NOT EXISTS assigned_distributor_id UUID REFERENCES users(id)
+      ADD COLUMN IF NOT EXISTS assigned_ambassador_id UUID REFERENCES users(id)
   `);
     await client.query(`
     ALTER TABLE campaigns
@@ -258,7 +689,7 @@ async function ensureCampaignColumns(client) {
   `);
     await client.query(`
     ALTER TABLE campaigns
-      ADD COLUMN IF NOT EXISTS advertiser_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY'
+      ADD COLUMN IF NOT EXISTS business_wallet_mode TEXT NOT NULL DEFAULT 'CAMPAIGN_ONLY'
   `);
     await client.query(`
     ALTER TABLE campaigns
@@ -285,6 +716,26 @@ async function ensureCampaignColumns(client) {
       ADD COLUMN IF NOT EXISTS campaign_burst_mode BOOLEAN NOT NULL DEFAULT FALSE
   `);
     await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'APPROVED'
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approval_deadline TIMESTAMPTZ
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ
+  `);
+    await client.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS approved_by_user_id UUID REFERENCES users(id)
+  `);
+    await client.query(`
+    CREATE INDEX IF NOT EXISTS campaigns_approval_status_idx
+    ON campaigns (approval_status, approval_deadline)
+  `);
+    await client.query(`
     CREATE INDEX IF NOT EXISTS campaigns_campaign_bundle_id_idx
     ON campaigns (campaign_bundle_id)
   `);
@@ -295,9 +746,13 @@ async function ensureCampaignColumns(client) {
     await client.query(`
     DO $$ BEGIN
       IF to_regclass('public.campaigns') IS NOT NULL THEN
-        ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
-        ALTER TABLE campaigns
-          ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+        BEGIN
+          ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_platform_check;
+          ALTER TABLE campaigns
+            ADD CONSTRAINT campaigns_platform_check ${SUPPORTED_PLATFORM_CHECK_SQL};
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
       END IF;
     END $$;
   `);
@@ -311,6 +766,10 @@ function normalizeCampaignMutationError(message) {
     if (message.startsWith('beneficiary_capacity_insufficient')) {
         return 'beneficiary_capacity_insufficient';
     }
+    if (message === 'group_not_found')
+        return 'group_not_found';
+    if (message === 'group_beneficiary_empty')
+        return 'group_beneficiary_empty';
     if (message.startsWith('duplicate_bundle_platform')) {
         return 'duplicate_bundle_platform';
     }
@@ -357,12 +816,35 @@ function resolveDeterministicEngagements24h(provenEngagements24h, maxStatusViewe
     const capacity24h = Math.max(0, maxStatusViewers12h) * 2;
     return Math.max(1, capacity24h);
 }
-async function buildPrivatePricingQuote(client, distributor, mediaType, platform) {
-    const provenEngagements24h = await getVerifiedEngagements24h(client, String(distributor.id), platform);
-    const pricingReferenceEngagements24h = resolveDeterministicEngagements24h(provenEngagements24h, Number(distributor.max_status_viewers_12h ?? 0));
+function normalizeCampaignMediaUrls(value) {
+    const executionMeta = value.execution_meta && typeof value.execution_meta === 'object'
+        ? value.execution_meta
+        : null;
+    const urls = [
+        ...(Array.isArray(value.media_urls) ? value.media_urls : []),
+        ...(Array.isArray(executionMeta?.media_urls) ? executionMeta.media_urls : []),
+        value.media_url,
+    ]
+        .map((entry) => String(entry ?? '').trim())
+        .filter((entry) => entry.length > 0);
+    return Array.from(new Set(urls));
+}
+function primaryCampaignMediaUrl(value) {
+    return normalizeCampaignMediaUrls(value)[0] ?? null;
+}
+function withCampaignMediaUrls(campaign) {
+    return {
+        ...campaign,
+        media_urls: normalizeCampaignMediaUrls(campaign),
+    };
+}
+async function buildPrivatePricingQuote(client, ambassador, mediaType, platform) {
+    const provenEngagements24h = await getVerifiedEngagements24h(client, String(ambassador.id), platform);
+    const pricingReferenceEngagements24h = resolveDeterministicEngagements24h(provenEngagements24h, Number(ambassador.max_status_viewers_12h ?? 0));
     const deterministicRateUgx = pricingReferenceEngagements24h * getPublicContractUnitRate(mediaType);
-    const privateContractRateUgx = Math.max(0, Number(distributor.private_contract_rate_ugx ?? 0));
+    const privateContractRateUgx = Math.max(0, Number(ambassador.private_contract_rate_ugx ?? 0));
     const selectedRateUgx = privateContractRateUgx > 0 ? privateContractRateUgx : deterministicRateUgx;
+    const pricePrivacyMode = normalizePricePrivacyMode(ambassador.price_privacy_mode);
     return {
         pricing_mode: privateContractRateUgx > 0
             ? 'CUSTOM_RATE'
@@ -370,13 +852,15 @@ async function buildPrivatePricingQuote(client, distributor, mediaType, platform
         private_contract_rate_ugx: privateContractRateUgx,
         deterministic_rate_ugx: deterministicRateUgx,
         selected_rate_ugx: selectedRateUgx,
+        official_price_ugx: selectedRateUgx,
         proven_engagements_24h: provenEngagements24h,
         pricing_reference_engagements_24h: pricingReferenceEngagements24h,
         impression_target: Math.max(1, pricingReferenceEngagements24h),
+        price_privacy_mode: pricePrivacyMode,
+        negotiation_allowed: pricePrivacyMode === 'NEGOTIABLE',
     };
 }
-async function findDistributorByPhone(client, rawPhone) {
-    const phone = normalizePhone(rawPhone);
+async function findAmbassadorById(client, ambassadorId) {
     const hasFullName = await usersHasColumn(client, 'full_name');
     const fullNameSelect = hasFullName
         ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
@@ -388,22 +872,325 @@ async function findDistributorByPhone(client, rawPhone) {
       u.phone,
       COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
       COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
       ${fullNameSelect} AS full_name,
       COALESCE(p.avatar_url, '') AS avatar_url,
       u.email
     FROM users u
     LEFT JOIN user_profiles p ON p.user_id = u.id
-    WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9+]', '', 'g') = $1
-      AND u.role IN ('DISTRIBUTOR', 'DUAL_USER', 'ADMIN')
+    ${buildActiveViewerVerificationJoin('u')}
+    WHERE (u.id::text = $1 OR COALESCE(NULLIF(u.public_id, ''), '') = $1)
+      AND u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
     LIMIT 1
-    `, [phone]);
+    `, [ambassadorId]);
     return res.rows[0] ?? null;
 }
-async function loadEditableCampaign(client, campaignId, advertiserId) {
+async function findAmbassadorByPhone(client, rawPhone) {
+    const phoneVariants = buildPhoneLookupVariants(rawPhone);
+    if (phoneVariants.length === 0) {
+        return null;
+    }
+    const hasFullName = await usersHasColumn(client, 'full_name');
+    const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+    const res = await client.query(`
+    SELECT
+      u.id,
+      u.public_id,
+      u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
+      ${fullNameSelect} AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email
+    FROM users u
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
+    WHERE regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($1::text[])
+      AND u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
+    LIMIT 1
+    `, [phoneVariants]);
+    return res.rows[0] ?? null;
+}
+async function findAmbassadorBySearch(client, rawQuery) {
+    const query = String(rawQuery ?? '').trim();
+    if (!query) {
+        return null;
+    }
+    const directPhoneMatch = await findAmbassadorByPhone(client, query);
+    if (directPhoneMatch) {
+        return directPhoneMatch;
+    }
+    const directReferenceMatch = await findAmbassadorById(client, query);
+    if (directReferenceMatch) {
+        return directReferenceMatch;
+    }
+    const hasFullName = await usersHasColumn(client, 'full_name');
+    const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+    const searchTerms = splitSearchTerms(query);
+    const searchPattern = `%${query}%`;
+    const phoneVariants = buildPhoneLookupVariants(query);
+    const params = [query, searchPattern];
+    const termClauses = [];
+    for (const term of searchTerms) {
+        params.push(`%${term}%`);
+        termClauses.push(`${fullNameSelect} ILIKE $${params.length}`);
+    }
+    let phoneSearchSql = '';
+    if (phoneVariants.length > 0) {
+        params.push(phoneVariants);
+        phoneSearchSql = `
+      OR regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = ANY($${params.length}::text[])
+    `;
+    }
+    const tokenSearchSql = termClauses.length > 0 ? `OR (${termClauses.join(' AND ')})` : '';
+    const res = await client.query(`
+    SELECT
+      u.id,
+      u.public_id,
+      u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+      ${buildViewerVerificationFields()},
+      ${fullNameSelect} AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email
+    FROM users u
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    ${buildActiveViewerVerificationJoin('u')}
+    WHERE u.role IN ('AMBASSADOR', 'DUAL_USER', 'ADMIN')
+      AND (
+        LOWER(${fullNameSelect}) = LOWER($1)
+        OR COALESCE(NULLIF(u.public_id, ''), '') = $1
+        OR COALESCE(NULLIF(u.email, ''), '') = $1
+        OR ${fullNameSelect} ILIKE $2
+        OR COALESCE(NULLIF(u.public_id, ''), '') ILIKE $2
+        OR COALESCE(NULLIF(u.email, ''), '') ILIKE $2
+        OR COALESCE(NULLIF(u.phone, ''), '') ILIKE $2
+        ${tokenSearchSql}
+        ${phoneSearchSql}
+      )
+    ORDER BY
+      CASE
+        WHEN LOWER(${fullNameSelect}) = LOWER($1) THEN 0
+        WHEN COALESCE(NULLIF(u.public_id, ''), '') = $1 THEN 0
+        WHEN COALESCE(NULLIF(u.email, ''), '') = $1 THEN 1
+        WHEN ${fullNameSelect} ILIKE $2 THEN 2
+        ELSE 3
+      END,
+      ${fullNameSelect} ASC
+    LIMIT 1
+    `, params);
+    return res.rows[0] ?? null;
+}
+async function listGroupCampaignMembers(client, groupId) {
+    const hasFullName = await usersHasColumn(client, 'full_name');
+    const fullNameSelect = hasFullName
+        ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+        : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+    const res = await client.query(`
+    SELECT
+      membership.user_id,
+      membership.role AS group_role,
+      membership.joined_at,
+      u.id,
+      u.public_id,
+      u.phone,
+      COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+      COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+      COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+      COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+      ${fullNameSelect} AS full_name,
+      COALESCE(p.avatar_url, '') AS avatar_url,
+      u.email,
+      COALESCE(view_stats.views_24h, 0)::int AS verified_views_24h
+    FROM chat_group_memberships membership
+    JOIN users u ON u.id = membership.user_id
+    LEFT JOIN user_profiles p ON p.user_id = u.id
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(COALESCE(pr.observed_views, 0)), 0)::int AS views_24h
+      FROM proofs pr
+      JOIN verification_sessions vs ON vs.id = pr.session_id
+      WHERE pr.user_id = u.id
+        AND pr.status = 'VERIFIED'
+        AND pr.decision = 'VERIFIED'
+        AND pr.created_at >= now() - interval '24 hours'
+        AND vs.platform = 'WHATSAPP_STATUS'
+    ) view_stats ON TRUE
+    WHERE membership.group_id = $1
+      AND membership.status = 'ACTIVE'
+    ORDER BY
+      CASE WHEN membership.role = 'ADMIN' THEN 0 ELSE 1 END,
+      membership.joined_at ASC
+    `, [groupId]);
+    return res.rows;
+}
+async function buildGroupBeneficiaryQuote(client, groupId, mediaType) {
+    const groupRes = await client.query(`
+    SELECT
+      id,
+      public_id,
+      name,
+      description,
+      COALESCE(public_price_ugx, 0)::int AS public_price_ugx
+    FROM chat_groups
+    WHERE id = $1
+    LIMIT 1
+    `, [groupId]);
+    const group = groupRes.rows[0];
+    if (!group) {
+        return null;
+    }
+    const memberRows = await listGroupCampaignMembers(client, groupId);
+    const memberQuotes = [];
+    for (const row of memberRows) {
+        const pricing = await buildPrivatePricingQuote(client, row, mediaType, 'WHATSAPP_STATUS');
+        memberQuotes.push({
+            row,
+            pricing,
+        });
+    }
+    const pricingReferenceTotal = memberQuotes.reduce((sum, entry) => sum + Number(entry.pricing.pricing_reference_engagements_24h ?? 0), 0);
+    const provenTotal = memberQuotes.reduce((sum, entry) => sum + Number(entry.pricing.proven_engagements_24h ?? 0), 0);
+    const derivedOfficialPrice = memberQuotes.reduce((sum, entry) => sum + Number(entry.pricing.selected_rate_ugx ?? 0), 0);
+    const officialPrice = Number(group.public_price_ugx ?? 0) > 0
+        ? Number(group.public_price_ugx ?? 0)
+        : derivedOfficialPrice;
+    const weightValues = memberQuotes.map((entry) => Math.max(1, Number(entry.pricing.pricing_reference_engagements_24h ?? 0)));
+    const budgetShares = distributeIntegerTotal(officialPrice, weightValues);
+    const impressionShares = distributeIntegerTotal(Math.max(pricingReferenceTotal, weightValues.reduce((sum, value) => sum + value, 0)), weightValues);
+    const totalWeight = weightValues.reduce((sum, value) => sum + value, 0);
+    const pricePrivacyMode = resolveGroupPricePrivacyMode(memberQuotes.map((entry) => entry.pricing.price_privacy_mode));
+    const members = memberQuotes.map((entry, index) => {
+        const weight = weightValues[index] ?? 0;
+        const budgetTotal = Math.max(0, Number(budgetShares[index] ?? 0));
+        const impressionTarget = Math.max(1, Number(impressionShares[index] ?? 0));
+        return {
+            ambassador: entry.row,
+            impression_target: impressionTarget,
+            payout_amount: budgetTotal,
+            budget_total: budgetTotal,
+            pricing_mode: entry.pricing.pricing_mode,
+            private_contract_rate_ugx: entry.pricing.private_contract_rate_ugx,
+            deterministic_rate_ugx: entry.pricing.deterministic_rate_ugx,
+            proven_engagements_24h: entry.pricing.proven_engagements_24h,
+            pricing_reference_engagements_24h: entry.pricing.pricing_reference_engagements_24h,
+            price_privacy_mode: normalizePricePrivacyMode(entry.pricing.price_privacy_mode),
+            group_role: String(entry.row.group_role ?? 'MEMBER'),
+            share_percent: totalWeight <= 0 ? 0 : roundPercent((weight / totalWeight) * 100),
+        };
+    });
+    return {
+        group: {
+            id: String(group.id ?? ''),
+            public_id: String(group.public_id ?? ''),
+            name: String(group.name ?? 'ChatBiz Group'),
+            description: String(group.description ?? ''),
+            public_price_ugx: Number(group.public_price_ugx ?? 0),
+        },
+        members,
+        member_count: members.length,
+        official_price_ugx: officialPrice,
+        selected_rate_ugx: officialPrice,
+        pricing_mode: Number(group.public_price_ugx ?? 0) > 0
+            ? 'PUBLIC_GROUP_RATE'
+            : 'AGGREGATED_MEMBER_RATE',
+        price_privacy_mode: pricePrivacyMode,
+        negotiation_allowed: pricePrivacyMode === 'NEGOTIABLE',
+        proven_engagements_24h: provenTotal,
+        pricing_reference_engagements_24h: Math.max(pricingReferenceTotal, weightValues.reduce((sum, value) => sum + value, 0)),
+        impression_target: Math.max(1, pricingReferenceTotal || weightValues.reduce((sum, value) => sum + value, 0)),
+    };
+}
+async function findGroupBeneficiaryIdBySearch(client, rawQuery) {
+    const query = String(rawQuery ?? '').trim();
+    if (!query) {
+        return null;
+    }
+    if (isUuidLike(query)) {
+        return query;
+    }
+    const phoneVariants = buildPhoneLookupVariants(query);
+    const searchTerms = splitSearchTerms(query);
+    const params = [query, `%${query}%`];
+    const memberTermClauses = [];
+    for (const term of searchTerms) {
+        params.push(`%${term}%`);
+        memberTermClauses.push(`COALESCE(NULLIF(member_user.full_name, ''), NULLIF(member_profile.full_name, ''), NULLIF(member_user.email, ''), NULLIF(member_user.phone, ''), '') ILIKE $${params.length}`);
+    }
+    let phoneSearchSql = '';
+    if (phoneVariants.length > 0) {
+        params.push(phoneVariants);
+        phoneSearchSql = `
+      OR regexp_replace(COALESCE(member_user.phone, ''), '[^0-9]', '', 'g') = ANY($${params.length}::text[])
+    `;
+    }
+    const memberTokenSql = memberTermClauses.length > 0
+        ? `OR (${memberTermClauses.join(' AND ')})`
+        : '';
+    const result = await client.query(`
+    SELECT g.id
+    FROM chat_groups g
+    WHERE EXISTS (
+      SELECT 1
+      FROM chat_group_memberships membership
+      WHERE membership.group_id = g.id
+        AND membership.status = 'ACTIVE'
+    )
+      AND (
+        g.id::text = $1
+        OR COALESCE(NULLIF(g.public_id, ''), '') = $1
+        OR g.name ILIKE $2
+        OR g.description ILIKE $2
+        OR EXISTS (
+          SELECT 1
+          FROM chat_group_memberships membership
+          JOIN users member_user ON member_user.id = membership.user_id
+          LEFT JOIN user_profiles member_profile
+            ON member_profile.user_id = membership.user_id
+          WHERE membership.group_id = g.id
+            AND membership.status = 'ACTIVE'
+            AND (
+              COALESCE(NULLIF(member_user.full_name, ''), NULLIF(member_profile.full_name, ''), NULLIF(member_user.email, ''), NULLIF(member_user.phone, ''), '') ILIKE $2
+              OR COALESCE(NULLIF(member_user.phone, ''), '') ILIKE $2
+              OR COALESCE(NULLIF(member_user.public_id, ''), '') ILIKE $2
+              ${memberTokenSql}
+              ${phoneSearchSql}
+            )
+        )
+      )
+    ORDER BY
+      CASE
+        WHEN g.id::text = $1 THEN 0
+        WHEN COALESCE(NULLIF(g.public_id, ''), '') = $1 THEN 0
+        WHEN LOWER(g.name) = LOWER($1) THEN 1
+        WHEN g.name ILIKE $2 THEN 2
+        ELSE 3
+      END,
+      g.updated_at DESC,
+      g.created_at DESC
+    LIMIT 1
+    `, params);
+    return result.rows[0]?.id ? String(result.rows[0].id) : null;
+}
+async function loadEditableCampaign(client, campaignId, businessId) {
     const root = await new CampaignRepo().getCampaign(client, campaignId);
     if (!root)
         return { error: 'campaign_not_found' };
-    if (root.advertiser_id !== advertiserId)
+    if (root.business_id !== businessId)
         return { error: 'forbidden' };
     if (root.parent_campaign_id)
         return { error: 'campaign_edit_root_only' };
@@ -491,6 +1278,15 @@ function normalizeBeneficiaryContacts(body) {
         .map((value) => normalizePhone(String(value ?? '')))
         .filter(Boolean)));
 }
+function normalizeBeneficiaryUserIds(body) {
+    return Array.from(new Set((body.beneficiary_user_ids ?? [])
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)));
+}
+function normalizeBeneficiaryGroupId(body) {
+    const groupId = String(body.beneficiary_group_id ?? '').trim();
+    return groupId.length > 0 ? groupId : null;
+}
 function distributeIntegerTotal(total, weights) {
     if (weights.length === 0) {
         return [];
@@ -531,16 +1327,16 @@ function distributeIntegerTotal(total, weights) {
     }
     return shares;
 }
-async function resolvePrivateDistributorShares(client, beneficiaryContacts, mediaType, platform) {
+async function resolvePrivateAmbassadorShares(client, beneficiaryContacts, mediaType, platform) {
     const shares = [];
     for (const phone of beneficiaryContacts) {
-        const distributor = await findDistributorByPhone(client, phone);
-        if (!distributor) {
+        const ambassador = await findAmbassadorByPhone(client, phone);
+        if (!ambassador) {
             throw new Error(`beneficiary_not_found:${phone}`);
         }
-        const pricing = await buildPrivatePricingQuote(client, distributor, mediaType, platform);
+        const pricing = await buildPrivatePricingQuote(client, ambassador, mediaType, platform);
         shares.push({
-            distributor,
+            ambassador,
             impression_target: pricing.impression_target,
             payout_amount: pricing.selected_rate_ugx,
             budget_total: pricing.selected_rate_ugx,
@@ -552,6 +1348,108 @@ async function resolvePrivateDistributorShares(client, beneficiaryContacts, medi
         });
     }
     return shares;
+}
+async function resolvePrivateAmbassadorSharesByUserId(client, beneficiaryUserIds, mediaType, platform) {
+    const shares = [];
+    for (const userId of beneficiaryUserIds) {
+        const ambassador = await findAmbassadorById(client, userId);
+        if (!ambassador) {
+            throw new Error(`beneficiary_not_found:${userId}`);
+        }
+        const pricing = await buildPrivatePricingQuote(client, ambassador, mediaType, platform);
+        shares.push({
+            ambassador,
+            impression_target: pricing.impression_target,
+            payout_amount: pricing.selected_rate_ugx,
+            budget_total: pricing.selected_rate_ugx,
+            pricing_mode: pricing.pricing_mode,
+            private_contract_rate_ugx: pricing.private_contract_rate_ugx,
+            deterministic_rate_ugx: pricing.deterministic_rate_ugx,
+            proven_engagements_24h: pricing.proven_engagements_24h,
+            pricing_reference_engagements_24h: pricing.pricing_reference_engagements_24h,
+        });
+    }
+    return shares;
+}
+async function resolvePrivateGroupAmbassadorShares(client, beneficiaryGroupId, mediaType) {
+    const groupQuote = await buildGroupBeneficiaryQuote(client, beneficiaryGroupId, mediaType);
+    if (!groupQuote) {
+        throw new Error('group_not_found');
+    }
+    if (groupQuote.member_count <= 0 || groupQuote.members.length == 0) {
+        throw new Error('group_beneficiary_empty');
+    }
+    const shares = groupQuote.members.map((member) => ({
+        ambassador: member.ambassador,
+        impression_target: member.impression_target,
+        payout_amount: member.payout_amount,
+        budget_total: member.budget_total,
+        pricing_mode: member.pricing_mode,
+        private_contract_rate_ugx: member.private_contract_rate_ugx,
+        deterministic_rate_ugx: member.deterministic_rate_ugx,
+        proven_engagements_24h: member.proven_engagements_24h,
+        pricing_reference_engagements_24h: member.pricing_reference_engagements_24h,
+    }));
+    return { groupQuote, shares };
+}
+async function resolvePrivateContractSelection(client, options, mediaType, platform) {
+    if (options.beneficiaryGroupId) {
+        const groupResult = await resolvePrivateGroupAmbassadorShares(client, options.beneficiaryGroupId, mediaType);
+        return {
+            privateShares: groupResult.shares,
+            privateGroupQuote: groupResult.groupQuote,
+        };
+    }
+    const byUserId = await resolvePrivateAmbassadorSharesByUserId(client, options.beneficiaryUserIds, mediaType, platform);
+    const byPhone = await resolvePrivateAmbassadorShares(client, options.beneficiaryContacts, mediaType, platform);
+    const merged = new Map();
+    for (const share of [...byUserId, ...byPhone]) {
+        const ambassadorId = String(share.ambassador.id ?? '').trim();
+        if (!ambassadorId || merged.has(ambassadorId)) {
+            continue;
+        }
+        merged.set(ambassadorId, share);
+    }
+    return {
+        privateShares: Array.from(merged.values()),
+        privateGroupQuote: null,
+    };
+}
+function buildPrivateBeneficiaryMeta(privateShares) {
+    return privateShares.map((share) => ({
+        ambassador_id: String(share.ambassador.id ?? ''),
+        ambassador_public_id: String(share.ambassador.public_id ?? ''),
+        full_name: String(share.ambassador.full_name ?? share.ambassador.phone ?? ''),
+        phone: String(share.ambassador.phone ?? ''),
+        pricing_mode: share.pricing_mode,
+        private_contract_rate_ugx: share.private_contract_rate_ugx,
+        deterministic_rate_ugx: share.deterministic_rate_ugx,
+        selected_rate_ugx: share.budget_total,
+        proven_engagements_24h: share.proven_engagements_24h,
+        pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
+        impression_target: share.impression_target,
+    }));
+}
+function buildPrivateGroupMeta(groupQuote) {
+    if (!groupQuote) {
+        return null;
+    }
+    return {
+        id: groupQuote.group.id,
+        public_id: groupQuote.group.public_id,
+        name: groupQuote.group.name,
+        description: groupQuote.group.description,
+        public_price_ugx: groupQuote.group.public_price_ugx,
+        selected_rate_ugx: groupQuote.selected_rate_ugx,
+        official_price_ugx: groupQuote.official_price_ugx,
+        pricing_mode: groupQuote.pricing_mode,
+        price_privacy_mode: groupQuote.price_privacy_mode,
+        negotiation_allowed: groupQuote.negotiation_allowed,
+        proven_engagements_24h: groupQuote.proven_engagements_24h,
+        pricing_reference_engagements_24h: groupQuote.pricing_reference_engagements_24h,
+        impression_target: groupQuote.impression_target,
+        member_count: groupQuote.member_count,
+    };
 }
 async function loadBundleSummary(client, bundleId, userId) {
     const bundleRes = await client.query(`
@@ -573,13 +1471,13 @@ async function loadBundleSummary(client, bundleId, userId) {
         bundle_id: bundleId,
         bundle_root_campaign_id: ownerCampaignId,
         title: String(campaigns[0]?.title ?? 'Campaign bundle'),
-        advertiser_id: String(campaigns[0]?.advertiser_id ?? ''),
+        business_id: String(campaigns[0]?.business_id ?? ''),
         total_budget: campaigns.reduce((sum, row) => sum + Number(row.budget_total ?? 0), 0),
         escrow_status: String(escrow?.status ?? 'PENDING'),
         amount_total: Number(escrow?.amount_total ?? 0),
         amount_available: Number(escrow?.amount_available ?? 0),
         campaigns: campaigns.map((row) => ({
-            ...row,
+            ...withCampaignMediaUrls(row),
             status_summary: summaries.get(String(row.id)) ?? {
                 campaign_status: String(row.status ?? 'ACTIVE'),
                 escrow_status: String(escrow?.status ?? 'PENDING'),
@@ -594,12 +1492,12 @@ async function loadBundleSummary(client, bundleId, userId) {
         })),
     };
 }
-async function loadBundleForAdvertiser(client, bundleId, advertiserId, role) {
-    const bundle = await loadBundleSummary(client, bundleId, advertiserId);
+async function loadBundleForBusiness(client, bundleId, businessId, role) {
+    const bundle = await loadBundleSummary(client, bundleId, businessId);
     if (!bundle) {
         return { error: 'campaign_bundle_not_found' };
     }
-    if (bundle.advertiser_id !== advertiserId && role !== 'ADMIN') {
+    if (bundle.business_id !== businessId && role !== 'ADMIN') {
         return { error: 'forbidden' };
     }
     const ownerCampaignRes = await client.query(`
@@ -652,6 +1550,7 @@ async function buildCampaignStatusSummary(client, campaignId, userId) {
         my_contract_status: null,
         proof_status: 'NOT_SUBMITTED',
         settlement_status: 'AWAITING_FUNDING',
+        funding_confirmed: false,
         is_available: false,
     });
 }
@@ -659,12 +1558,18 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
     if (campaignIds.length === 0) {
         return new Map();
     }
+    await ensureCampaignExecutionMetaColumn(client);
     const statusRes = await client.query(`
     WITH
     scope AS (
       SELECT
+        c.id,
         c.id AS campaign_id,
-        COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id,
+        c.parent_campaign_id,
+        c.bundle_root_campaign_id,
+        c.execution_meta,
+        ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id,
+        c.campaign_bundle_id,
         c.status AS campaign_status,
         (c.parent_campaign_id IS NULL) AS is_root
       FROM campaigns c
@@ -686,12 +1591,13 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
       s.campaign_status,
       s.campaign_id,
       COALESCE(e.status, 'PENDING') AS escrow_status,
+      COALESCE(fc.funding_confirmed, FALSE) AS funding_confirmed,
       lc.status AS latest_contract_status,
       mc.status AS my_contract_status,
       lp.status AS latest_proof_status,
       lp.decision AS latest_proof_decision
     FROM scope s
-    LEFT JOIN escrow_ledger e ON e.campaign_id = s.escrow_campaign_id
+    LEFT JOIN escrow_ledger e ON e.campaign_id::text = s.escrow_campaign_id
     LEFT JOIN LATERAL (
       SELECT status
       FROM contracts
@@ -723,11 +1629,16 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
       ORDER BY p.created_at DESC
       LIMIT 1
     ) lp ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT TRUE AS funding_confirmed
+      WHERE ${buildConfirmedEscrowEvidenceSql('s', 'e')}
+    ) fc ON TRUE
     `, [campaignIds, userId ?? null]);
     const result = new Map();
     for (const row of statusRes.rows) {
         const campaignStatus = String(row.campaign_status ?? 'ACTIVE');
         const escrowStatus = String(row.escrow_status ?? 'PENDING');
+        const fundingConfirmed = row.funding_confirmed === true;
         const latestContractStatus = String(row.latest_contract_status ?? 'UNCLAIMED');
         const myContractStatus = row.my_contract_status == null ? null : String(row.my_contract_status);
         const proofStatus = deriveProofStatus(row.latest_proof_status
@@ -741,9 +1652,11 @@ export async function buildCampaignStatusSummaries(client, campaignIds, userId) 
             my_contract_status: myContractStatus,
             proof_status: proofStatus,
             settlement_status: settlementStatus,
+            funding_confirmed: fundingConfirmed,
             is_available: campaignStatus === 'ACTIVE' &&
-                escrowStatus !== 'PENDING' &&
-                latestContractStatus === 'UNCLAIMED',
+                fundingConfirmed &&
+                isConfirmedEscrowFundingStatus(escrowStatus) &&
+                (latestContractStatus === 'UNCLAIMED' || latestContractStatus === 'CANCELLED'),
         });
     }
     return result;
@@ -753,7 +1666,7 @@ async function getContractCompletionReadiness(client, contractId, userId) {
     SELECT
       ctr.*,
       c.platform,
-      COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id
+      ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
     WHERE ctr.id=$1
@@ -773,7 +1686,9 @@ async function getContractCompletionReadiness(client, contractId, userId) {
     LIMIT 1
     `, [contract.escrow_campaign_id]);
     const escrow = escrowRes.rows[0];
-    if (!escrow || !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(String(escrow.status))) {
+    if (!escrow ||
+        !isConfirmedEscrowFundingStatus(escrow.status) ||
+        !(await hasConfirmedEscrowFunding(client, contract.campaign_id))) {
         return { error: 'campaign_not_funded' };
     }
     const proofRes = await client.query(`
@@ -792,15 +1707,15 @@ async function getContractCompletionReadiness(client, contractId, userId) {
     }
     return { contract };
 }
-async function getContractForAdvertiserAction(client, contractId, advertiserId, role) {
+async function getContractForBusinessAction(client, contractId, businessId, role) {
     const contractRes = await client.query(`
     SELECT
       ctr.*,
-      c.advertiser_id,
+      c.business_id,
       c.parent_campaign_id,
       c.platform,
       c.budget_total,
-      COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id, c.id) AS escrow_campaign_id
+      ${buildEscrowCampaignIdSql('c')} AS escrow_campaign_id
     FROM contracts ctr
     JOIN campaigns c ON c.id = ctr.campaign_id
     WHERE ctr.id=$1
@@ -809,14 +1724,45 @@ async function getContractForAdvertiserAction(client, contractId, advertiserId, 
     const contract = contractRes.rows[0];
     if (!contract)
         return { error: 'contract_not_found' };
-    if (contract.advertiser_id !== advertiserId && role !== 'ADMIN') {
+    if (contract.business_id !== businessId && role !== 'ADMIN') {
         return { error: 'forbidden' };
     }
     return { contract };
 }
 export async function campaignRoutes(app) {
-    await withTransaction(async (client) => {
-        await ensureCampaignColumns(client);
+    let schemaReadyPromise = null;
+    const ensureCampaignRoutesSchema = () => {
+        if (!schemaReadyPromise) {
+            schemaReadyPromise = withTransaction(async (client) => {
+                await ensureCampaignColumns(client);
+                await ensureChatSchema(client);
+                await ensureUserProfilesTable(client);
+                await ensureViewerVerificationSchema(client);
+            }).catch((error) => {
+                schemaReadyPromise = null;
+                throw error;
+            });
+        }
+        return schemaReadyPromise;
+    };
+    app.addHook('onListen', async () => {
+        if (process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1') {
+            return;
+        }
+        try {
+            await ensureCampaignRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'startup warmup failed for campaign schema');
+        }
+    });
+    app.addHook('preHandler', async () => {
+        try {
+            await ensureCampaignRoutesSchema();
+        }
+        catch (error) {
+            app.log.error({ err: error }, 'campaign routes schema check failed — proceeding');
+        }
     });
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();
@@ -834,21 +1780,24 @@ export async function campaignRoutes(app) {
         visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
         counterparty_contact: z.string().trim().min(7).max(20).optional(),
         beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
+        beneficiary_user_ids: z.array(z.string().uuid()).optional(),
+        beneficiary_group_id: z.string().uuid().optional(),
         start_date: z.string(),
         end_date: z.string(),
         media_type: MediaTypeSchema,
         media_url: z.string().url().optional(),
+        media_urls: z.array(z.string().url()).max(8).optional(),
         media_text: z.string().trim().min(3).max(4000).optional(),
         execution_meta: z.record(z.any()).optional(),
         impression_target: z.number().int().min(1).optional(),
         platform_fee_percent: z.number().min(0).max(100).optional(),
-        advertiser_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
+        business_wallet_mode: z.enum(['CAMPAIGN_ONLY']).optional(),
         terms_keep_hours: z.number().int().min(1).max(168).optional(),
         terms_min_views: z.number().int().min(1).optional().nullable(),
         terms_requirement: z.enum(['DURATION', 'VIEWS', 'BOTH']).optional(),
     })
         .superRefine((value, ctx) => {
-        const hasMediaUrl = typeof value.media_url === 'string' && value.media_url.trim().length > 0;
+        const hasMediaUrl = primaryCampaignMediaUrl(value) != null;
         const hasMediaText = typeof value.media_text === 'string' &&
             value.media_text.trim().length > 0;
         if (!hasMediaUrl && !hasMediaText) {
@@ -860,23 +1809,43 @@ export async function campaignRoutes(app) {
         }
     });
     const FundBundleSchema = FundCampaignSchema.omit({ campaign_id: true });
-    const LookupDistributorSchema = z.object({
-        phone: z.string().trim().min(7).max(20),
+    const LookupAmbassadorSchema = z
+        .object({
+        q: z.string().trim().min(1).max(120).optional(),
+        phone: z.string().trim().min(7).max(20).optional(),
+        user_id: z.string().uuid().optional(),
         media_type: MediaTypeSchema.optional(),
+    })
+        .refine((value) => Boolean(value.q || value.phone || value.user_id), {
+        message: 'Either q, phone or user_id is required.',
+        path: ['q'],
     });
-    app.get('/campaigns/distributor-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const LookupGroupSchema = z
+        .object({
+        q: z.string().trim().min(1).max(120).optional(),
+        group_id: z.string().uuid().optional(),
+        group_public_id: z.string().trim().min(3).max(64).optional(),
+        media_type: MediaTypeSchema.optional(),
+    })
+        .refine((value) => Boolean(value.q || value.group_id || value.group_public_id), {
+        message: 'Either q, group_id or group_public_id is required.',
+        path: ['q'],
+    });
+    app.get('/campaigns/ambassador-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
         const role = request.user?.role;
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
-        const parsed = LookupDistributorSchema.safeParse(request.query);
+        const parsed = LookupAmbassadorSchema.safeParse(request.query);
         if (!parsed.success) {
             reply.code(400);
             return { error: 'validation_failed', issues: parsed.error.issues };
         }
-        const distributor = await withTransaction(async (client) => {
-            const found = await findDistributorByPhone(client, String(parsed.data.phone));
+        const ambassador = await withTransaction(async (client) => {
+            const found = parsed.data.user_id
+                ? await findAmbassadorById(client, String(parsed.data.user_id))
+                : await findAmbassadorBySearch(client, String(parsed.data.q ?? parsed.data.phone ?? ''));
             if (!found) {
                 return null;
             }
@@ -886,14 +1855,95 @@ export async function campaignRoutes(app) {
                 ...pricing,
             };
         });
-        if (!distributor) {
+        if (!ambassador) {
             reply.code(404);
-            return { error: 'distributor_not_found' };
+            return { error: 'ambassador_not_found' };
         }
-        return { distributor };
+        return { ambassador };
+    });
+    app.get('/ambassadors/lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const role = request.user?.role;
+        if (!canAccessBusinessFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        const parsed = LookupAmbassadorSchema.safeParse(request.query);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const profile = await withTransaction(async (client) => {
+            const found = parsed.data.user_id
+                ? await findAmbassadorById(client, String(parsed.data.user_id))
+                : await findAmbassadorBySearch(client, String(parsed.data.q ?? parsed.data.phone ?? ''));
+            if (!found) {
+                return null;
+            }
+            const pricing = await buildPrivatePricingQuote(client, found, parsed.data.media_type ?? 'IMAGE', 'WHATSAPP_STATUS');
+            return {
+                ...found,
+                ...pricing,
+                display_name: String(found.full_name ?? '').trim() || String(found.phone ?? '').trim(),
+            };
+        });
+        if (!profile) {
+            reply.code(404);
+            return { error: 'ambassador_not_found' };
+        }
+        return { profile };
+    });
+    app.get('/campaigns/group-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const role = request.user?.role;
+        if (!canAccessBusinessFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        const parsed = LookupGroupSchema.safeParse(request.query);
+        if (!parsed.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsed.error.issues };
+        }
+        const group = await withTransaction(async (client) => {
+            const resolvedGroupId = parsed.data.group_id ??
+                (parsed.data.group_public_id
+                    ? await findGroupBeneficiaryIdBySearch(client, String(parsed.data.group_public_id))
+                    : parsed.data.q
+                        ? await findGroupBeneficiaryIdBySearch(client, String(parsed.data.q))
+                        : null);
+            if (!resolvedGroupId) {
+                return null;
+            }
+            return buildGroupBeneficiaryQuote(client, String(resolvedGroupId), parsed.data.media_type ?? 'IMAGE');
+        });
+        if (!group) {
+            reply.code(404);
+            return { error: 'group_not_found' };
+        }
+        if (group.member_count <= 0) {
+            reply.code(409);
+            return { error: 'group_beneficiary_empty' };
+        }
+        return { group };
+    });
+    app.get('/campaigns/public-contract-eligibility', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access'
+            ? '00000000-0000-0000-0000-000000000000'
+            : authSub;
+        const role = request.user?.role;
+        if (!authUser) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (!canAccessBusinessFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        return withTransaction(async (client) => getPublicContractEligibility(client));
     });
     app.get('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         const query = (request.query ?? {});
         const limitRaw = Number(query.limit ?? 50);
@@ -901,8 +1951,8 @@ export async function campaignRoutes(app) {
         const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
         const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
         const campaigns = await withTransaction(async (client) => {
-            if (role === 'DISTRIBUTOR') {
-                const restriction = await getUserAccountRestriction(client, authUser, 'distributor');
+            if (role === 'AMBASSADOR') {
+                const restriction = await getUserAccountRestriction(client, authUser, 'ambassador');
                 if (restriction) {
                     return restriction;
                 }
@@ -920,9 +1970,10 @@ export async function campaignRoutes(app) {
                 params.push(query.status);
                 idx++;
             }
-            if (role === 'DISTRIBUTOR') {
+            filters.push(`c.platform = '${ACTIVE_CAMPAIGN_PLATFORM}'`);
+            if (role === 'AMBASSADOR') {
                 filters.push(`(
-          (c.parent_campaign_id IS NOT NULL AND c.assigned_distributor_id = $${idx})
+          (c.parent_campaign_id IS NOT NULL AND c.assigned_ambassador_id = $${idx})
           OR (
             c.parent_campaign_id IS NULL
             AND c.execution_mode != 'OPEN_BUDGET'
@@ -933,13 +1984,13 @@ export async function campaignRoutes(app) {
                 idx++;
             }
             else if (role !== 'ADMIN') {
-                filters.push(`c.advertiser_id = $${idx}`);
+                filters.push(`c.business_id = $${idx}`);
                 params.push(authUser ?? '');
                 idx++;
                 filters.push(`c.parent_campaign_id IS NULL`);
             }
             const availableOnly = (query.available_only ?? 'true').toString().toLowerCase();
-            if (role === 'DISTRIBUTOR' && availableOnly !== 'false') {
+            if (role === 'AMBASSADOR' && availableOnly !== 'false') {
                 filters.push(`c.status='ACTIVE'`);
                 filters.push(`NOT EXISTS (
              SELECT 1
@@ -948,7 +1999,7 @@ export async function campaignRoutes(app) {
                AND ctr.status = 'ACTIVE'
            )`);
             }
-            if (role === 'DISTRIBUTOR') {
+            if (role === 'AMBASSADOR') {
                 filters.push(`(
           c.platform = 'WHATSAPP_STATUS'
           OR EXISTS (
@@ -975,9 +2026,9 @@ export async function campaignRoutes(app) {
           SELECT c2.id
           FROM campaigns c2
           LEFT JOIN escrow_ledger e
-            ON e.campaign_id = COALESCE(c2.bundle_root_campaign_id, c2.parent_campaign_id, c2.id)
-          WHERE e.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
-             OR c2.advertiser_id = $${idx}
+            ON e.campaign_id::text = ${buildEscrowCampaignIdSql('c2')}
+          WHERE (${buildConfirmedEscrowEvidenceSql('c2', 'e')})
+             OR c2.business_id = $${idx}
         )
         ${where ? `AND ${where.replace(/^WHERE /, '')}` : ''}
         ORDER BY c.created_at DESC
@@ -985,7 +2036,7 @@ export async function campaignRoutes(app) {
         `, [...params, authUser ?? '', limit, offset]);
             const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), authUser ?? null);
             const campaignsWithStatus = res.rows.map((row) => ({
-                ...row,
+                ...withCampaignMediaUrls(row),
                 status_summary: statusSummaries.get(String(row.id)) ?? {
                     campaign_status: String(row.status ?? 'ACTIVE'),
                     escrow_status: 'PENDING',
@@ -993,6 +2044,7 @@ export async function campaignRoutes(app) {
                     my_contract_status: null,
                     proof_status: 'NOT_SUBMITTED',
                     settlement_status: 'AWAITING_FUNDING',
+                    funding_confirmed: false,
                     is_available: false,
                 },
             }));
@@ -1006,11 +2058,12 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         const campaign = await withTransaction(async (client) => {
-            if (role === 'DISTRIBUTOR') {
-                const restriction = await getUserAccountRestriction(client, authUser, 'distributor');
+            if (role === 'AMBASSADOR') {
+                const restriction = await getUserAccountRestriction(client, authUser, 'ambassador');
                 if (restriction) {
                     return restriction;
                 }
@@ -1018,10 +2071,15 @@ export async function campaignRoutes(app) {
             const found = await campaignRepo.getCampaign(client, params.id);
             if (!found)
                 return null;
+            if (String(found.platform ?? '').trim().toUpperCase() !==
+                ACTIVE_CAMPAIGN_PLATFORM &&
+                role !== 'ADMIN') {
+                return null;
+            }
             if (found.visibility === 'PRIVATE' &&
-                found.assigned_distributor_id &&
-                found.assigned_distributor_id !== authUser &&
-                found.advertiser_id !== authUser) {
+                found.assigned_ambassador_id &&
+                found.assigned_ambassador_id !== authUser &&
+                found.business_id !== authUser) {
                 return null;
             }
             const activeContract = await client.query(`SELECT *
@@ -1030,10 +2088,10 @@ export async function campaignRoutes(app) {
            AND status='ACTIVE'
          ORDER BY created_at DESC`, [found.id]);
             const activeContractRow = activeContract.rows[0] ?? null;
-            const beneficiaries = found.advertiser_id === authUser && !found.parent_campaign_id
+            const beneficiaries = found.business_id === authUser && !found.parent_campaign_id
                 ? (await client.query(`SELECT
                    c.id,
-                   c.assigned_distributor_id,
+                   c.assigned_ambassador_id,
                    c.assigned_phone,
                    COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
                    COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
@@ -1043,19 +2101,20 @@ export async function campaignRoutes(app) {
                    c.execution_meta
                  FROM campaigns
                  c
-                 LEFT JOIN users u ON u.id = c.assigned_distributor_id
-                 LEFT JOIN user_profiles p ON p.user_id = c.assigned_distributor_id
+                 LEFT JOIN users u ON u.id = c.assigned_ambassador_id
+                 LEFT JOIN user_profiles p ON p.user_id = c.assigned_ambassador_id
                  WHERE c.parent_campaign_id=$1
                  ORDER BY c.created_at ASC`, [found.id])).rows
                 : [];
-            const managedContracts = found.advertiser_id === authUser
+            const managedContracts = found.business_id === authUser
                 ? (await client.query(`
                 SELECT
                   c.id AS campaign_id,
                   c.public_id AS campaign_public_id,
                   c.title AS campaign_title,
+                  c.platform,
                   c.assigned_phone,
-                  c.assigned_distributor_id,
+                  c.assigned_ambassador_id,
                   ctr.id AS contract_id,
                   ctr.status AS contract_status,
                   ctr.accepted_at,
@@ -1106,7 +2165,7 @@ export async function campaignRoutes(app) {
                 })
                 : [];
             return {
-                ...found,
+                ...withCampaignMediaUrls(found),
                 beneficiaries,
                 managed_contracts: managedContracts,
                 active_contract: activeContractRow,
@@ -1128,18 +2187,19 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaign-bundles/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
         const result = await withTransaction(async (client) => {
-            return loadBundleForAdvertiser(client, params.id, authUser, role);
+            return loadBundleForBusiness(client, params.id, authUser, role);
         });
         if (result.error) {
             const error = result.error;
@@ -1148,11 +2208,17 @@ export async function campaignRoutes(app) {
                 : 403);
             return { error };
         }
-        return { bundle: result.bundle };
+        return {
+            bundle: {
+                ...result.bundle,
+                campaigns: (result.bundle?.campaigns ?? []).map((row) => withCampaignMediaUrls(row)),
+            },
+        };
     });
     app.get('/campaigns/:id/proofs', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -1161,8 +2227,8 @@ export async function campaignRoutes(app) {
             const campaign = await campaignRepo.getCampaign(client, params.id);
             if (!campaign)
                 return { error: 'campaign_not_found' };
-            if (campaign.advertiser_id !== authUser)
-                return { error: 'not_campaign_advertiser' };
+            if (campaign.business_id !== authUser)
+                return { error: 'not_campaign_business' };
             const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [campaign.id]);
             const campaignIds = campaignIdsRes.rows.map((row) => row.id);
             const res = await client.query(`SELECT p.id,
@@ -1175,8 +2241,8 @@ export async function campaignRoutes(app) {
                 p.meta,
                 p.created_at,
                 s.platform,
-                u.id AS distributor_id,
-                u.email AS distributor_email
+                u.id AS ambassador_id,
+                u.email AS ambassador_email
          FROM proofs p
          JOIN verification_sessions s ON s.id = p.session_id
          JOIN users u ON u.id = p.user_id
@@ -1192,7 +2258,8 @@ export async function campaignRoutes(app) {
     });
     app.get('/campaigns/:id/proofs/summary', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -1203,8 +2270,8 @@ export async function campaignRoutes(app) {
                 const campaign = await campaignRepo.getCampaign(client, params.id);
                 if (!campaign)
                     return { error: 'campaign_not_found' };
-                if (campaign.advertiser_id !== authUser) {
-                    return { error: 'not_campaign_advertiser' };
+                if (campaign.business_id !== authUser) {
+                    return { error: 'not_campaign_business' };
                 }
                 const scopeId = campaign.parent_campaign_id ?? campaign.id;
                 const campaignIdsRes = await client.query(`SELECT id FROM campaigns WHERE id=$1 OR parent_campaign_id=$1`, [scopeId]);
@@ -1250,7 +2317,7 @@ export async function campaignRoutes(app) {
             app.log.error({
                 error,
                 campaignId: params.id,
-                advertiserId: authUser,
+                businessId: authUser,
             }, 'campaign_proofs_summary_failed');
             reply.code(200);
             return {
@@ -1280,41 +2347,68 @@ export async function campaignRoutes(app) {
             return { error: 'validation_failed', issues: parsedBody.error.issues };
         }
         const body = parsedBody.data;
-        const authUser = request.user?.sub;
+        const requestedPlatforms = resolveRequestedPlatforms(body);
+        if (!hasOnlyActiveCampaignPlatforms(requestedPlatforms)) {
+            reply.code(400);
+            return {
+                error: 'platform_temporarily_unavailable',
+                detail: TEMPORARY_PLATFORM_INCORPORATION_DETAIL,
+            };
+        }
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
-        const restriction = await withTransaction(async (client) => getUserAccountRestriction(client, authUser, 'advertiser'));
+        const restriction = await withTransaction(async (client) => getUserAccountRestriction(client, authUser, 'business'));
         if (restriction) {
             reply.code(403);
             return restriction;
         }
+        const bundleItems = buildBundleItems(body);
+        const requiresPublicContractEligibility = bundleItems.some((item) => resolveExecutionMode(String(item.platform), item.execution_mode) === 'OPEN_BUDGET');
+        if (requiresPublicContractEligibility) {
+            const eligibility = await withTransaction(async (client) => getPublicContractEligibility(client));
+            if (!eligibility.eligible) {
+                reply.code(409);
+                return {
+                    error: 'public_contract_ambassador_threshold_unmet',
+                    ...eligibility,
+                };
+            }
+        }
         let campaign;
         try {
             campaign = await withTransaction(async (client) => {
-                const bundleItems = buildBundleItems(body);
-                const requestedPlatforms = normalizePlatformList(bundleItems.map((item) => item.platform));
-                if (requestedPlatforms.length !== bundleItems.length) {
+                const bundlePlatforms = normalizePlatformList(bundleItems.map((item) => item.platform));
+                if (bundlePlatforms.length !== bundleItems.length) {
                     throw new Error('duplicate_bundle_platform');
                 }
                 const bundleId = bundleItems.length > 1 ? uuid() : null;
                 const createdRootCampaigns = [];
+                const assignmentNotices = new Map();
+                const smsJobs = [];
                 let bundleRootCampaignId = null;
                 let totalEscrowAmount = 0;
                 for (const item of bundleItems) {
                     const executionMode = resolveExecutionMode(item.platform, item.execution_mode);
                     const beneficiaryContacts = normalizeBeneficiaryContacts(item);
+                    const beneficiaryUserIds = normalizeBeneficiaryUserIds(item);
+                    const beneficiaryGroupId = normalizeBeneficiaryGroupId(item);
                     const deliveryModel = resolveDeliveryModel(item.platform, item.delivery_model);
                     const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
                         ? Math.max(PRIVATE_CONTRACT_WINDOW_HOURS, Number(item.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS))
                         : Number(item.terms_keep_hours ?? 12);
-                    if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
+                    if (executionMode === 'PRIVATE_CONTRACT' &&
+                        beneficiaryContacts.length === 0 &&
+                        beneficiaryUserIds.length === 0 &&
+                        !beneficiaryGroupId) {
                         throw new Error('private_beneficiary_required');
                     }
                     let platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
@@ -1326,9 +2420,16 @@ export async function campaignRoutes(app) {
                     let estimatedAllocationCount = 1;
                     let perAllocationTarget = resolvedImpressionTarget;
                     let privateShares = [];
+                    let privateGroupQuote = null;
                     let privateBeneficiaryMeta = [];
                     if (executionMode === 'PRIVATE_CONTRACT') {
-                        privateShares = await resolvePrivateDistributorShares(client, beneficiaryContacts, item.media_type, item.platform);
+                        const privateSelection = await resolvePrivateContractSelection(client, {
+                            beneficiaryContacts,
+                            beneficiaryUserIds,
+                            beneficiaryGroupId,
+                        }, item.media_type, item.platform);
+                        privateShares = privateSelection.privateShares;
+                        privateGroupQuote = privateSelection.privateGroupQuote;
                         resolvedBudgetTotal = privateShares.reduce((sum, share) => sum + Number(share.budget_total ?? 0), 0);
                         distributableBudget = resolvedBudgetTotal;
                         resolvedRootPayout = privateShares.reduce((sum, share) => sum + Number(share.payout_amount ?? 0), 0);
@@ -1337,21 +2438,7 @@ export async function campaignRoutes(app) {
                         perAllocationTarget = Math.max(1, Math.ceil(resolvedImpressionTarget / estimatedAllocationCount));
                         visibility = 'PRIVATE';
                         platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
-                        privateBeneficiaryMeta = privateShares.map((share) => ({
-                            distributor_id: String(share.distributor.id ?? ''),
-                            distributor_public_id: String(share.distributor.public_id ?? ''),
-                            full_name: String(share.distributor.full_name ??
-                                share.distributor.phone ??
-                                ''),
-                            phone: String(share.distributor.phone ?? ''),
-                            pricing_mode: share.pricing_mode,
-                            private_contract_rate_ugx: share.private_contract_rate_ugx,
-                            deterministic_rate_ugx: share.deterministic_rate_ugx,
-                            selected_rate_ugx: share.budget_total,
-                            proven_engagements_24h: share.proven_engagements_24h,
-                            pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
-                            impression_target: share.impression_target,
-                        }));
+                        privateBeneficiaryMeta = buildPrivateBeneficiaryMeta(privateShares);
                     }
                     else {
                         const publicBudget = deriveCampaignBudget(item.platform, executionMode, item.budget_total, item.payout_amount, item.impression_target, item.media_type);
@@ -1364,13 +2451,18 @@ export async function campaignRoutes(app) {
                         estimatedAllocationCount = publicBudget.estimatedAllocationCount;
                         perAllocationTarget = publicBudget.perAllocationTarget;
                     }
+                    const resolvedMediaUrls = normalizeCampaignMediaUrls(item);
+                    const resolvedMediaUrl = primaryCampaignMediaUrl(item);
                     const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, executionMode === 'PRIVATE_CONTRACT'
                         ? {
                             private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
-                            private_pricing_model: 'PROMOTER_RATE',
+                            private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
+                            private_pricing_model: 'AMBASSADOR_RATE',
                             private_beneficiaries: privateBeneficiaryMeta,
+                            private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
                             private_total_rate_ugx: resolvedBudgetTotal,
                             private_total_proven_engagements_24h: resolvedImpressionTarget,
+                            media_urls: resolvedMediaUrls,
                         }
                         : isCreatorPlatform(item.platform) &&
                             executionMode === 'OPEN_BUDGET'
@@ -1380,15 +2472,17 @@ export async function campaignRoutes(app) {
                                 per_creator_target_metric: perAllocationTarget,
                                 target_metric_total: resolvedImpressionTarget,
                                 public_contract_rate_ugx: getPublicContractUnitRate(item.media_type),
+                                media_urls: resolvedMediaUrls,
                             }
                             : {
                                 public_contract_rate_ugx: getPublicContractUnitRate(item.media_type),
+                                media_urls: resolvedMediaUrls,
                             });
                     const campaignBurstMode = getCampaignBurstMode({
                         execution_meta: executionMeta,
                     });
                     const root = await campaignRepo.createCampaign(client, {
-                        advertiser_id: authUser,
+                        business_id: authUser,
                         campaign_bundle_id: bundleId,
                         bundle_root_campaign_id: bundleRootCampaignId,
                         title: String(item.title ?? body.title),
@@ -1400,10 +2494,10 @@ export async function campaignRoutes(app) {
                         budget_total: resolvedBudgetTotal,
                         impression_target: resolvedImpressionTarget,
                         platform_fee_percent: platformFeePercent,
-                        advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+                        business_wallet_mode: 'CAMPAIGN_ONLY',
                         media_type: item.media_type,
                         media_text: item.media_text,
-                        media_url: item.media_url,
+                        media_url: resolvedMediaUrl ?? undefined,
                         execution_meta: executionMeta,
                         campaign_burst_mode: campaignBurstMode,
                         terms_keep_hours: resolvedTermsKeepHours,
@@ -1436,12 +2530,12 @@ export async function campaignRoutes(app) {
                                 pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
                             });
                             await campaignRepo.createCampaign(client, {
-                                advertiser_id: authUser,
+                                business_id: authUser,
                                 campaign_bundle_id: bundleId,
                                 bundle_root_campaign_id: bundleRootCampaignId,
                                 parent_campaign_id: root.id,
-                                assigned_distributor_id: share.distributor.id,
-                                assigned_phone: share.distributor.phone,
+                                assigned_ambassador_id: share.ambassador.id,
+                                assigned_phone: share.ambassador.phone,
                                 title: String(item.title ?? body.title),
                                 platform: item.platform,
                                 delivery_model: deliveryModel,
@@ -1451,10 +2545,10 @@ export async function campaignRoutes(app) {
                                 budget_total: share.budget_total,
                                 impression_target: share.impression_target,
                                 platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
-                                advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+                                business_wallet_mode: 'CAMPAIGN_ONLY',
                                 media_type: item.media_type,
                                 media_text: item.media_text,
-                                media_url: item.media_url,
+                                media_url: resolvedMediaUrl ?? undefined,
                                 execution_meta: childExecutionMeta,
                                 campaign_burst_mode: campaignBurstMode,
                                 terms_keep_hours: resolvedTermsKeepHours,
@@ -1463,9 +2557,10 @@ export async function campaignRoutes(app) {
                                 start_date: item.start_date,
                                 end_date: item.end_date,
                             });
+                            collectAssignmentNotice(assignmentNotices, share.ambassador.id, String(item.title ?? body.title));
                         }
                     }
-                    createdRootCampaigns.push({
+                    createdRootCampaigns.push(withCampaignMediaUrls({
                         ...root,
                         campaign_bundle_id: bundleId,
                         bundle_root_campaign_id: bundleRootCampaignId,
@@ -1475,9 +2570,60 @@ export async function campaignRoutes(app) {
                         estimated_minimum_users: estimatedAllocationCount,
                         estimated_allocations: estimatedAllocationCount,
                         per_allocation_target: perAllocationTarget,
-                    });
+                    }));
                 }
-                await paymentRepo.createEscrow(client, bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''), bundleId ? totalEscrowAmount : Number(createdRootCampaigns[0]?.budget_total ?? 0));
+                const singleRootCampaign = createdRootCampaigns[0];
+                const privateBeneficiaryCount = Array.isArray(singleRootCampaign?.execution_meta?.private_beneficiaries)
+                    ? singleRootCampaign.execution_meta.private_beneficiaries.length
+                    : 0;
+                const reusedFunding = !bundleId &&
+                    createdRootCampaigns.length === 1 &&
+                    singleRootCampaign &&
+                    privateBeneficiaryCount <= 1
+                    ? await tryReuseDeclinedPrivateContractFunding({
+                        client,
+                        businessId: authUser,
+                        rootCampaignId: String(singleRootCampaign.id),
+                        requiredAmount: Number(singleRootCampaign.budget_total ?? 0),
+                        executionMeta: singleRootCampaign.execution_meta,
+                    })
+                    : null;
+                if (reusedFunding) {
+                    createdRootCampaigns[0] = {
+                        ...createdRootCampaigns[0],
+                        funding_reused: true,
+                        funding_reused_from_escrow_campaign_id: reusedFunding.escrowCampaignId,
+                    };
+                }
+                else {
+                    await paymentRepo.createEscrow(client, bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''), bundleId
+                        ? totalEscrowAmount
+                        : Number(createdRootCampaigns[0]?.budget_total ?? 0));
+                }
+                // Set approval status based on admin_settings
+                const settingRes = await client.query(`SELECT value FROM admin_settings WHERE key='campaign_approval_mode' LIMIT 1`);
+                const approvalMode = settingRes.rows[0]?.value ?? 'MANUAL';
+                const isAutoApproval = approvalMode === 'AUTO';
+                const approvalRoot = bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? '');
+                if (isAutoApproval) {
+                    await client.query(`UPDATE campaigns SET approval_status='APPROVED', approved_at=now()
+             WHERE bundle_root_campaign_id=$1 OR id=$1`, [approvalRoot]);
+                    for (const c of createdRootCampaigns) {
+                        c.approval_status = 'APPROVED';
+                    }
+                }
+                else {
+                    await client.query(`UPDATE campaigns
+             SET approval_status='PENDING_APPROVAL',
+                 approval_deadline=NULL,
+                 approved_at=NULL
+             WHERE bundle_root_campaign_id=$1 OR id=$1`, [approvalRoot]);
+                    for (const c of createdRootCampaigns) {
+                        c.approval_status = 'PENDING_APPROVAL';
+                    }
+                    smsJobs.push(...await planCampaignPendingReviewDelivery(client, authUser, approvalRoot, String(createdRootCampaigns[0]?.title ?? body.title)));
+                }
+                smsJobs.push(...await planCampaignAssignmentDeliveries(client, assignmentNotices, approvalRoot, !isAutoApproval));
                 if (bundleId && bundleRootCampaignId) {
                     await client.query(`
             UPDATE campaigns
@@ -1490,10 +2636,12 @@ export async function campaignRoutes(app) {
                         campaign: createdRootCampaigns[0],
                         campaigns: bundle?.campaigns ?? createdRootCampaigns,
                         bundle,
+                        smsJobs,
                     };
                 }
                 return {
                     campaign: createdRootCampaigns[0],
+                    smsJobs,
                 };
             });
         }
@@ -1511,21 +2659,47 @@ export async function campaignRoutes(app) {
                 detail: normalizedError === message ? message : '',
             };
         }
-        return campaign;
+        queueSmsDispatch(campaign.smsJobs ?? [], request.log, 'campaigns:create');
+        const { smsJobs: _smsJobs, ...response } = campaign;
+        return response;
     });
     app.patch('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const body = UpdateCampaignSchema.parse(request.body);
+        const parsedBody = UpdateCampaignSchema.safeParse(request.body);
+        if (!parsedBody.success) {
+            reply.code(400);
+            return { error: 'validation_failed', issues: parsedBody.error.issues };
+        }
+        const body = parsedBody.data;
+        if (!hasOnlyActiveCampaignPlatforms(normalizePlatformList([body.platform]))) {
+            reply.code(400);
+            return {
+                error: 'platform_temporarily_unavailable',
+                detail: TEMPORARY_PLATFORM_INCORPORATION_DETAIL,
+            };
+        }
         const platformKey = String(body.platform);
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
+        }
+        const requestedExecutionMode = resolveExecutionMode(platformKey, body.execution_mode);
+        if (requestedExecutionMode === 'OPEN_BUDGET') {
+            const eligibility = await withTransaction(async (client) => getPublicContractEligibility(client));
+            if (!eligibility.eligible) {
+                reply.code(409);
+                return {
+                    error: 'public_contract_ambassador_threshold_unmet',
+                    ...eligibility,
+                };
+            }
         }
         try {
             const campaign = await withTransaction(async (client) => {
@@ -1548,13 +2722,18 @@ export async function campaignRoutes(app) {
                         throw new Error('duplicate_bundle_platform');
                     }
                 }
-                const executionMode = resolveExecutionMode(platformKey, body.execution_mode);
+                const executionMode = requestedExecutionMode;
                 const beneficiaryContacts = normalizeBeneficiaryContacts(body);
+                const beneficiaryUserIds = normalizeBeneficiaryUserIds(body);
+                const beneficiaryGroupId = normalizeBeneficiaryGroupId(body);
                 const deliveryModel = resolveDeliveryModel(platformKey, body.delivery_model);
                 const resolvedTermsKeepHours = executionMode === 'PRIVATE_CONTRACT'
                     ? Math.max(PRIVATE_CONTRACT_WINDOW_HOURS, Number(body.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS))
                     : Number(body.terms_keep_hours ?? editable.root.terms_keep_hours ?? 12);
-                if (executionMode === 'PRIVATE_CONTRACT' && beneficiaryContacts.length === 0) {
+                if (executionMode === 'PRIVATE_CONTRACT' &&
+                    beneficiaryContacts.length === 0 &&
+                    beneficiaryUserIds.length === 0 &&
+                    !beneficiaryGroupId) {
                     throw new Error('private_beneficiary_required');
                 }
                 let platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
@@ -1566,9 +2745,16 @@ export async function campaignRoutes(app) {
                 let estimatedAllocationCount = 1;
                 let perAllocationTarget = resolvedImpressionTarget;
                 let privateShares = [];
+                let privateGroupQuote = null;
                 let privateBeneficiaryMeta = [];
                 if (executionMode === 'PRIVATE_CONTRACT') {
-                    privateShares = await resolvePrivateDistributorShares(client, beneficiaryContacts, body.media_type, platformKey);
+                    const privateSelection = await resolvePrivateContractSelection(client, {
+                        beneficiaryContacts,
+                        beneficiaryUserIds,
+                        beneficiaryGroupId,
+                    }, body.media_type, platformKey);
+                    privateShares = privateSelection.privateShares;
+                    privateGroupQuote = privateSelection.privateGroupQuote;
                     resolvedBudgetTotal = privateShares.reduce((sum, share) => sum + Number(share.budget_total ?? 0), 0);
                     distributableBudget = resolvedBudgetTotal;
                     resolvedRootPayout = privateShares.reduce((sum, share) => sum + Number(share.payout_amount ?? 0), 0);
@@ -1577,21 +2763,7 @@ export async function campaignRoutes(app) {
                     perAllocationTarget = Math.max(1, Math.ceil(resolvedImpressionTarget / estimatedAllocationCount));
                     visibility = 'PRIVATE';
                     platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
-                    privateBeneficiaryMeta = privateShares.map((share) => ({
-                        distributor_id: String(share.distributor.id ?? ''),
-                        distributor_public_id: String(share.distributor.public_id ?? ''),
-                        full_name: String(share.distributor.full_name ??
-                            share.distributor.phone ??
-                            ''),
-                        phone: String(share.distributor.phone ?? ''),
-                        pricing_mode: share.pricing_mode,
-                        private_contract_rate_ugx: share.private_contract_rate_ugx,
-                        deterministic_rate_ugx: share.deterministic_rate_ugx,
-                        selected_rate_ugx: share.budget_total,
-                        proven_engagements_24h: share.proven_engagements_24h,
-                        pricing_reference_engagements_24h: share.pricing_reference_engagements_24h,
-                        impression_target: share.impression_target,
-                    }));
+                    privateBeneficiaryMeta = buildPrivateBeneficiaryMeta(privateShares);
                 }
                 else {
                     const publicBudget = deriveCampaignBudget(platformKey, executionMode, Number(body.budget_total), body.payout_amount == null ? null : Number(body.payout_amount), body.impression_target == null
@@ -1614,13 +2786,18 @@ export async function campaignRoutes(app) {
                     currentRootBudget !== nextRootBudget) {
                     return { error: 'campaign_edit_budget_locked' };
                 }
+                const resolvedMediaUrls = normalizeCampaignMediaUrls(body);
+                const resolvedMediaUrl = primaryCampaignMediaUrl(body);
                 const executionMeta = buildCampaignExecutionMeta(platformKey, body.execution_meta, executionMode === 'PRIVATE_CONTRACT'
                     ? {
                         private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
-                        private_pricing_model: 'PROMOTER_RATE',
+                        private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
+                        private_pricing_model: 'AMBASSADOR_RATE',
                         private_beneficiaries: privateBeneficiaryMeta,
+                        private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
                         private_total_rate_ugx: resolvedBudgetTotal,
                         private_total_proven_engagements_24h: resolvedImpressionTarget,
+                        media_urls: resolvedMediaUrls,
                     }
                     : isCreatorPlatform(body.platform) &&
                         executionMode === 'OPEN_BUDGET'
@@ -1630,9 +2807,11 @@ export async function campaignRoutes(app) {
                             per_creator_target_metric: perAllocationTarget,
                             target_metric_total: resolvedImpressionTarget,
                             public_contract_rate_ugx: getPublicContractUnitRate(body.media_type),
+                            media_urls: resolvedMediaUrls,
                         }
                         : {
                             public_contract_rate_ugx: getPublicContractUnitRate(body.media_type),
+                            media_urls: resolvedMediaUrls,
                         });
                 const campaignBurstMode = getCampaignBurstMode({
                     execution_meta: executionMeta,
@@ -1658,7 +2837,7 @@ export async function campaignRoutes(app) {
                terms_requirement=$18,
                start_date=$19,
                end_date=$20,
-               assigned_distributor_id=NULL,
+               assigned_ambassador_id=NULL,
                assigned_phone=NULL
            WHERE id=$1
            RETURNING *`, [
@@ -1674,7 +2853,7 @@ export async function campaignRoutes(app) {
                     platformFeePercent,
                     body.media_type,
                     body.media_text ?? null,
-                    body.media_url ?? null,
+                    resolvedMediaUrl,
                     executionMetaJson,
                     campaignBurstMode,
                     resolvedTermsKeepHours,
@@ -1706,27 +2885,28 @@ export async function campaignRoutes(app) {
                         });
                         await campaignRepo.createCampaign(client, {
                             ...body,
-                            advertiser_id: authUser,
+                            business_id: authUser,
                             campaign_bundle_id: bundleId,
                             bundle_root_campaign_id: getEscrowCampaignId(editable.root),
                             delivery_model: deliveryModel,
                             execution_meta: childExecutionMeta,
                             campaign_burst_mode: campaignBurstMode,
                             parent_campaign_id: editable.root.id,
-                            assigned_distributor_id: share.distributor.id,
-                            assigned_phone: share.distributor.phone,
+                            assigned_ambassador_id: share.ambassador.id,
+                            assigned_phone: share.ambassador.phone,
                             visibility: 'PRIVATE',
                             execution_mode: 'PRIVATE_CONTRACT',
                             payout_amount: share.payout_amount,
                             budget_total: share.budget_total,
                             platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
-                            advertiser_wallet_mode: 'CAMPAIGN_ONLY',
+                            business_wallet_mode: 'CAMPAIGN_ONLY',
                             impression_target: share.impression_target,
+                            media_url: resolvedMediaUrl,
                             terms_keep_hours: resolvedTermsKeepHours,
                         });
                     }
                 }
-                return {
+                return withCampaignMediaUrls({
                     ...updatedRoot,
                     campaign_bundle_id: bundleId,
                     bundle_root_campaign_id: getEscrowCampaignId(editable.root),
@@ -1740,7 +2920,7 @@ export async function campaignRoutes(app) {
                     ...(bundleId
                         ? { bundle: await loadBundleSummary(client, bundleId, authUser) }
                         : {}),
-                };
+                });
             });
             if (campaign.error) {
                 const error = campaign.error;
@@ -1772,13 +2952,14 @@ export async function campaignRoutes(app) {
     });
     app.delete('/campaigns/:id', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -1873,6 +3054,25 @@ export async function campaignRoutes(app) {
         }
         return result;
     });
+    // Campaign approval status polling endpoint
+    app.get('/campaigns/:id/approval', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const params = request.params;
+        return withTransaction(async (client) => {
+            const res = await client.query(`SELECT id, approval_status, approval_deadline, approved_at FROM campaigns WHERE id=$1 LIMIT 1`, [params.id]);
+            const campaign = res.rows[0];
+            if (!campaign) {
+                reply.code(404);
+                return { error: 'campaign_not_found' };
+            }
+            return {
+                campaign_id: campaign.id,
+                approval_status: campaign.approval_status,
+                approval_deadline: campaign.approval_deadline,
+                approved_at: campaign.approved_at,
+                is_approved: ['APPROVED', 'AUTO_APPROVED'].includes(campaign.approval_status),
+            };
+        });
+    });
     app.post('/campaign-bundles/:id/fund', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
         const body = FundBundleSchema.parse(request.body);
@@ -1889,13 +3089,14 @@ export async function campaignRoutes(app) {
             return { error: 'payment_redirect_urls_invalid' };
         }
         const result = await withTransaction(async (client) => {
-            const authUser = request.user?.sub;
+            const authSub = request.user?.sub;
+            const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
             const role = request.user?.role;
             if (!authUser) {
                 reply.code(401);
                 return { error: 'unauthorized' };
             }
-            if (!canAccessAdvertiserFeatures(role)) {
+            if (!canAccessBusinessFeatures(role)) {
                 reply.code(403);
                 return { error: 'forbidden' };
             }
@@ -1909,7 +3110,7 @@ export async function campaignRoutes(app) {
                 return { error: 'user_email_missing' };
             }
             const firstName = (userEmail ?? 'user@example.com').split('@')[0] ?? 'User';
-            const loadedBundle = await loadBundleForAdvertiser(client, params.id, authUser, role);
+            const loadedBundle = await loadBundleForBusiness(client, params.id, authUser, role);
             if ('error' in loadedBundle) {
                 reply.code(loadedBundle.error === 'campaign_bundle_not_found' ||
                     loadedBundle.error === 'campaign_not_found'
@@ -1924,6 +3125,16 @@ export async function campaignRoutes(app) {
             if (!escrow) {
                 reply.code(404);
                 return { error: 'escrow_not_found' };
+            }
+            if (isConfirmedEscrowFundingStatus(escrow.status)) {
+                return {
+                    fund_source: fundSource,
+                    funded: true,
+                    already_funded: true,
+                    bundle,
+                    owner_campaign: ownerCampaign,
+                    escrow,
+                };
             }
             if (body.amount !== escrow.amount_total) {
                 reply.code(400);
@@ -1962,11 +3173,11 @@ export async function campaignRoutes(app) {
                     wallet_reference: reference,
                 };
             }
-            if (!hasFlutterwaveClientCredentials()) {
+            if (!hasYoClientCredentials()) {
                 reply.code(503);
-                return { error: 'flutterwave_not_configured' };
+                return { error: 'yo_uganda_not_configured' };
             }
-            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(userCountry, { cardEnabled: hasFlutterwaveEncryptionKey() });
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
             const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -2013,7 +3224,7 @@ export async function campaignRoutes(app) {
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_V4',
+                provider: 'YO_UGANDA',
                 mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
                 amount: body.amount,
@@ -2050,7 +3261,7 @@ export async function campaignRoutes(app) {
         const { checkout_payload: checkoutPayload, pesapalTxn, bundle, owner_campaign: ownerCampaign, } = result;
         return {
             checkout_payload: checkoutPayload,
-            flutterwave_txn: pesapalTxn,
+            yo_uganda_txn: pesapalTxn,
             fund_source: fundSource,
             funded: false,
             bundle,
@@ -2076,7 +3287,8 @@ export async function campaignRoutes(app) {
             return { error: 'payment_redirect_urls_invalid' };
         }
         const result = await withTransaction(async (client) => {
-            const authUser = request.user?.sub;
+            const authSub = request.user?.sub;
+            const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
             const role = request.user?.role;
             const userEmailRes = authUser
                 ? await client.query('SELECT email, phone, preferred_currency, country FROM users WHERE id=$1', [authUser])
@@ -2095,9 +3307,13 @@ export async function campaignRoutes(app) {
                 reply.code(404);
                 return { error: 'campaign_not_found' };
             }
-            if (campaign.advertiser_id !== authUser && role !== 'ADMIN') {
+            if (campaign.business_id !== authUser && role !== 'ADMIN') {
                 reply.code(403);
-                return { error: 'not_campaign_advertiser' };
+                return { error: 'not_campaign_business' };
+            }
+            if (campaign.approval_status === 'PENDING_APPROVAL') {
+                reply.code(400);
+                return { error: 'campaign_pending_approval' };
             }
             const bundleId = getCampaignBundleId(campaign);
             const escrowOwnerId = getEscrowCampaignId(campaign);
@@ -2105,6 +3321,15 @@ export async function campaignRoutes(app) {
             if (!escrow) {
                 reply.code(404);
                 return { error: 'escrow_not_found' };
+            }
+            if (isConfirmedEscrowFundingStatus(escrow.status)) {
+                return {
+                    fund_source: fundSource,
+                    funded: true,
+                    already_funded: true,
+                    campaign,
+                    escrow,
+                };
             }
             if (body.amount !== escrow.amount_total) {
                 reply.code(400);
@@ -2144,11 +3369,11 @@ export async function campaignRoutes(app) {
                     wallet_reference: reference,
                 };
             }
-            if (!hasFlutterwaveClientCredentials()) {
+            if (!hasYoClientCredentials()) {
                 reply.code(503);
-                return { error: 'flutterwave_not_configured' };
+                return { error: 'yo_uganda_not_configured' };
             }
-            const checkoutProfile = resolveAvailableFlutterwaveCheckoutProfile(userCountry, { cardEnabled: hasFlutterwaveEncryptionKey() });
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
             const paymentCurrency = checkoutProfile.currency;
             const merchantReference = uuid();
             const pesapalTxn = await paymentRepo.createPesaPalTransaction(client, {
@@ -2195,7 +3420,7 @@ export async function campaignRoutes(app) {
                 }),
             ]);
             const checkoutPayload = {
-                provider: 'FLUTTERWAVE_V4',
+                provider: 'YO_UGANDA',
                 mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
                 amount: body.amount,
@@ -2225,7 +3450,7 @@ export async function campaignRoutes(app) {
         const { checkout_payload: checkoutPayload, pesapalTxn } = result;
         return {
             checkout_payload: checkoutPayload,
-            flutterwave_txn: pesapalTxn,
+            yo_uganda_txn: pesapalTxn,
             fund_source: fundSource,
             funded: false,
         };
@@ -2233,18 +3458,19 @@ export async function campaignRoutes(app) {
     app.post('/campaigns/:id/accept', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
         const body = AcceptContractSchema.parse({ campaign_id: params.id });
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessDistributorFeatures(role)) {
+        if (!canAccessAmbassadorFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
         const result = await withTransaction(async (client) => {
-            const restriction = await getUserAccountRestriction(client, authUser, 'distributor');
+            const restriction = await getUserAccountRestriction(client, authUser, 'ambassador');
             if (restriction) {
                 return restriction;
             }
@@ -2256,33 +3482,17 @@ export async function campaignRoutes(app) {
             if (campaign.execution_mode === 'OPEN_BUDGET' && !campaign.parent_campaign_id) {
                 return { error: 'open_campaign_allocation_required' };
             }
-            if (campaign.advertiser_id === authUser) {
+            if (campaign.business_id === authUser) {
                 return { error: 'self_contract_forbidden' };
             }
             if (campaign.visibility === 'PRIVATE' &&
-                campaign.assigned_distributor_id !== authUser &&
+                campaign.assigned_ambassador_id !== authUser &&
                 role !== 'ADMIN') {
                 return { error: 'forbidden' };
             }
-            const escrowOwnerId = getEscrowCampaignId(campaign);
-            const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1', [escrowOwnerId]);
-            const escrow = escrowRes.rows[0];
-            if (!escrow || (escrow.status !== 'FUNDED' && escrow.status !== 'PARTIALLY_DISBURSED')) {
+            const fundingConfirmed = await hasConfirmedEscrowFunding(client, body.campaign_id);
+            if (!fundingConfirmed) {
                 return { error: 'campaign_not_funded' };
-            }
-            const userRes = await client.query('SELECT can_multi_contract FROM users WHERE id=$1', [authUser]);
-            const user = userRes.rows[0];
-            if (!user)
-                return { error: 'user_not_found' };
-            if (!user.can_multi_contract) {
-                const activeCountRes = await client.query(`SELECT COUNT(*)::int AS count
-           FROM contracts
-           WHERE distributor_id=$1
-             AND status='ACTIVE'`, [authUser]);
-                const activeCount = activeCountRes.rows[0]?.count ?? 0;
-                if (activeCount > 0) {
-                    return { error: 'distributor_active_contract_exists' };
-                }
             }
             const activeCampaignContractRes = await client.query(`SELECT id
          FROM contracts
@@ -2315,12 +3525,29 @@ export async function campaignRoutes(app) {
             if (!contractRes.rows[0]) {
                 return { error: 'campaign_already_claimed' };
             }
+            // Credit the ambassador's escrow balance so funds reflect immediately
+            const payoutAmount = Number(campaign.payout_amount ??
+                allocatedViews * getPublicContractUnitRate(campaign.media_type));
+            if (payoutAmount > 0) {
+                await client.query(`UPDATE wallets
+           SET balance_escrow = balance_escrow + $2
+           WHERE user_id = $1`, [authUser, Math.trunc(payoutAmount)]);
+            }
+            // Notify the business that an ambassador accepted the contract
+            await ensureUserSignalSchema(client);
+            const ambassadorName = (await client.query(`SELECT COALESCE(full_name, email) AS name FROM users WHERE id=$1 LIMIT 1`, [authUser])).rows[0]?.name ?? 'An ambassador';
+            await createUserNotifications(client, [campaign.business_id], {
+                category: 'CONTRACT_ACCEPTED',
+                title: 'Contract Accepted',
+                body: `${ambassadorName} has accepted your contract for "${campaign.title ?? 'your campaign'}".`,
+                targetType: 'contract',
+                targetId: contractRes.rows[0].id,
+            });
             return {
                 contract: {
                     ...contractRes.rows[0],
                     allocated_views: allocatedViews,
-                    allocated_value: Number(campaign.payout_amount ??
-                        allocatedViews * getPublicContractUnitRate(campaign.media_type)),
+                    allocated_value: payoutAmount,
                 },
                 campaign: {
                     ...campaign,
@@ -2349,19 +3576,20 @@ export async function campaignRoutes(app) {
     });
     app.post('/contracts/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
         const result = await withTransaction(async (client) => {
-            const contractAccess = await getContractForAdvertiserAction(client, params.id, authUser, role);
+            const contractAccess = await getContractForBusinessAction(client, params.id, authUser, role);
             if ('error' in contractAccess)
                 return contractAccess;
             const contract = contractAccess.contract;
-            const canManage = contract.distributor_id === authUser ||
-                contract.advertiser_id === authUser ||
+            const canManage = contract.ambassador_id === authUser ||
+                contract.business_id === authUser ||
                 role === 'ADMIN';
             if (!canManage)
                 return { error: 'forbidden' };
@@ -2388,10 +3616,24 @@ export async function campaignRoutes(app) {
                 const escrowRes = await client.query('SELECT * FROM escrow_ledger WHERE campaign_id=$1 LIMIT 1', [contract.escrow_campaign_id]);
                 const escrow = escrowRes.rows[0];
                 if (escrow) {
-                    const refund = await refundEscrowAmountToAdvertiser(client, escrow.id, contract.advertiser_id, Number(contract.budget_total ?? 0), `ESCROW_RETURN:CONTRACT_CANCEL:${contract.id}`);
+                    const refund = await refundEscrowAmountToBusiness(client, escrow.id, contract.business_id, Number(contract.budget_total ?? 0), `ESCROW_RETURN:CONTRACT_CANCEL:${contract.id}`);
                     walletRefundedAmount = refund.refunded_amount;
                 }
             }
+            // Send notification to the other party
+            const cancelledBy = contract.ambassador_id === authUser ? 'ambassador' : 'business';
+            const notifyUserId = cancelledBy === 'business' ? contract.ambassador_id : contract.business_id;
+            const campaignTitle = (await client.query('SELECT title FROM campaigns WHERE id=$1 LIMIT 1', [contract.campaign_id])).rows[0]?.title ?? 'a campaign';
+            await ensureUserSignalSchema(client);
+            await createUserNotifications(client, [notifyUserId], {
+                category: 'CONTRACT_CANCELLED',
+                title: cancelledBy === 'business' ? 'Contract Cancelled' : 'Ambassador Withdrew',
+                body: cancelledBy === 'business'
+                    ? `The business has cancelled your contract for "${campaignTitle}". Any funds in escrow have been returned.`
+                    : `The ambassador has cancelled their contract for "${campaignTitle}".`,
+                targetType: 'contract',
+                targetId: contract.id,
+            });
             return {
                 ...updated.rows[0],
                 wallet_refunded_amount: walletRefundedAmount,
@@ -2409,20 +3651,21 @@ export async function campaignRoutes(app) {
     });
     app.post('/contracts/:id/complete', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
         const result = await withTransaction(async (client) => {
-            const contractAccess = await getContractForAdvertiserAction(client, params.id, authUser, role);
+            const contractAccess = await getContractForBusinessAction(client, params.id, authUser, role);
             if ('error' in contractAccess)
                 return contractAccess;
             const accessContract = contractAccess.contract;
-            const readiness = accessContract.distributor_id === authUser
+            const readiness = accessContract.ambassador_id === authUser
                 ? await getContractCompletionReadiness(client, params.id, authUser)
-                : accessContract.advertiser_id === authUser || role === 'ADMIN'
+                : accessContract.business_id === authUser || role === 'ADMIN'
                     ? await (async () => {
                         if (accessContract.status !== 'ACTIVE') {
                             return { error: 'contract_not_active' };
@@ -2435,7 +3678,8 @@ export async function campaignRoutes(app) {
                     `, [accessContract.escrow_campaign_id]);
                         const escrow = escrowRes.rows[0];
                         if (!escrow ||
-                            !['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'].includes(String(escrow.status))) {
+                            !isConfirmedEscrowFundingStatus(escrow.status) ||
+                            !(await hasConfirmedEscrowFunding(client, accessContract.campaign_id))) {
                             return { error: 'campaign_not_funded' };
                         }
                         const proofRes = await client.query(`
@@ -2448,7 +3692,7 @@ export async function campaignRoutes(app) {
                       AND p.decision='VERIFIED'
                     ORDER BY p.created_at DESC
                     LIMIT 1
-                    `, [accessContract.campaign_id, accessContract.distributor_id]);
+                    `, [accessContract.campaign_id, accessContract.ambassador_id]);
                         if (!proofRes.rows[0]) {
                             return { error: 'verified_proof_required' };
                         }
@@ -2492,13 +3736,14 @@ export async function campaignRoutes(app) {
     });
     app.post('/campaigns/:id/cancel', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authUser = request.user?.sub;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
         const role = request.user?.role;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!canAccessAdvertiserFeatures(role)) {
+        if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
         }
@@ -2506,7 +3751,7 @@ export async function campaignRoutes(app) {
             const campaign = await campaignRepo.getCampaign(client, params.id);
             if (!campaign)
                 return { error: 'campaign_not_found' };
-            if (campaign.advertiser_id !== authUser && role !== 'ADMIN') {
+            if (campaign.business_id !== authUser && role !== 'ADMIN') {
                 return { error: 'forbidden' };
             }
             const scopeId = campaign.parent_campaign_id ?? campaign.id;
@@ -2524,7 +3769,7 @@ export async function campaignRoutes(app) {
             const escrow = escrowRes.rows[0];
             let walletRefundedAmount = 0;
             if (escrow) {
-                const refund = await refundEscrowAmountToAdvertiser(client, escrow.id, campaign.advertiser_id, Number(escrow.amount_available ?? 0), `ESCROW_RETURN:CAMPAIGN_CANCEL:${scopeId}`);
+                const refund = await refundEscrowAmountToBusiness(client, escrow.id, campaign.business_id, Number(escrow.amount_available ?? 0), `ESCROW_RETURN:CAMPAIGN_CANCEL:${scopeId}`);
                 walletRefundedAmount = refund.refunded_amount;
             }
             const refreshed = await campaignRepo.getCampaign(client, scopeId);
@@ -2539,5 +3784,226 @@ export async function campaignRoutes(app) {
             return result;
         }
         return { campaign: result };
+    });
+    // ── List all active ambassadors (for beneficiary picker) ────────────────────
+    app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const role = request.user?.role;
+        if (!canAccessBusinessFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        const query = request.query;
+        const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '100', 10) || 100));
+        const offset = Math.max(0, parseInt(query.offset ?? '0', 10) || 0);
+        const searchQ = String(query.q ?? '').trim();
+        return withTransaction(async (client) => {
+            const hasFullName = await usersHasColumn(client, 'full_name');
+            const fullNameSelect = hasFullName
+                ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
+                : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+            const params = [];
+            let whereExtra = '';
+            if (searchQ) {
+                params.push(`%${searchQ}%`);
+                whereExtra = `AND (${fullNameSelect} ILIKE $${params.length} OR LOWER(u.email) LIKE LOWER($${params.length}) OR u.phone LIKE $${params.length})`;
+            }
+            params.push(limit, offset);
+            const res = await client.query(`
+        SELECT
+          u.id,
+          u.public_id,
+          u.phone,
+          u.email,
+          u.status,
+          COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
+          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
+          COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${buildViewerVerificationFields()},
+          ${fullNameSelect} AS full_name,
+          COALESCE(p.avatar_url, '') AS avatar_url
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        ${buildActiveViewerVerificationJoin('u')}
+        WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
+          AND u.status = 'ACTIVE'
+          AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'
+          ${whereExtra}
+        ORDER BY ${fullNameSelect} ASC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+        `, params);
+            return { ambassadors: res.rows };
+        });
+    });
+    // ── Ambassador declines a private contract invitation ───────────────────────
+    app.post('/contracts/:id/decline', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const params = request.params;
+        const authSub = request.user?.sub;
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
+        const role = request.user?.role;
+        if (!authUser) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        if (!canAccessAmbassadorFeatures(role)) {
+            reply.code(403);
+            return { error: 'forbidden' };
+        }
+        return withTransaction(async (client) => {
+            // Find campaign assigned to this ambassador
+            const campaignRes = await client.query(`SELECT
+           c.id,
+           c.public_id,
+           c.title,
+           c.business_id,
+           c.assigned_ambassador_id,
+           c.assigned_phone,
+           c.status,
+           c.execution_mode,
+           c.platform,
+           c.media_type,
+           c.media_url,
+           c.media_text,
+           c.start_date,
+           c.end_date,
+           c.terms_keep_hours,
+           c.terms_min_views,
+           c.terms_requirement,
+           c.payout_amount,
+           c.budget_total,
+           c.impression_target,
+           c.execution_meta,
+           c.parent_campaign_id,
+           c.bundle_root_campaign_id
+         FROM campaigns c
+         WHERE (c.id::text = $1 OR c.public_id = $1)
+           AND c.assigned_ambassador_id = $2
+           AND c.execution_mode = 'PRIVATE_CONTRACT'
+           AND c.status = 'ACTIVE'
+         LIMIT 1`, [params.id, authUser]);
+            const campaign = campaignRes.rows[0];
+            if (!campaign) {
+                reply.code(404);
+                return { error: 'contract_not_found' };
+            }
+            // Cancel the campaign for the ambassador
+            await client.query(`UPDATE campaigns SET status='CANCELLED' WHERE id=$1`, [campaign.id]);
+            // Mark any active contract as declined
+            await client.query(`UPDATE contracts
+         SET status='CANCELLED', cancelled_at=now(), declined_at=now(), declined_by_user_id=$2
+         WHERE campaign_id=$1 AND distributor_id=$2 AND status='ACTIVE'`, [campaign.id, authUser]);
+            const ambassadorRes = await client.query(`
+        SELECT
+          COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email) AS name,
+          COALESCE(p.avatar_url, '') AS avatar_url,
+          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
+          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
+          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode
+        FROM users u
+        LEFT JOIN user_profiles p ON p.user_id = u.id
+        WHERE u.id=$1
+        LIMIT 1
+        `, [authUser]);
+            const ambassador = ambassadorRes.rows[0] ?? {};
+            const ambassadorName = String(ambassador.name ?? 'The ambassador');
+            const executionMeta = campaign.execution_meta && typeof campaign.execution_meta === 'object'
+                ? { ...campaign.execution_meta }
+                : {};
+            const savedAt = new Date().toISOString();
+            const platformKey = String(campaign.platform ?? ACTIVE_CAMPAIGN_PLATFORM)
+                .trim()
+                .toUpperCase() || ACTIVE_CAMPAIGN_PLATFORM;
+            const keepHours = Math.max(1, Number(campaign.terms_keep_hours ?? PRIVATE_CONTRACT_WINDOW_HOURS) || 24);
+            const selectedRate = Math.max(0, Number(campaign.budget_total ?? campaign.payout_amount ?? 0));
+            const beneficiary = {
+                id: authUser,
+                phone: String(campaign.assigned_phone ?? '').trim(),
+                name: ambassadorName,
+                avatar_url: String(ambassador.avatar_url ?? '').trim(),
+                private_contract_rate_ugx: Number(ambassador.private_contract_rate_ugx ?? selectedRate),
+                private_contract_rate_24h_ugx: Number(ambassador.private_contract_rate_24h_ugx ?? 0),
+                price_privacy_mode: String(ambassador.price_privacy_mode ?? 'NEGOTIABLE').toUpperCase(),
+                selected_rate_ugx: selectedRate,
+            };
+            const draftPayload = {
+                version: 1,
+                saved_at: savedAt,
+                server_updated_at: savedAt,
+                title: String(campaign.title ?? '').trim(),
+                step: 1,
+                active_platform: platformKey,
+                selected_platforms: [platformKey],
+                platform_drafts: {
+                    [platformKey]: {
+                        mode: 'PRIVATE_CONTRACT',
+                        mediaType: String(campaign.media_type ?? 'VIDEO').trim().toUpperCase(),
+                        termsRequirement: String(campaign.terms_requirement ?? 'DURATION').trim().toUpperCase(),
+                        mediaUrls: campaign.media_url ? [campaign.media_url] : [],
+                        mediaNames: [],
+                        mediaPaths: [],
+                        mediaMimes: [],
+                        budgetValue: selectedRate,
+                        viewersValue: Math.max(0, Number(campaign.impression_target ?? 0) || 0),
+                        hoursValue: keepHours,
+                        customHours: keepHours.toString(),
+                        payout: selectedRate.toString(),
+                        budget: selectedRate.toString(),
+                        start: campaign.start_date
+                            ? new Date(campaign.start_date).toISOString()
+                            : savedAt,
+                        end: campaign.end_date
+                            ? new Date(campaign.end_date).toISOString()
+                            : new Date(Date.now() + PRIVATE_CONTRACT_WINDOW_HOURS * 60 * 60 * 1000).toISOString(),
+                        counterpartyContact: String(campaign.assigned_phone ?? '').trim(),
+                        target: '',
+                        unitPrice: selectedRate.toString(),
+                        keepHours: keepHours.toString(),
+                        minViews: campaign.terms_min_views == null
+                            ? ''
+                            : String(campaign.terms_min_views),
+                        creativeBrief: String(campaign.media_text ?? ''),
+                        engagementThreshold: String(executionMeta.engagement_threshold ?? '4.0'),
+                        creatorScoreFloor: String(executionMeta.creator_score_floor ?? '70'),
+                        burstWindowMinutes: String(executionMeta.burst_window_minutes ?? '15'),
+                        confirmedBeneficiaries: [beneficiary],
+                        burstMode: Boolean(executionMeta.burst_mode),
+                        xActionType: String(executionMeta.x_action_type ??
+                            'ORIGINAL_TWEET'),
+                        reissueMeta: {
+                            source_campaign_id: campaign.id,
+                            source_campaign_public_id: String(campaign.public_id ?? '').trim(),
+                            source_escrow_campaign_id: getEscrowCampaignId(campaign),
+                            reusable_funding_amount_ugx: selectedRate,
+                            previously_funded: true,
+                        },
+                    },
+                },
+            };
+            await ensureCampaignDraftsTable(client);
+            await client.query(`
+        INSERT INTO campaign_creation_drafts (
+          id,
+          business_id,
+          payload,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+        ON CONFLICT (business_id)
+        DO UPDATE SET
+          payload = EXCLUDED.payload,
+          updated_at = NOW()
+        `, [uuid(), campaign.business_id, JSON.stringify(draftPayload)]);
+            await ensureUserSignalSchema(client);
+            await createUserNotifications(client, [campaign.business_id], {
+                category: 'CONTRACT_DECLINED',
+                title: 'Contract Declined',
+                body: `${ambassadorName} has declined your contract for "${campaign.title ?? 'your campaign'}". The contract has been returned to drafts and its prior funding will be reused when you reassign it.`,
+                targetType: 'campaign',
+                targetId: campaign.id,
+            });
+            return { ok: true };
+        });
     });
 }

@@ -1,5 +1,5 @@
 export type VerificationDecision = 'VERIFIED' | 'REJECTED' | 'MANUAL_REVIEW';
-export type PlatformAdapter = 'WHATSAPP_STATUS' | 'TIKTOK' | 'X';
+export type PlatformAdapter = 'WHATSAPP_STATUS';
 export interface VerificationStep {
     id: string;
     text: string;

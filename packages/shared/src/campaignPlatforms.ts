@@ -1,4 +1,4 @@
-export type CampaignPlatform = 'WHATSAPP_STATUS' | 'TIKTOK' | 'X';
+export type CampaignPlatform = 'WHATSAPP_STATUS';
 export type DeliveryModel = 'DETERMINISTIC' | 'PROBABILISTIC';
 
 type JsonRecord = Record<string, unknown>;
@@ -48,27 +48,18 @@ function readString(value: unknown): string | null {
 }
 
 export function normalizeCampaignPlatform(value: unknown): CampaignPlatform {
-  const platform = String(value ?? '').trim().toUpperCase();
-  if (platform === 'TIKTOK' || platform === 'X') {
-    return platform;
-  }
   return 'WHATSAPP_STATUS';
 }
 
 export function isCreatorPlatform(value: unknown): boolean {
-  return normalizeCampaignPlatform(value) !== 'WHATSAPP_STATUS';
+  return false;
 }
 
 export function resolveDeliveryModel(
   platform: unknown,
   requested?: unknown
 ): DeliveryModel {
-  if (normalizeCampaignPlatform(platform) === 'TIKTOK') {
-    return 'PROBABILISTIC';
-  }
-  return String(requested ?? '').trim().toUpperCase() === 'PROBABILISTIC'
-    ? 'PROBABILISTIC'
-    : 'DETERMINISTIC';
+  return 'DETERMINISTIC';
 }
 
 export function getPublicContractUnitRate(mediaType: unknown): number {
@@ -171,17 +162,6 @@ export function getRequiredLiveHours(campaign: any): number {
 }
 
 export function getPrimaryMetricTarget(campaign: any): number {
-  const platform = normalizeCampaignPlatform(campaign?.platform);
-  if (platform === 'X') {
-    return Math.max(
-      0,
-      Math.round(
-        readNumber(campaign?.impression_target) ??
-          readNumber(campaign?.terms_min_views) ??
-          0
-      )
-    );
-  }
   return Math.max(
     0,
     Math.round(
@@ -232,19 +212,8 @@ export function getSubmissionPrimaryMetric(
   meta: any,
   fallbackMetric?: unknown
 ): number {
-  const platform = normalizeCampaignPlatform(campaign?.platform);
   const metrics = extractMetricsSnapshot(meta);
   const fallback = Math.max(0, Math.round(readNumber(fallbackMetric) ?? 0));
-  if (platform === 'X') {
-    return Math.max(
-      0,
-      Math.round(
-        readNumber(metrics.impressions) ??
-          readNumber(metrics.views) ??
-          fallback
-      )
-    );
-  }
   return Math.max(
     0,
     Math.round(

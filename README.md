@@ -3,20 +3,20 @@
 Prime is a Pan-African escrow and verification infrastructure that formalizes paid social media distribution. It turns informal peer-to-peer promotion into structured, escrow-backed distribution contracts with automated compliance enforcement. The platform enforces distribution integrity, not marketing outcomes.
 
 ## Operating modes
-- Private Contract Mode: Advertisers and distributors negotiate off-platform, then execute via Prime. Funds are held in escrow, and payouts release only after verified compliance (content authenticity, posting duration, and validated impression accumulation). A 15% execution fee is applied to successful settlements.
-- Open Budget Mode: Advertisers deposit a budget and upload content. The system converts funds into a fixed number of verified impressions using a deterministic pricing model. Qualified distributors claim portions of the campaign, and payouts are calculated strictly per verified unit delivered.
+- Private Contract Mode: Businesss and Ambassadors negotiate off-platform, then execute via Prime. Funds are held in escrow, and payouts release only after verified compliance (content authenticity, posting duration, and validated impression accumulation). A 15% execution fee is applied to successful settlements.
+- Open Budget Mode: Businesss deposit a budget and upload content. The system converts funds into a fixed number of verified impressions using a deterministic pricing model. Qualified Ambassadors claim portions of the campaign, and payouts are calculated strictly per verified unit delivered.
 
 ## Verification and risk controls
 - AI-driven verification with human review for anomalies.
 - Media hashing, timestamp checks, minimum duration enforcement, and engagement velocity analysis.
-- Distributor credibility scores based on compliance history and fraud risk weighting.
+- Ambassador credibility scores based on compliance history and fraud risk weighting.
 
 ## Stack
 - Fastify + TypeScript API
 - PostgreSQL
 - Node.js worker for verification jobs
 - Railway deployment
-- PesaPal Aggregator payments
+- YO Uganda mobile money payments
 
 ## Monorepo layout
 - `apps/api` Fastify backend
@@ -34,10 +34,17 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 5. Start worker:
    - `pnpm --filter @prime/worker dev`
 
-## PesaPal sandbox configuration
-- Use PesaPal sandbox credentials.
-- Set `PESAPAL_ENV=sandbox` and `PESAPAL_BASE_URL` to the sandbox API base.
-- Register IPN URL to `/api/payments/pesapal/ipn`.
+## YO Uganda payment configuration
+- Use the Yo merchant portal username and API key for production collections.
+- For production IP whitelisting, set `YO_PROXY_URL` to `http://34.79.189.141:3000/yo`.
+- The final YO task URL resolves to `http://34.79.189.141:3000/yo/ybs/task.php`.
+- `YO_BASE_URL` and `YO_API_URL` remain supported for backward compatibility, but `YO_PROXY_URL` takes priority.
+- Direct YO hosts are rewritten back to the gateway unless `YO_ALLOW_DIRECT_API_BYPASS=true`.
+- Leave `YO_API_URL_FALLBACK` on the gateway unless you explicitly want a different fallback route.
+- Set `YO_API_USERNAME` to the merchant portal username.
+- Set `YO_API_PASSWORD` to the merchant portal API key.
+- `YO_AUTHORIZATION` is optional. If it is unset, the backend falls back to `YO_API_PASSWORD` for the YO `Authorization` field.
+- Collections in this codebase use status polling through `/api/payments/yo-uganda/verify`.
 
 ## Railway deployment
 - Railway uses Nixpacks and reads `railway.json`.
@@ -59,15 +66,15 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `GOOGLE_CLIENT_ID`
   - Google OAuth web client ID used by Firebase Auth. Comma-separate multiple IDs if needed.
 - `FINGERPRINT_PEPPER`
-- `PESAPAL_ENV` (`sandbox|production`)
-- `PESAPAL_BASE_URL`
-- `PESAPAL_CONSUMER_KEY`
-- `PESAPAL_CONSUMER_SECRET`
-- `PESAPAL_IPN_ID`
-- `PESAPAL_CALLBACK_URL`
-- `PESAPAL_PAYOUT_CALLBACK_URL`
-- `PESAPAL_PAYOUT_WEBHOOK_SECRET`
-- `PESAPAL_IPN_WEBHOOK_SECRET`
+- `YO_PROXY_URL`
+- `YO_BASE_URL`
+- `YO_API_URL`
+- `YO_API_URL_FALLBACK`
+- `YO_ALLOW_DIRECT_API_BYPASS`
+- `YO_API_USERNAME`
+- `YO_API_PASSWORD`
+- `YO_AUTHORIZATION`
+- `YO_WEBHOOK_SECRET_HASH`
 
 ### Worker
 - `PORT`
@@ -78,12 +85,14 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `PYTHON_VERIFIER_SCRIPT` (defaults to `apps/worker/scripts/wa_status_verifier.py`)
 - `WA_VERIFIER_FPS`
 - `WA_VERIFIER_MAX_SECONDS`
-- `PESAPAL_ENV`
-- `PESAPAL_BASE_URL`
-- `PESAPAL_CONSUMER_KEY`
-- `PESAPAL_CONSUMER_SECRET`
-- `PESAPAL_PAYOUT_CALLBACK_URL`
-- `PESAPAL_PAYOUT_WEBHOOK_SECRET`
+- `YO_PROXY_URL`
+- `YO_BASE_URL`
+- `YO_API_URL`
+- `YO_ALLOW_DIRECT_API_BYPASS`
+- `YO_API_USERNAME`
+- `YO_API_PASSWORD`
+- `YO_AUTHORIZATION`
+- `YO_WEBHOOK_SECRET_HASH`
 - `API_BASE_URL`
 
 ## Threat model for screen recording verification
@@ -103,7 +112,7 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 
 ## Tests
 - Escrow release idempotency tests
-- PesaPal webhook validation tests
+- YO Uganda payment validation tests
 - Trust score update tests
 - Worker job retry tests
 
