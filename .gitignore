@@ -3,3 +3,5 @@ node_modules/
 apps/*/node_modules/
 **/.vite/
 .codex-tmp/FlareLine/
+.aider*
+.env

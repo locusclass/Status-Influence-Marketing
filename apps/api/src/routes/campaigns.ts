@@ -65,6 +65,23 @@ const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchem
   .map((platform) => `'${platform}'`)
   .join(', ')}))`;
 
+async function ensureAdminWriteAccess(
+  client: any,
+  userId: string,
+  role: string | undefined
+) {
+  if (role !== 'ADMIN') return;
+  const res = await client.query(
+    `SELECT is_observer FROM admin_users WHERE user_id = $1`,
+    [userId]
+  );
+  if (res.rows[0]?.is_observer) {
+    const error = new Error('admin_observer_read_only');
+    (error as any).statusCode = 403;
+    throw error;
+  }
+}
+
 type CampaignStatusSummary = {
   campaign_status: string;
   escrow_status: string;
