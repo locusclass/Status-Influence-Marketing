@@ -30,6 +30,16 @@ const TEMPORARY_PLATFORM_INCORPORATION_DETAIL = 'Support for TikTok and X campai
 const SUPPORTED_PLATFORM_CHECK_SQL = `CHECK (platform IN (${PlatformAdapterSchema.options
     .map((platform) => `'${platform}'`)
     .join(', ')}))`;
+async function ensureAdminWriteAccess(client, userId, role) {
+    if (role !== 'ADMIN')
+        return;
+    const res = await client.query(`SELECT is_observer FROM admin_users WHERE user_id = $1`, [userId]);
+    if (res.rows[0]?.is_observer) {
+        const error = new Error('admin_observer_read_only');
+        error.statusCode = 403;
+        throw error;
+    }
+}
 function collectAssignmentNotice(target, userId, campaignTitle) {
     const normalizedUserId = String(userId ?? '').trim();
     const title = String(campaignTitle ?? '').trim();
@@ -90,6 +100,31 @@ async function planCampaignAssignmentDeliveries(client, assignments, campaignId,
         smsJobs.push(...plan.smsJobs);
     }
     return smsJobs;
+}
+// Sends assignment notifications to all ambassadors assigned to child campaigns
+// of the given root campaign. Called after escrow is funded.
+async function notifyFundedAssignments(client, rootCampaignId) {
+    // Include root campaign itself AND any child campaigns (bundle or multi-unit)
+    const rows = await client.query(`SELECT c.assigned_ambassador_id, c.title
+     FROM campaigns c
+     WHERE (
+       c.id = $1
+       OR c.parent_campaign_id = $1
+       OR c.bundle_root_campaign_id = $1
+     )
+       AND c.assigned_ambassador_id IS NOT NULL
+       AND c.status != 'CANCELLED'`, [rootCampaignId]);
+    if (!rows.rows.length)
+        return [];
+    const notices = new Map();
+    for (const row of rows.rows) {
+        const id = String(row.assigned_ambassador_id);
+        const title = String(row.title ?? '');
+        if (!notices.has(id))
+            notices.set(id, []);
+        notices.get(id).push(title);
+    }
+    return planCampaignAssignmentDeliveries(client, notices, rootCampaignId, false);
 }
 function normalizePhone(input) {
     return normalizePhoneSearchInput(input);
@@ -1973,7 +2008,15 @@ export async function campaignRoutes(app) {
             filters.push(`c.platform = '${ACTIVE_CAMPAIGN_PLATFORM}'`);
             if (role === 'AMBASSADOR') {
                 filters.push(`(
-          (c.parent_campaign_id IS NOT NULL AND c.assigned_ambassador_id = $${idx})
+          (
+            c.parent_campaign_id IS NOT NULL
+            AND c.assigned_ambassador_id = $${idx}
+            AND EXISTS (
+              SELECT 1 FROM escrow_ledger el
+              WHERE el.campaign_id = COALESCE(c.bundle_root_campaign_id, c.parent_campaign_id)
+                AND el.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+            )
+          )
           OR (
             c.parent_campaign_id IS NULL
             AND c.execution_mode != 'OPEN_BUDGET'
@@ -2019,9 +2062,13 @@ export async function campaignRoutes(app) {
             }
             const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
             const res = await client.query(`
-        SELECT c.*
+        SELECT c.*,
+               al.slug AS advert_listing_slug,
+               al.status AS advert_listing_status,
+               al.title AS advert_listing_title
         FROM campaigns c
         LEFT JOIN campaigns parent ON parent.id = c.parent_campaign_id
+        LEFT JOIN advert_listings al ON al.campaign_id = c.id AND al.status != 'CANCELLED'
         WHERE c.id IN (
           SELECT c2.id
           FROM campaigns c2
@@ -2037,6 +2084,9 @@ export async function campaignRoutes(app) {
             const statusSummaries = await buildCampaignStatusSummaries(client, res.rows.map((row) => String(row.id)), authUser ?? null);
             const campaignsWithStatus = res.rows.map((row) => ({
                 ...withCampaignMediaUrls(row),
+                advert_listing_slug: row.advert_listing_slug ?? null,
+                advert_listing_status: row.advert_listing_status ?? null,
+                advert_listing_title: row.advert_listing_title ?? null,
                 status_summary: statusSummaries.get(String(row.id)) ?? {
                     campaign_status: String(row.status ?? 'ACTIVE'),
                     escrow_status: 'PENDING',
@@ -2071,6 +2121,8 @@ export async function campaignRoutes(app) {
             const found = await campaignRepo.getCampaign(client, params.id);
             if (!found)
                 return null;
+            const listingRes = await client.query(`SELECT slug, status, title FROM advert_listings WHERE campaign_id=$1 AND status != 'CANCELLED' LIMIT 1`, [found.id]);
+            const listing = listingRes.rows[0] ?? null;
             if (String(found.platform ?? '').trim().toUpperCase() !==
                 ACTIVE_CAMPAIGN_PLATFORM &&
                 role !== 'ADMIN') {
@@ -2166,6 +2218,9 @@ export async function campaignRoutes(app) {
                 : [];
             return {
                 ...withCampaignMediaUrls(found),
+                advert_listing_slug: listing?.slug ?? null,
+                advert_listing_status: listing?.status ?? null,
+                advert_listing_title: listing?.title ?? null,
                 beneficiaries,
                 managed_contracts: managedContracts,
                 active_contract: activeContractRow,
@@ -2366,7 +2421,10 @@ export async function campaignRoutes(app) {
             reply.code(403);
             return { error: 'forbidden' };
         }
-        const restriction = await withTransaction(async (client) => getUserAccountRestriction(client, authUser, 'business'));
+        const restriction = await withTransaction(async (client) => {
+            await ensureAdminWriteAccess(client, authUser, role);
+            return getUserAccountRestriction(client, authUser, 'business');
+        });
         if (restriction) {
             reply.code(403);
             return restriction;
@@ -2623,7 +2681,8 @@ export async function campaignRoutes(app) {
                     }
                     smsJobs.push(...await planCampaignPendingReviewDelivery(client, authUser, approvalRoot, String(createdRootCampaigns[0]?.title ?? body.title)));
                 }
-                smsJobs.push(...await planCampaignAssignmentDeliveries(client, assignmentNotices, approvalRoot, !isAutoApproval));
+                // Assignment notifications are deferred until escrow is funded —
+                // ambassadors should not be notified before the business has paid.
                 if (bundleId && bundleRootCampaignId) {
                     await client.query(`
             UPDATE campaigns
@@ -3057,7 +3116,9 @@ export async function campaignRoutes(app) {
     // Campaign approval status polling endpoint
     app.get('/campaigns/:id/approval', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
+        const { id: authUser, role } = request.user;
         return withTransaction(async (client) => {
+            await ensureAdminWriteAccess(client, authUser, role);
             const res = await client.query(`SELECT id, approval_status, approval_deadline, approved_at FROM campaigns WHERE id=$1 LIMIT 1`, [params.id]);
             const campaign = res.rows[0];
             if (!campaign) {
@@ -3140,6 +3201,24 @@ export async function campaignRoutes(app) {
                 reply.code(400);
                 return { error: 'amount_mismatch' };
             }
+            // Campaign must have a product page (advert listing) and media before it can be funded
+            const bundleListingCheck = await client.query(`SELECT al.id FROM advert_listings al
+         JOIN campaigns c ON c.id = al.campaign_id
+         WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
+           AND al.status != 'CANCELLED'
+         LIMIT 1`, [bundle.bundle_root_campaign_id ?? bundle.bundle_id]);
+            if (!bundleListingCheck.rows.length) {
+                reply.code(400);
+                return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' };
+            }
+            const bundleMediaCheck = await client.query(`SELECT 1 FROM campaigns
+         WHERE (campaign_bundle_id = $1 OR bundle_root_campaign_id = $1 OR id = $1)
+           AND (media_url IS NOT NULL OR (media_type = 'TEXT' AND media_text IS NOT NULL))
+         LIMIT 1`, [bundle.bundle_root_campaign_id ?? bundle.bundle_id]);
+            if (!bundleMediaCheck.rows.length) {
+                reply.code(400);
+                return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' };
+            }
             if (fundSource === 'WALLET') {
                 const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
                 const lockedWalletRes = await client.query('SELECT * FROM wallets WHERE id=$1 FOR UPDATE', [wallet.id]);
@@ -3165,12 +3244,27 @@ export async function campaignRoutes(app) {
           SET status='FUNDED'
           WHERE id=$1
           `, [escrow.id]);
+                // Activate any DRAFT listings linked to campaigns in this bundle
+                await client.query(`
+          UPDATE advert_listings al
+          SET status = 'ACTIVE',
+              campaign_start_at = COALESCE(c.start_date, now()),
+              campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+              expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+              updated_at = now()
+          FROM campaigns c
+          WHERE al.campaign_id = c.id
+            AND al.status = 'DRAFT'
+            AND (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
+          `, [bundle.bundle_id ?? bundle.bundle_root_campaign_id]);
+                const bundleNotifJobs = await notifyFundedAssignments(client, bundle.bundle_root_campaign_id);
                 return {
                     fund_source: fundSource,
                     funded: true,
                     bundle,
                     owner_campaign: ownerCampaign,
                     wallet_reference: reference,
+                    smsJobs: bundleNotifJobs,
                 };
             }
             if (!hasYoClientCredentials()) {
@@ -3315,6 +3409,18 @@ export async function campaignRoutes(app) {
                 reply.code(400);
                 return { error: 'campaign_pending_approval' };
             }
+            // Campaign must have a product page (advert listing) and media before it can be funded
+            const listingCheck = await client.query(`SELECT id FROM advert_listings WHERE campaign_id = $1 AND status != 'CANCELLED' LIMIT 1`, [campaign.id]);
+            if (!listingCheck.rows.length) {
+                reply.code(400);
+                return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' };
+            }
+            const hasCampaignMedia = (campaign.media_url && String(campaign.media_url).trim() !== '') ||
+                (campaign.media_type === 'TEXT' && campaign.media_text && String(campaign.media_text).trim() !== '');
+            if (!hasCampaignMedia) {
+                reply.code(400);
+                return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' };
+            }
             const bundleId = getCampaignBundleId(campaign);
             const escrowOwnerId = getEscrowCampaignId(campaign);
             const escrow = await paymentRepo.getEscrowByCampaign(client, escrowOwnerId);
@@ -3362,8 +3468,23 @@ export async function campaignRoutes(app) {
           SET status='FUNDED'
           WHERE id=$1
           `, [escrow.id]);
+                // Activate any DRAFT listing linked to this campaign
+                await client.query(`
+          UPDATE advert_listings al
+          SET status = 'ACTIVE',
+              campaign_start_at = COALESCE(c.start_date, now()),
+              campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+              expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+              updated_at = now()
+          FROM campaigns c
+          WHERE al.campaign_id = c.id
+            AND al.status = 'DRAFT'
+            AND c.id = $1
+          `, [campaign.id]);
+                const singleNotifJobs = await notifyFundedAssignments(client, campaign.id);
                 return {
                     fund_source: fundSource,
+                    smsJobs: singleNotifJobs,
                     funded: true,
                     campaign,
                     wallet_reference: reference,
@@ -3787,7 +3908,7 @@ export async function campaignRoutes(app) {
     });
     // ── List all active ambassadors (for beneficiary picker) ────────────────────
     app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const role = request.user?.role;
+        const { id: authUser, role } = request.user;
         if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
@@ -3796,7 +3917,9 @@ export async function campaignRoutes(app) {
         const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '100', 10) || 100));
         const offset = Math.max(0, parseInt(query.offset ?? '0', 10) || 0);
         const searchQ = String(query.q ?? '').trim();
+        const includeUnlisted = query.include_unlisted === 'true';
         return withTransaction(async (client) => {
+            await ensureAdminWriteAccess(client, authUser, role);
             const hasFullName = await usersHasColumn(client, 'full_name');
             const fullNameSelect = hasFullName
                 ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
@@ -3828,20 +3951,26 @@ export async function campaignRoutes(app) {
         ${buildActiveViewerVerificationJoin('u')}
         WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
           AND u.status = 'ACTIVE'
-          AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'
+          ${includeUnlisted
+                ? ''
+                // When searching specifically, also surface DIRECT_ONLY ambassadors —
+                // they want to be found by name/phone but not appear in the default browse.
+                : searchQ
+                    ? `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') IN ('LISTED', 'DIRECT_ONLY')`
+                    : `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'`}
           ${whereExtra}
-        ORDER BY ${fullNameSelect} ASC
+        ORDER BY
+          CASE WHEN viewer_verification.id IS NOT NULL THEN 0 ELSE 1 END ASC,
+          ${fullNameSelect} ASC
         LIMIT $${params.length - 1} OFFSET $${params.length}
         `, params);
-            return { ambassadors: res.rows };
+            return { ambassadors: res.rows, include_unlisted: includeUnlisted };
         });
     });
     // ── Ambassador declines a private contract invitation ───────────────────────
     app.post('/contracts/:id/decline', { preHandler: [app.authenticate] }, async (request, reply) => {
         const params = request.params;
-        const authSub = request.user?.sub;
-        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
-        const role = request.user?.role;
+        const { id: authUser, role } = request.user;
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -3851,6 +3980,7 @@ export async function campaignRoutes(app) {
             return { error: 'forbidden' };
         }
         return withTransaction(async (client) => {
+            await ensureAdminWriteAccess(client, authUser, role);
             // Find campaign assigned to this ambassador
             const campaignRes = await client.query(`SELECT
            c.id,

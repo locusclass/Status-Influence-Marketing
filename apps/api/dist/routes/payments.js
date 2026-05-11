@@ -452,19 +452,70 @@ export async function paymentRoutes(app) {
         if (statusSuccess.has(statusText)) {
             await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'COMPLETED', String(paymentEvent.transactionId));
             await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
+            // Activate any DRAFT listing linked to the funded campaign(s)
+            await client.query(`
+        UPDATE advert_listings al
+        SET status = 'ACTIVE',
+            campaign_start_at = COALESCE(c.start_date, now()),
+            campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+            expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+            updated_at = now()
+        FROM campaigns c
+        WHERE al.campaign_id = c.id
+          AND al.status = 'DRAFT'
+          AND (c.id = $1 OR c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1)
+        `, [escrow.campaign_id]);
+            // Notify assigned ambassadors now that escrow is funded
+            // Include root campaign itself AND any child/bundle campaigns
+            const assignedRows = await client.query(`SELECT c.assigned_ambassador_id, c.title
+         FROM campaigns c
+         WHERE (
+           c.id = $1
+           OR c.parent_campaign_id = $1
+           OR c.bundle_root_campaign_id = $1
+         )
+           AND c.assigned_ambassador_id IS NOT NULL
+           AND c.status != 'CANCELLED'`, [escrow.campaign_id]);
+            const assignmentSmsJobs = [];
+            if (assignedRows.rows.length > 0) {
+                const notices = new Map();
+                for (const row of assignedRows.rows) {
+                    const id = String(row.assigned_ambassador_id);
+                    const title = String(row.title ?? '');
+                    if (!notices.has(id))
+                        notices.set(id, []);
+                    notices.get(id).push(title);
+                }
+                for (const [userId, titles] of notices.entries()) {
+                    const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} campaigns`;
+                    const msgBody = `You have been assigned to ${subject} on Prime Status. Open the app to review and accept the contract.`;
+                    const plan = await createUserNotificationsWithSmsPlan(client, [userId], {
+                        category: 'CAMPAIGN_ASSIGNMENT',
+                        title: 'New campaign assignment',
+                        body: msgBody,
+                        targetType: 'campaign',
+                        targetId: escrow.campaign_id,
+                        meta: { assigned_campaign_titles: titles },
+                    }, { sms: { enabled: true, message: msgBody } });
+                    assignmentSmsJobs.push(...plan.smsJobs);
+                }
+            }
             return {
                 ok: true,
                 type: 'campaign_funding',
                 escrow_id: escrow.id,
-                smsJobs: await planPaymentOutcomeNotification(client, {
-                    userId: String(campaignOwner?.business_id ?? ''),
-                    txRef: String(paymentEvent.reference),
-                    kind: txKind,
-                    status: 'COMPLETED',
-                    amount: Number(txn.amount ?? 0),
-                    campaignId: campaignOwner?.id ? String(campaignOwner.id) : null,
-                    campaignTitle: campaignOwner?.title == null ? null : String(campaignOwner.title),
-                }),
+                smsJobs: [
+                    ...assignmentSmsJobs,
+                    ...await planPaymentOutcomeNotification(client, {
+                        userId: String(campaignOwner?.business_id ?? ''),
+                        txRef: String(paymentEvent.reference),
+                        kind: txKind,
+                        status: 'COMPLETED',
+                        amount: Number(txn.amount ?? 0),
+                        campaignId: campaignOwner?.id ? String(campaignOwner.id) : null,
+                        campaignTitle: campaignOwner?.title == null ? null : String(campaignOwner.title),
+                    }),
+                ],
             };
         }
         if (statusFailure.has(statusText)) {

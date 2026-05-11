@@ -12,6 +12,7 @@ import { ACCOUNT_ROLE_BUSINESS, buildAuthClaims, buildUserSession, canAccessBusi
 import { deleteUserNotification, ensureUserSignalSchema, getActiveBlockingNotice, listUserNotifications, markAllUserNotificationsRead, updateUserNotificationReadState, } from '../services/userSignals.js';
 import { buildCurrentPolicyDocuments, buildPolicyAcceptanceState, CURRENT_PLATFORM_POLICY_VERSION, CURRENT_PRIVACY_POLICY_VERSION, ensurePolicyAcceptanceColumns, policyAcceptanceSelectSql, } from '../services/policies.js';
 import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
+import { resolveUploadedFileUrl } from '../utils.js';
 import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, ensureViewerVerificationSchema, } from '../services/viewerVerification.js';
 const roleInputSchema = z
     .string()
@@ -726,7 +727,7 @@ export async function accountRoutes(app) {
                     kind: 'image',
                     maxBytes: 10 * 1024 * 1024,
                 });
-                avatarUrl = uploaded.fileUrl;
+                avatarUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
             }
             catch (error) {
                 const handled = resolveMediaUploadError(error);
@@ -1003,7 +1004,7 @@ export async function accountRoutes(app) {
                     maxBytes: 0,
                     allowedMimeTypes: ['video/mp4'],
                 });
-                videoUrl = uploaded.fileUrl;
+                videoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
             }
             catch (error) {
                 const handled = resolveMediaUploadError(error);

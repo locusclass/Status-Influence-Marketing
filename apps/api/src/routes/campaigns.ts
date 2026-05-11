@@ -4188,6 +4188,7 @@ export async function campaignRoutes(app: FastifyInstance) {
   // Campaign approval status polling endpoint
   app.get('/campaigns/:id/approval', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
+    const { id: authUser, role } = (request as any).user;
     return withTransaction(async (client) => {
       await ensureAdminWriteAccess(client, authUser, role);
       const res = await client.query(
@@ -5180,7 +5181,7 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   // ── List all active ambassadors (for beneficiary picker) ────────────────────
   app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const role = (request.user as any)?.role as string | undefined;
+    const { id: authUser, role } = (request as any).user;
     if (!canAccessBusinessFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' };
@@ -5250,9 +5251,7 @@ export async function campaignRoutes(app: FastifyInstance) {
   // ── Ambassador declines a private contract invitation ───────────────────────
   app.post('/contracts/:id/decline', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const authSub = (request.user as any)?.sub as string | undefined;
-    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
-    const role = (request.user as any)?.role as string | undefined;
+    const { id: authUser, role } = (request as any).user;
     if (!authUser) {
       reply.code(401);
       return { error: 'unauthorized' };

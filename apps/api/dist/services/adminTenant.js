@@ -10,6 +10,7 @@ const PRIMARY_SUPER_ADMIN = {
     country: 'UG',
     currency: 'UGX',
 };
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function normalizeAccountRole(user) {
     return String(user.role ?? '').trim().toUpperCase();
 }
@@ -342,6 +343,9 @@ function mergeDivisionScopes(persisted, legacy) {
     return Array.from(byId.values());
 }
 export async function loadDashboardAccessContext(client, userId) {
+    if (!UUID_PATTERN.test(String(userId ?? '').trim())) {
+        return null;
+    }
     const res = await client.query(`
     SELECT
       u.id,

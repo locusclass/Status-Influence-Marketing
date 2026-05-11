@@ -4545,7 +4545,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── Admin settings ──────────────────────────────────────────────────────────
 
-  app.get('/admin/settings', { preHandler: [app.adminOnly] }, async () => {
+  app.get('/admin/settings', { preHandler: [app.adminOnly] }, async (request, reply) => {
     return withTransaction(async (client) => {
       await getLiveDashboardAccess(client, request);
       const res = await client.query('SELECT key, value FROM admin_settings');

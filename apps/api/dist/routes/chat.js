@@ -7,6 +7,7 @@ import { CHAT_THREAD_KIND_DIRECT, CHAT_THREAD_KIND_GROUP_DEAL, CHAT_THREAD_KIND_
 import { ensureAmbassadorReviewsSchema, listAmbassadorReviews, loadLatestCompletedContractForReview, loadAmbassadorReviewSummaryMap, } from '../services/ambassadorReviews.js';
 import { buildPhoneLookupVariants, splitSearchTerms, } from '../services/contactLookup.js';
 import { resolveMediaUploadError, storeMultipartMediaFile, } from '../services/mediaUploads.js';
+import { resolveUploadedFileUrl } from '../utils.js';
 import { createUserNotifications } from '../services/userSignals.js';
 import { buildActiveViewerVerificationJoin, buildViewerVerificationFields, } from '../services/viewerVerification.js';
 const groupDealThreadSchema = z.object({
@@ -2119,7 +2120,7 @@ export async function chatRoutes(app) {
                     kind: 'image',
                     maxBytes: 10 * 1024 * 1024,
                 });
-                logoUrl = uploaded.fileUrl;
+                logoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
             }
             catch (error) {
                 const handled = resolveMediaUploadError(error);
@@ -2305,7 +2306,7 @@ export async function chatRoutes(app) {
                     kind: 'image',
                     maxBytes: 10 * 1024 * 1024,
                 });
-                uploadedLogoUrl = uploaded.fileUrl;
+                uploadedLogoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
             }
             catch (error) {
                 const handled = resolveMediaUploadError(error);

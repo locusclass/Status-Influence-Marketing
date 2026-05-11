@@ -9,9 +9,12 @@ import multipart from '@fastify/multipart';
 import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_CONTRACTS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_JOBS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PUBLIC_COMMUNICATION, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WALLETS, ADMIN_MODULE_WITHDRAWALS, } from '@prime/shared';
 import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
-import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes } from './routes/index.js';
+import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes, advertRoutes, } from './routes/index.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
 import { ensureSmsSchema } from './services/smsDispatch.js';
+import { ensurePublicIdColumns } from './services/publicId.js';
+import { ensureAdminOperationsSchema } from './services/adminOperations.js';
+import { ensureAdminHandlerJazSchema } from './services/adminHandlerJaz.js';
 import { ensurePrimarySuperAdmin, hasAdminModuleAccess, resolveLiveDashboardAccess, } from './services/adminTenant.js';
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
@@ -87,6 +90,9 @@ export function buildServer() {
                 await ensureSmsSchema(client);
                 await ensurePolicyAcceptanceColumns(client);
                 await ensurePrimarySuperAdmin(client);
+                await ensurePublicIdColumns(client);
+                await ensureAdminOperationsSchema(client);
+                await ensureAdminHandlerJazSchema(client);
             });
         }
         catch (error) {
@@ -150,6 +156,18 @@ export function buildServer() {
             cb(null, isOriginAllowed(origin));
         },
         credentials: true,
+    });
+    // Belt-and-suspenders: ensure CORS headers are present on every response
+    // including Fastify error responses which can bypass the cors plugin hooks.
+    app.addHook('onSend', async (request, reply) => {
+        const origin = request.headers.origin;
+        if (origin && isOriginAllowed(origin)) {
+            if (!reply.hasHeader('access-control-allow-origin')) {
+                reply.header('Access-Control-Allow-Origin', origin);
+                reply.header('Access-Control-Allow-Credentials', 'true');
+                reply.header('Vary', 'Origin');
+            }
+        }
     });
     app.register(rateLimit, {
         max: 100,
@@ -285,7 +303,6 @@ export function buildServer() {
     };
     const registerApiRoutes = (instance) => {
         if (adminTestRouteProfile) {
-            instance.register(healthRoutes);
             instance.register(adminRoutes);
             instance.register(tenantAdminRoutes);
             return;
@@ -301,6 +318,7 @@ export function buildServer() {
         instance.register(accountRoutes);
         instance.register(adminRoutes);
         instance.register(tenantAdminRoutes);
+        instance.register(advertRoutes);
     };
     // Routes
     registerRootRoutes(app);
