@@ -3246,9 +3246,10 @@ export async function campaignRoutes(app: FastifyInstance) {
       reply.code(403);
       return { error: 'forbidden' };
     }
-    const restriction = await withTransaction(async (client) =>
-      getUserAccountRestriction(client, authUser, 'business')
-    );
+    const restriction = await withTransaction(async (client) => {
+      await ensureAdminWriteAccess(client, authUser, role);
+      return getUserAccountRestriction(client, authUser, 'business');
+    });
     if (restriction) {
       reply.code(403);
       return restriction;
@@ -4188,6 +4189,7 @@ export async function campaignRoutes(app: FastifyInstance) {
   app.get('/campaigns/:id/approval', { preHandler: [app.authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     return withTransaction(async (client) => {
+      await ensureAdminWriteAccess(client, authUser, role);
       const res = await client.query(
         `SELECT id, approval_status, approval_deadline, approved_at FROM campaigns WHERE id=$1 LIMIT 1`,
         [params.id]
@@ -5190,6 +5192,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     const includeUnlisted = query.include_unlisted === 'true';
 
     return withTransaction(async (client) => {
+      await ensureAdminWriteAccess(client, authUser, role);
       const hasFullName = await usersHasColumn(client, 'full_name');
       const fullNameSelect = hasFullName
         ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
@@ -5260,6 +5263,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     return withTransaction(async (client) => {
+      await ensureAdminWriteAccess(client, authUser, role);
       // Find campaign assigned to this ambassador
       const campaignRes = await client.query(
         `SELECT

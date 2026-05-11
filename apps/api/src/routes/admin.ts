@@ -1438,7 +1438,6 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/admin/me', { preHandler: [app.adminOnly] }, async (request, reply) => {
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
 
       const target = await loadManagedAdminTarget(client, access.user_id);
@@ -1457,7 +1456,6 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/admin/modules', { preHandler: [app.adminOnly] }, async (request) => {
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       return {
         modules: adminModuleDefinitions,
@@ -2404,7 +2402,6 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/admin/overview', { preHandler: [app.adminOnly] }, async (request, reply) => {
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_OVERVIEW)) {
         reply.code(403);
@@ -2526,7 +2523,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       
@@ -2615,7 +2611,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       
@@ -2693,7 +2688,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     const scoreRange = parseNumberRange(query?.min_score, query?.max_score);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       const conditions: string[] = [];
@@ -2800,7 +2794,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       const conditions: string[] = [];
@@ -2876,7 +2869,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const range = parseDateRange(query?.from, query?.to);
     const amountRange = parseNumberRange(query?.min_amount, query?.max_amount);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       const conditions: string[] = [];
@@ -2955,7 +2947,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       
@@ -3370,7 +3361,6 @@ export async function adminRoutes(app: FastifyInstance) {
         : 'ACTIVE';
 
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
@@ -3442,7 +3432,6 @@ export async function adminRoutes(app: FastifyInstance) {
     }
 
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
@@ -3521,7 +3510,6 @@ export async function adminRoutes(app: FastifyInstance) {
   app.delete('/admin/user-notices/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
     const params = request.params as { id: string };
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       if (!hasAdminModuleAccess(access, ADMIN_MODULE_PUBLIC_COMMUNICATION)) {
@@ -3688,7 +3676,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       
       const conditions: string[] = [];
@@ -3851,7 +3838,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -4388,7 +4374,6 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/admin/operations/live', { preHandler: [app.adminOnly] }, async (request) => {
     const query = request.query as any;
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       return loadAdminOperationsSnapshot(client, access, {
         includeMessages: parseBooleanFlag(query?.include_messages, true),
@@ -4411,7 +4396,6 @@ export async function adminRoutes(app: FastifyInstance) {
     }
 
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const snapshot = await loadAdminOperationsSnapshot(client, access, {
         includeMessages: false,
@@ -4466,7 +4450,6 @@ export async function adminRoutes(app: FastifyInstance) {
     }
 
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const snapshot = await loadAdminOperationsSnapshot(client, access, {
         includeMessages: false,
@@ -4516,7 +4499,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const params = request.params as { taskKey: string };
 
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const actorId = String((request.user as any).sub ?? '');
       const currentState = await loadAdminOperationTaskState(client, params.taskKey);
@@ -4584,7 +4566,6 @@ export async function adminRoutes(app: FastifyInstance) {
       return { error: 'invalid_body', issues: body.error.issues };
     }
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       if (
         !isSuperDashboardAccess(access) &&
@@ -5111,7 +5092,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -5226,7 +5206,6 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/admin/wallets/:id/txns', { preHandler: [app.adminOnly] }, async (request) => {
     const params = request.params as { id: string };
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const state = {
         conditions: [] as string[],
@@ -5260,7 +5239,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -5369,7 +5347,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
@@ -5434,7 +5411,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const { limit, offset } = parsePaging(query);
     const range = parseDateRange(query?.from, query?.to);
     return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
       const access = await getLiveDashboardAccess(client, request);
       const conditions: string[] = [];
       const params: any[] = [];
