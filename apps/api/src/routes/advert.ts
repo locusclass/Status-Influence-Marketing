@@ -402,6 +402,443 @@ export async function advertRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /api/advert/listings/draft — Create DRAFT listing without campaign (authenticated, BUSINESS only)
+  app.post('/advert/listings/draft', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+
+    const bodySchema = z.object({
+      listing_type_id: z.string().uuid(),
+      title: z.string().min(5).max(150),
+      summary: z.string().min(20).max(300),
+      description: z.string().min(50).max(5000),
+      price: z.number().positive().optional().nullable(),
+      currency: z.string().default('UGX'),
+      is_negotiable: z.boolean().default(false),
+      location_text: z.string().max(200).optional().nullable(),
+      latitude: z.number().optional().nullable(),
+      longitude: z.number().optional().nullable(),
+      cta_whatsapp: z.string().optional().nullable(),
+      cta_phone: z.string().optional().nullable(),
+      cta_email: z.string().email().optional().nullable(),
+      field_values: z.record(z.string()).default({}),
+      ambassador_media: z.array(z.object({
+        url: z.string().url(),
+        media_type: z.enum(['IMAGE', 'VIDEO', 'DOCUMENT']),
+        thumbnail_url: z.string().optional(),
+        file_name: z.string().optional(),
+        mime_type: z.string().optional(),
+        file_size_bytes: z.number().optional(),
+        duration_secs: z.number().optional(),
+      })).max(5).default([]),
+      gallery_media: z.array(z.object({
+        url: z.string().url(),
+        media_type: z.enum(['IMAGE', 'VIDEO', 'DOCUMENT']),
+        thumbnail_url: z.string().optional(),
+        file_name: z.string().optional(),
+        mime_type: z.string().optional(),
+        file_size_bytes: z.number().optional(),
+        duration_secs: z.number().optional(),
+        sort_order: z.number().optional(),
+      })).default([]),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: 'validation_error', details: err.errors ?? err.message });
+    }
+
+    try {
+      const listing = await withTransaction(async (client) => {
+        const userRow = await client.query(
+          `SELECT id, role, active_role FROM users WHERE id = $1`, [userId]
+        );
+        if (!userRow.rows[0]) throw Object.assign(new Error('user_not_found'), { statusCode: 404 });
+        if (!canAccessBusinessFeatures(userRow.rows[0])) {
+          throw Object.assign(new Error('business_role_required'), { statusCode: 403 });
+        }
+
+        const draftCount = await client.query(
+          `SELECT COUNT(*) FROM advert_listings WHERE business_id = $1 AND status = 'DRAFT'`,
+          [userId]
+        );
+        if (parseInt(draftCount.rows[0].count, 10) >= 3) {
+          throw Object.assign(new Error('draft_limit_reached'), { statusCode: 409 });
+        }
+
+        let slug = generateListingSlug(body.title);
+        const slugCheck = await client.query(`SELECT id FROM advert_listings WHERE slug = $1`, [slug]);
+        if (slugCheck.rows.length > 0) {
+          slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
+        }
+
+        const qualityScore = calculateListingQuality({
+          title: body.title, summary: body.summary, description: body.description,
+          price: body.price, location_text: body.location_text,
+          cta_phone: body.cta_phone, cta_whatsapp: body.cta_whatsapp, cta_email: body.cta_email,
+          ambassador_media_count: body.ambassador_media.length,
+          gallery_media_count: body.gallery_media.length,
+          field_values: body.field_values,
+        });
+
+        const listingRow = await client.query(`
+          INSERT INTO advert_listings (
+            id, campaign_id, business_id, listing_type_id, slug,
+            title, summary, description, price, currency,
+            is_negotiable, location_text, latitude, longitude,
+            cta_whatsapp, cta_phone, cta_email, cta_url,
+            status, listing_quality_score
+          ) VALUES (
+            $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14, $15, $16, $17,
+            'DRAFT', $18
+          ) RETURNING *
+        `, [
+          uuid(), userId, body.listing_type_id, slug,
+          body.title, body.summary, body.description, body.price ?? null, body.currency,
+          body.is_negotiable, body.location_text ?? null,
+          body.latitude ?? null, body.longitude ?? null,
+          body.cta_whatsapp ?? null, body.cta_phone ?? null,
+          body.cta_email ?? null, `https://primestatus.site/listing/${slug}`,
+          qualityScore,
+        ]);
+
+        const listingId = listingRow.rows[0].id;
+
+        const fieldEntries = Object.entries(body.field_values).filter(([, v]) => v != null);
+        if (fieldEntries.length > 0) {
+          const params: any[] = [];
+          const rowPlaceholders = fieldEntries.map(([key, value], i) => {
+            const b = i * 4;
+            params.push(uuid(), listingId, key, String(value));
+            return `($${b+1},$${b+2},$${b+3},$${b+4})`;
+          });
+          await client.query(`
+            INSERT INTO advert_listing_field_values (id, listing_id, field_key, field_value)
+            VALUES ${rowPlaceholders.join(',')}
+            ON CONFLICT (listing_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
+          `, params);
+        }
+
+        const allMedia = [
+          ...body.ambassador_media.slice(0, 5).map((m, i) => ({ ...m, pack: 'AMBASSADOR_PACK', order: i })),
+          ...body.gallery_media.map((m, i) => ({ ...m, pack: 'PRODUCT_GALLERY', order: m.sort_order ?? i })),
+        ];
+        if (allMedia.length > 0) {
+          const params: any[] = [];
+          const rowPlaceholders = allMedia.map((m, i) => {
+            const b = i * 11;
+            params.push(
+              uuid(), listingId, m.pack, m.media_type, m.url,
+              (m as any).thumbnail_url ?? null, (m as any).file_name ?? null,
+              (m as any).mime_type ?? null, (m as any).file_size_bytes ?? null,
+              (m as any).duration_secs ?? null, m.order
+            );
+            return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11})`;
+          });
+          await client.query(`
+            INSERT INTO advert_media (
+              id, listing_id, media_pack, media_type, url, thumbnail_url,
+              file_name, mime_type, file_size_bytes, duration_secs, sort_order
+            ) VALUES ${rowPlaceholders.join(',')}
+          `, params);
+        }
+
+        return listingRow.rows[0];
+      });
+
+      return reply.code(201).send({ listing });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'advert.listing.draft.create.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // PATCH /api/advert/listings/:slug/attach-campaign — Link a DRAFT listing to a campaign
+  app.patch('/advert/listings/:slug/attach-campaign', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    const { slug } = request.params as { slug: string };
+
+    const bodySchema = z.object({ campaign_id: z.string().uuid() });
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: 'validation_error', details: err.errors ?? err.message });
+    }
+
+    try {
+      const listing = await withTransaction(async (client) => {
+        const listingRow = await client.query(
+          `SELECT id, business_id, status FROM advert_listings WHERE slug = $1`, [slug]
+        );
+        if (!listingRow.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        if (listingRow.rows[0].business_id !== userId) throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+        if (listingRow.rows[0].status !== 'DRAFT') throw Object.assign(new Error('listing_already_active'), { statusCode: 409 });
+
+        const campRow = await client.query(
+          `SELECT id, business_id FROM campaigns WHERE id = $1`, [body.campaign_id]
+        );
+        if (!campRow.rows[0]) throw Object.assign(new Error('campaign_not_found'), { statusCode: 404 });
+        if (campRow.rows[0].business_id !== userId) throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+
+        const existing = await client.query(
+          `SELECT id FROM advert_listings WHERE campaign_id = $1 AND id != $2`,
+          [body.campaign_id, listingRow.rows[0].id]
+        );
+        if (existing.rows.length > 0) throw Object.assign(new Error('campaign_already_has_listing'), { statusCode: 409 });
+
+        const updated = await client.query(
+          `UPDATE advert_listings SET campaign_id = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+          [body.campaign_id, listingRow.rows[0].id]
+        );
+        return updated.rows[0];
+      });
+      return reply.send({ listing });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'advert.listing.attach.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // PATCH /api/advert/listings/:slug — Update listing content (owner only, DRAFT or ACTIVE)
+  app.patch('/advert/listings/:slug', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    const { slug } = request.params as { slug: string };
+
+    const bodySchema = z.object({
+      title: z.string().min(5).max(150).optional(),
+      summary: z.string().min(20).max(300).optional(),
+      description: z.string().min(50).max(5000).optional(),
+      price: z.number().positive().optional().nullable(),
+      currency: z.string().optional(),
+      is_negotiable: z.boolean().optional(),
+      location_text: z.string().max(200).optional().nullable(),
+      latitude: z.number().optional().nullable(),
+      longitude: z.number().optional().nullable(),
+      cta_whatsapp: z.string().optional().nullable(),
+      cta_phone: z.string().optional().nullable(),
+      cta_email: z.string().email().optional().nullable(),
+      cta_url: z.string().optional().nullable(),
+      field_values: z.record(z.string()).optional(),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: 'validation_error', details: err.errors ?? err.message });
+    }
+
+    try {
+      const listing = await withTransaction(async (client) => {
+        const existingRow = await client.query(
+          `SELECT id, business_id, status, title, summary, description,
+                  price, currency, is_negotiable, location_text,
+                  cta_whatsapp, cta_phone, cta_email, cta_url
+           FROM advert_listings WHERE slug = $1`,
+          [slug]
+        );
+        if (!existingRow.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        if (existingRow.rows[0].business_id !== userId) throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+
+        const existing = existingRow.rows[0];
+
+        // Build SET clause dynamically for only provided fields
+        const setClauses: string[] = ['updated_at = now()'];
+        const params: any[] = [];
+        let idx = 1;
+
+        if (body.title !== undefined)        { setClauses.push(`title = $${idx++}`);         params.push(body.title); }
+        if (body.summary !== undefined)      { setClauses.push(`summary = $${idx++}`);       params.push(body.summary); }
+        if (body.description !== undefined)  { setClauses.push(`description = $${idx++}`);   params.push(body.description); }
+        if ('price' in body)                 { setClauses.push(`price = $${idx++}`);         params.push(body.price ?? null); }
+        if (body.currency !== undefined)     { setClauses.push(`currency = $${idx++}`);      params.push(body.currency); }
+        if (body.is_negotiable !== undefined){ setClauses.push(`is_negotiable = $${idx++}`); params.push(body.is_negotiable); }
+        if ('location_text' in body)         { setClauses.push(`location_text = $${idx++}`); params.push(body.location_text ?? null); }
+        if ('latitude' in body)              { setClauses.push(`latitude = $${idx++}`);      params.push(body.latitude ?? null); }
+        if ('longitude' in body)             { setClauses.push(`longitude = $${idx++}`);     params.push(body.longitude ?? null); }
+        if ('cta_whatsapp' in body)          { setClauses.push(`cta_whatsapp = $${idx++}`);  params.push(body.cta_whatsapp ?? null); }
+        if ('cta_phone' in body)             { setClauses.push(`cta_phone = $${idx++}`);     params.push(body.cta_phone ?? null); }
+        if ('cta_email' in body)             { setClauses.push(`cta_email = $${idx++}`);     params.push(body.cta_email ?? null); }
+        if ('cta_url' in body)               { setClauses.push(`cta_url = $${idx++}`);       params.push(body.cta_url ?? null); }
+
+        // Recalculate quality score with merged values
+        const merged = {
+          title:       body.title ?? existing.title,
+          summary:     body.summary ?? existing.summary,
+          description: body.description ?? existing.description,
+          price:       'price' in body ? body.price : existing.price,
+          location_text: 'location_text' in body ? body.location_text : existing.location_text,
+          cta_phone:   'cta_phone' in body ? body.cta_phone : existing.cta_phone,
+          cta_whatsapp:'cta_whatsapp' in body ? body.cta_whatsapp : existing.cta_whatsapp,
+          cta_email:   'cta_email' in body ? body.cta_email : existing.cta_email,
+        };
+        const mediaCountRow = await client.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE media_pack = 'AMBASSADOR_PACK') AS ambassador_count,
+             COUNT(*) FILTER (WHERE media_pack = 'PRODUCT_GALLERY') AS gallery_count
+           FROM advert_media WHERE listing_id = $1`,
+          [existing.id]
+        );
+        const fvRow = await client.query(
+          `SELECT field_key, field_value FROM advert_listing_field_values WHERE listing_id = $1`,
+          [existing.id]
+        );
+        const existingFieldValues: Record<string, string> = {};
+        for (const fv of fvRow.rows) { existingFieldValues[fv.field_key] = fv.field_value; }
+        const mergedFields = body.field_values ? { ...existingFieldValues, ...body.field_values } : existingFieldValues;
+
+        const newScore = calculateListingQuality({
+          ...merged,
+          ambassador_media_count: Number(mediaCountRow.rows[0]?.ambassador_count ?? 0),
+          gallery_media_count: Number(mediaCountRow.rows[0]?.gallery_count ?? 0),
+          field_values: mergedFields,
+        });
+        setClauses.push(`listing_quality_score = $${idx++}`);
+        params.push(newScore);
+
+        params.push(existing.id);
+        const updatedRow = await client.query(
+          `UPDATE advert_listings SET ${setClauses.join(', ')} WHERE id = $${idx} RETURNING *`,
+          params
+        );
+
+        // Upsert field values if provided
+        if (body.field_values) {
+          const entries = Object.entries(body.field_values).filter(([, v]) => v != null);
+          if (entries.length > 0) {
+            const fvParams: any[] = [];
+            const fvPlaceholders = entries.map(([key, value], i) => {
+              const b = i * 4;
+              fvParams.push(uuid(), existing.id, key, String(value));
+              return `($${b+1},$${b+2},$${b+3},$${b+4})`;
+            });
+            await client.query(`
+              INSERT INTO advert_listing_field_values (id, listing_id, field_key, field_value)
+              VALUES ${fvPlaceholders.join(',')}
+              ON CONFLICT (listing_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
+            `, fvParams);
+          }
+        }
+
+        return updatedRow.rows[0];
+      });
+
+      return reply.send({ listing });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'advert.listing.update.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // POST /api/advert/listings/:slug/media — Add a media item to an existing listing
+  app.post('/advert/listings/:slug/media', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    const { slug } = request.params as { slug: string };
+
+    const bodySchema = z.object({
+      media_pack: z.enum(['AMBASSADOR_PACK', 'PRODUCT_GALLERY']),
+      url: z.string().url(),
+      media_type: z.enum(['IMAGE', 'VIDEO', 'DOCUMENT']),
+      thumbnail_url: z.string().optional().nullable(),
+      file_name: z.string().optional().nullable(),
+      mime_type: z.string().optional().nullable(),
+      file_size_bytes: z.number().optional().nullable(),
+      duration_secs: z.number().optional().nullable(),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: 'validation_error', details: err.errors ?? err.message });
+    }
+
+    try {
+      const media = await withTransaction(async (client) => {
+        const listingRow = await client.query(
+          `SELECT id, business_id FROM advert_listings WHERE slug = $1`, [slug]
+        );
+        if (!listingRow.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        if (listingRow.rows[0].business_id !== userId) throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+        const listingId = listingRow.rows[0].id;
+
+        if (body.media_pack === 'AMBASSADOR_PACK') {
+          const countRow = await client.query(
+            `SELECT COUNT(*) FROM advert_media WHERE listing_id = $1 AND media_pack = 'AMBASSADOR_PACK'`,
+            [listingId]
+          );
+          if (Number(countRow.rows[0].count) >= 5) {
+            throw Object.assign(new Error('ambassador_pack_limit_reached'), { statusCode: 400 });
+          }
+        }
+
+        const sortRow = await client.query(
+          `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM advert_media WHERE listing_id = $1 AND media_pack = $2`,
+          [listingId, body.media_pack]
+        );
+        const sortOrder = Number(sortRow.rows[0]?.next_order ?? 0);
+
+        const inserted = await client.query(`
+          INSERT INTO advert_media (id, listing_id, media_pack, media_type, url, thumbnail_url, file_name, mime_type, file_size_bytes, duration_secs, sort_order)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *
+        `, [
+          uuid(), listingId, body.media_pack, body.media_type, body.url,
+          body.thumbnail_url ?? null, body.file_name ?? null, body.mime_type ?? null,
+          body.file_size_bytes ?? null, body.duration_secs ?? null, sortOrder,
+        ]);
+        return inserted.rows[0];
+      });
+      return reply.code(201).send({ media });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'advert.listing.media.add.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // DELETE /api/advert/listings/:slug/media/:mediaId — Remove a media item
+  app.delete('/advert/listings/:slug/media/:mediaId', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    const { slug, mediaId } = request.params as { slug: string; mediaId: string };
+
+    try {
+      await withTransaction(async (client) => {
+        const listingRow = await client.query(
+          `SELECT id, business_id FROM advert_listings WHERE slug = $1`, [slug]
+        );
+        if (!listingRow.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        if (listingRow.rows[0].business_id !== userId) throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+
+        const deleted = await client.query(
+          `DELETE FROM advert_media WHERE id = $1 AND listing_id = $2 RETURNING id`,
+          [mediaId, listingRow.rows[0].id]
+        );
+        if (!deleted.rows[0]) throw Object.assign(new Error('media_not_found'), { statusCode: 404 });
+      });
+      return reply.send({ success: true });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'advert.listing.media.delete.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
   // GET /api/advert/listings/me — Business's own listings
   app.get('/advert/listings/me', {
     preHandler: [(app as any).authenticate],
@@ -419,7 +856,7 @@ export async function advertRoutes(app: FastifyInstance) {
             al.id, al.slug, al.title, al.summary, al.price, al.currency,
             al.is_negotiable, al.location_text, al.status,
             al.listing_quality_score, al.views_total, al.views_unique,
-            al.created_at, al.expires_at,
+            al.created_at, al.expires_at, al.preview_token,
             lt.name AS listing_type_name,
             s.name AS subcategory_name,
             c.name AS category_name,
@@ -480,6 +917,38 @@ export async function advertRoutes(app: FastifyInstance) {
 
         const listing = row.rows[0];
         const listingId = listing.id;
+
+        // DRAFT listings: only accessible with a matching preview_token query param.
+        // Public visitors without the token get a 402 pending-payment response.
+        if (listing.status === 'DRAFT') {
+          const providedToken = (request.query as any)?.preview_token as string | undefined;
+          if (!providedToken || providedToken !== listing.preview_token) {
+            return { gone: false, notFound: false, pendingPayment: true, title: listing.title };
+          }
+          const [mediaRows, fieldRows] = await Promise.all([
+            client.query(`
+              SELECT id, media_pack, media_type, url, thumbnail_url, file_name,
+                     mime_type, duration_secs, sort_order
+              FROM advert_media WHERE listing_id = $1 ORDER BY media_pack, sort_order
+            `, [listingId]),
+            client.query(`SELECT field_key, field_value FROM advert_listing_field_values WHERE listing_id = $1`, [listingId]),
+          ]);
+          const ambassadorMedia = mediaRows.rows.filter((m: any) => m.media_pack === 'AMBASSADOR_PACK');
+          const galleryMedia = mediaRows.rows.filter((m: any) => m.media_pack === 'PRODUCT_GALLERY');
+          const fieldValues: Record<string, string> = {};
+          for (const fv of fieldRows.rows) { fieldValues[fv.field_key] = fv.field_value; }
+          return {
+            gone: false, notFound: false,
+            listing: {
+              ...listing, is_draft: true,
+              ambassador_media: ambassadorMedia,
+              gallery_media: galleryMedia,
+              field_values: fieldValues,
+              time_remaining_secs: 0,
+              business_id: undefined,
+            },
+          };
+        }
 
         // Enforce campaign-duration access control:
         // listing is inaccessible once campaign_end_at has passed,
@@ -544,6 +1013,13 @@ export async function advertRoutes(app: FastifyInstance) {
 
       if (!result) return reply.code(500).send({ error: 'internal_server_error' });
       if (result.notFound) return reply.code(404).send({ error: 'listing_not_found' });
+      if (result.pendingPayment) {
+        return reply.code(402).send({
+          error: 'listing_pending_payment',
+          message: 'This listing is not yet active. Payment is required to activate it.',
+          title: result.title,
+        });
+      }
       if (result.gone) {
         return reply.code(410).send({
           error: 'listing_expired',
