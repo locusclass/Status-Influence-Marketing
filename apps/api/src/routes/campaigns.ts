@@ -5207,7 +5207,14 @@ export async function campaignRoutes(app: FastifyInstance) {
         ${buildActiveViewerVerificationJoin('u')}
         WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
           AND u.status = 'ACTIVE'
-          ${includeUnlisted ? '' : `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'`}
+          ${includeUnlisted
+            ? ''
+            // When searching specifically, also surface DIRECT_ONLY ambassadors —
+            // they want to be found by name/phone but not appear in the default browse.
+            : searchQ
+              ? `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') IN ('LISTED', 'DIRECT_ONLY')`
+              : `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'`
+          }
           ${whereExtra}
         ORDER BY
           CASE WHEN viewer_verification.id IS NOT NULL THEN 0 ELSE 1 END ASC,

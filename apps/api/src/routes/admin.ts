@@ -296,6 +296,7 @@ const UpdateAdminSchema = z
     module_keys: z.array(z.string()).optional(),
     country_ids: z.array(z.string().uuid()).optional(),
     division_ids: z.array(z.string().uuid()).optional(),
+    is_observer: z.boolean().optional(),
   })
   .refine(
     (value) =>
@@ -305,7 +306,8 @@ const UpdateAdminSchema = z
       value.role !== undefined ||
       value.module_keys !== undefined ||
       value.country_ids !== undefined ||
-      value.division_ids !== undefined,
+      value.division_ids !== undefined ||
+      value.is_observer !== undefined,
     {
       message: 'at least one field is required',
     }
@@ -962,7 +964,8 @@ async function loadManagedAdminTarget(client: any, rawUserId: string) {
       au.created_by_super_admin_id,
       au.last_login_at,
       au.created_at AS admin_created_at,
-      au.updated_at AS admin_updated_at
+      au.updated_at AS admin_updated_at,
+      COALESCE(au.is_observer, false) AS admin_is_observer
     FROM users u
     LEFT JOIN admin_users au ON au.user_id = u.id
     WHERE u.id = $1
@@ -1013,6 +1016,7 @@ function serializeManagedAdminRecord(target: {
       target.row.admin_created_at ?? target.row.user_created_at ?? null,
     updated_at:
       target.row.admin_updated_at ?? target.row.user_updated_at ?? null,
+    is_observer: target.row.admin_is_observer === true,
   };
 }
 
@@ -1693,6 +1697,13 @@ export async function adminRoutes(app: FastifyInstance) {
               : target.access.admin_status,
           createdBySuperAdminId: target.access.created_by_super_admin_id,
         });
+
+        if (body.is_observer !== undefined) {
+          await client.query(
+            `UPDATE admin_users SET is_observer = $2 WHERE id = $1`,
+            [account.id, body.is_observer]
+          );
+        }
 
         const shouldReplaceScopes =
           nextRole === ADMIN_ROLE_SUPER_ADMIN
