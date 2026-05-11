@@ -3689,6 +3689,9 @@ export async function campaignRoutes(app: FastifyInstance) {
       reply.code(403);
       return { error: 'forbidden' };
     }
+    await withTransaction(async (client) => {
+      await ensureAdminWriteAccess(client, authUser, role);
+    });
     const requestedExecutionMode = resolveExecutionMode(
       platformKey,
       body.execution_mode as 'PRIVATE_CONTRACT' | 'OPEN_BUDGET' | undefined
@@ -4049,6 +4052,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     }
 
     const result = await withTransaction(async (client) => {
+      await ensureAdminWriteAccess(client, authUser, role);
       const editable = await loadEditableCampaign(client, params.id, authUser);
       if ('error' in editable) {
         return editable as any;
