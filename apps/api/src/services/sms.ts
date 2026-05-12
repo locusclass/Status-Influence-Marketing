@@ -62,6 +62,62 @@ function isRecipientSuccess(recipient: Record<string, unknown> | null) {
   );
 }
 
+function readProviderMessage(payload: Record<string, unknown> | null) {
+  const data = payload?.SMSMessageData;
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+  const message = String((data as Record<string, unknown>).Message ?? '').trim();
+  return message.length > 0 ? message : null;
+}
+
+function isInvalidSenderIdMessage(message: string | null) {
+  return String(message ?? '').trim().toLowerCase() === 'invalidsenderid';
+}
+
+async function performAfricaTalkingRequest(
+  form: URLSearchParams,
+  normalizedPhone: string
+) {
+  const response = await fetch(config.africaTalking.baseUrl, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      apiKey: config.africaTalking.apiKey,
+    },
+    body: form.toString(),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const rawText = await response.text();
+  const payload = safeParseJson(rawText);
+  const recipient = readRecipient(payload);
+  const providerMessage = readProviderMessage(payload);
+  const ok = response.ok && isRecipientSuccess(recipient);
+
+  return {
+    ok,
+    provider: AFRICAS_TALKING_SMS_PROVIDER,
+    providerStatus: ok ? ('SENT' as const) : ('FAILED' as const),
+    normalizedPhone,
+    response: {
+      httpStatus: response.status,
+      body: payload ?? { raw: rawText },
+      rawText,
+      recipient,
+    },
+    error:
+      ok
+        ? null
+        : String(
+            recipient?.status ??
+              providerMessage ??
+              (payload?.error as string | undefined) ??
+              `africas_talking_http_${response.status}`
+          ),
+  };
+}
+
 export function isAfricaTalkingSandbox() {
   return config.africaTalking.environment === 'sandbox';
 }
@@ -73,18 +129,21 @@ export function normalizeUgandaPhoneNumber(phone: string) {
   }
 
   const cleaned = trimmed.replace(/[^\d+]/g, '');
-  if (/^\+2567\d{8}$/.test(cleaned)) {
+  if (/^\+256[37]\d{8}$/.test(cleaned)) {
     return cleaned;
   }
 
   const digits = cleaned.replace(/\D/g, '');
-  if (/^07\d{8}$/.test(digits)) {
+  if (/^0[37]\d{8}$/.test(digits)) {
     return `+256${digits.slice(1)}`;
   }
-  if (/^2567\d{8}$/.test(digits)) {
+  if (/^256[37]\d{8}$/.test(digits)) {
     return `+${digits}`;
   }
-  if (/^7\d{8}$/.test(digits)) {
+  if (/^00256[37]\d{8}$/.test(digits)) {
+    return `+${digits.slice(2)}`;
+  }
+  if (/^[37]\d{8}$/.test(digits)) {
     return `+256${digits}`;
   }
 
@@ -128,46 +187,20 @@ export async function sendAfricaTalkingSms(
   const senderId = String(
     input.senderId ?? config.africaTalking.senderId ?? ''
   ).trim();
-  if (senderId && !isAfricaTalkingSandbox()) {
-    form.set('from', senderId);
-  }
+  const canUseSenderId = senderId && !isAfricaTalkingSandbox();
+  if (canUseSenderId) form.set('from', senderId);
 
   try {
-    const response = await fetch(config.africaTalking.baseUrl, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        apiKey: config.africaTalking.apiKey,
-      },
-      body: form.toString(),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const rawText = await response.text();
-    const payload = safeParseJson(rawText);
-    const recipient = readRecipient(payload);
-    const ok = response.ok && isRecipientSuccess(recipient);
-
-    return {
-      ok,
-      provider: AFRICAS_TALKING_SMS_PROVIDER,
-      providerStatus: ok ? 'SENT' : 'FAILED',
-      normalizedPhone,
-      response: {
-        httpStatus: response.status,
-        body: payload ?? { raw: rawText },
-        rawText,
-        recipient,
-      },
-      error:
-        ok
-          ? null
-          : String(
-              recipient?.status ??
-                (payload?.error as string | undefined) ??
-                `africas_talking_http_${response.status}`
-            ),
-    };
+    const firstAttempt = await performAfricaTalkingRequest(form, normalizedPhone);
+    if (
+      !firstAttempt.ok &&
+      canUseSenderId &&
+      isInvalidSenderIdMessage(firstAttempt.error)
+    ) {
+      form.delete('from');
+      return performAfricaTalkingRequest(form, normalizedPhone);
+    }
+    return firstAttempt;
   } catch (error) {
     return {
       ok: false,

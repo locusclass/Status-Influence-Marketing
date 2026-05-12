@@ -62,4 +62,13 @@ describe('Africa\'s Talking startup config', () => {
       'https://api.africastalking.com/version1/messaging'
     );
   });
+
+  it('does not force a default sender id when none is configured', async () => {
+    const configModule = await loadConfig({
+      AT_USERNAME: 'prime-status',
+      AT_API_KEY: 'live-key',
+    });
+
+    expect(configModule.config.africaTalking.senderId).toBe('');
+  });
 });

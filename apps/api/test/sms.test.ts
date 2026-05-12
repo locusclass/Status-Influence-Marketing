@@ -10,6 +10,10 @@ describe('Africa\'s Talking SMS helpers', () => {
     expect(normalizeUgandaPhoneNumber('256784123456')).toBe('+256784123456');
   });
 
+  it('normalizes Uganda 03x numbers to E.164', () => {
+    expect(normalizeUgandaPhoneNumber('0312345678')).toBe('+256312345678');
+  });
+
   it('preserves valid Uganda E.164 numbers', () => {
     expect(normalizeUgandaPhoneNumber('+256784123456')).toBe(
       '+256784123456'

@@ -86,29 +86,6 @@ import {
   resolveAdminOperationTaskByEntity,
 } from '../services/adminOperations.js';
 import { queueSmsDispatch } from '../services/smsDispatch.js';
-import {
-  ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS,
-  ADMIN_HANDLER_JAZ_ROOM_KEY,
-  cleanupAdminHandlerJaz,
-  createAdminHandlerJazMessage,
-  createAdminHandlerJazSignalEvent,
-  deactivateAdminHandlerJazPresence,
-  ensureAdminHandlerJazSchema,
-  listAdminHandlerJazMessages,
-  listAdminHandlerJazParticipants,
-  listAdminHandlerJazSignalEvents,
-  loadAdminHandlerJazIdentity,
-  maxLiveCursor,
-  parseLiveCursor,
-  timestampText,
-  upsertAdminHandlerJazIdentity,
-  upsertAdminHandlerJazPresence,
-} from '../services/adminHandlerJaz.js';
-import {
-  resolveMediaUploadError,
-  storeMultipartAttachmentFile,
-} from '../services/mediaUploads.js';
-import { resolveUploadedFileUrl } from '../utils.js';
 import { ensureUserProfilesTable } from '../services/userProfiles.js';
 import { ensureViewerVerificationSchema } from '../services/viewerVerification.js';
 
@@ -162,43 +139,6 @@ const CreateBlockingNoticeSchema = z
 
 const ResetPasswordSchema = z.object({
   password: z.string().min(8)
-});
-
-const HandlerJazIdentitySchema = z.object({
-  handle: z.string().trim().min(2).max(32),
-});
-
-const HandlerJazPresenceSchema = z.object({
-  handle: z.string().trim().min(2).max(32).optional(),
-  current_pane: z.string().trim().min(1).max(64).optional(),
-  is_room_open: z.boolean().optional(),
-  is_minimized: z.boolean().optional(),
-  in_call: z.boolean().optional(),
-  call_mode: z.enum(['NONE', 'AUDIO', 'VIDEO']).optional(),
-  screen_share_active: z.boolean().optional(),
-  call_session_id: z.string().trim().max(128).optional().nullable(),
-});
-
-const HandlerJazMessageSchema = z.object({
-  body: z.string().trim().max(4000).default(''),
-  attachment_url: z.string().trim().max(2048).optional(),
-  attachment_name: z.string().trim().max(255).optional(),
-  attachment_mime_type: z.string().trim().max(255).optional(),
-}).refine(
-  (value) =>
-    value.body.trim().length > 0 ||
-    (typeof value.attachment_url === 'string' &&
-      value.attachment_url.trim().length > 0),
-  {
-    message: 'A message body or attachment is required.',
-    path: ['body'],
-  }
-);
-
-const HandlerJazSignalSchema = z.object({
-  event_type: z.string().trim().min(2).max(80),
-  target_user_id: z.string().uuid().optional().nullable(),
-  payload: z.record(z.string(), z.unknown()).default({}),
 });
 
 const UpdateProofSchema = z.object({
@@ -1272,133 +1212,6 @@ function summarizeCampaignAdminChanges(input: Record<string, unknown>) {
     labels.push('terms');
   }
   return labels.length > 0 ? labels.join(', ') : 'campaign settings';
-}
-
-function buildDefaultHandlerJazHandle(access: DashboardAccessContext) {
-  const rawAccess = access as DashboardAccessContext & {
-    full_name?: string;
-    phone?: string;
-  };
-  const seeds = [
-    rawAccess.full_name,
-    access.email,
-    rawAccess.phone,
-    access.user_id,
-  ]
-    .map((value) => String(value ?? '').trim())
-    .filter((value) => value.length > 0);
-  const base = seeds[0] ?? 'handler';
-  const normalized = base
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 24);
-  if (normalized.length >= 2) {
-    return normalized;
-  }
-  return `handler_${String(access.user_id ?? 'admin').slice(0, 6)}`;
-}
-
-async function resolveHandlerJazHandle(
-  client: any,
-  access: DashboardAccessContext,
-  overrideHandle?: string | null,
-  options: {
-    allowFallbackDefault?: boolean;
-  } = {}
-) {
-  const explicit = String(overrideHandle ?? '').trim();
-  if (explicit.length >= 2) {
-    const saved = await upsertAdminHandlerJazIdentity(client, {
-      userId: access.user_id,
-      handle: explicit,
-    });
-    return String(saved.handle ?? explicit);
-  }
-  const existing = await loadAdminHandlerJazIdentity(client, access.user_id);
-  if (existing?.handle) {
-    return String(existing.handle);
-  }
-  if (options.allowFallbackDefault === true) {
-    return buildDefaultHandlerJazHandle(access);
-  }
-  return null;
-}
-
-async function loadHandlerJazSnapshot(
-  client: any,
-  access: DashboardAccessContext,
-  cursor?: string | null
-) {
-  const rawAccess = access as DashboardAccessContext & {
-    full_name?: string;
-    phone?: string;
-  };
-  await cleanupAdminHandlerJaz(client);
-  const participants = await listAdminHandlerJazParticipants(client);
-  const messages = await listAdminHandlerJazMessages(client, {
-    since: cursor ?? null,
-  });
-  const signals = await listAdminHandlerJazSignalEvents(client, access.user_id, {
-    since: cursor ?? null,
-  });
-  const meIdentity = await loadAdminHandlerJazIdentity(client, access.user_id);
-  const availableCount = participants.filter((item: any) => item.is_available === true).length;
-  const activeCallCount = participants.filter((item: any) => item.in_call === true).length;
-  const nextCursor = maxLiveCursor([
-    ...messages.map((item: any) => item.created_at),
-    ...signals.map((item: any) => item.created_at),
-    ...participants.map((item: any) => item.updated_at),
-  ]);
-
-  return {
-    room: {
-      key: ADMIN_HANDLER_JAZ_ROOM_KEY,
-      message_ttl_hours: ADMIN_HANDLER_JAZ_MESSAGE_TTL_HOURS,
-      available_count: availableCount,
-      active_call_count: activeCallCount,
-    },
-    me: {
-      user_id: access.user_id,
-      display_name:
-        String(rawAccess.full_name ?? '').trim() ||
-        String(access.email ?? '').trim() ||
-        String(rawAccess.phone ?? '').trim() ||
-        'Admin',
-      handle:
-        String(meIdentity?.handle ?? '').trim() || buildDefaultHandlerJazHandle(access),
-      has_identity: Boolean(String(meIdentity?.handle ?? '').trim()),
-    },
-    participants,
-    messages,
-    signals,
-    cursor: nextCursor,
-  };
-}
-
-function hasPersistedHandlerJazUser(access: DashboardAccessContext | null) {
-  if (!access) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    .test(String(access.user_id ?? '').trim());
-}
-
-function rejectInvalidHandlerJazAccess(
-  access: DashboardAccessContext | null,
-  reply: any
-) {
-  if (!access) {
-    reply.code(403);
-    return { error: 'forbidden' };
-  }
-  if (hasPersistedHandlerJazUser(access)) {
-    return null;
-  }
-  reply.code(409);
-  return {
-    error: 'handler_jaz_persisted_admin_required',
-    detail:
-      "Handler's Jaz requires a signed-in admin account backed by a stored admin profile.",
-  };
 }
 
 export async function adminRoutes(app: FastifyInstance) {
@@ -3052,10 +2865,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const walletsRes = await client.query(
         `
-        SELECT *
-        FROM wallets
+        SELECT
+          w.*,
+          COALESCE(NULLIF(u.public_id, ''), split_part(u.email, '@', 1)) AS owner_username,
+          COALESCE(NULLIF(u.full_name, ''), u.email) AS owner_full_name,
+          u.phone AS owner_phone
+        FROM wallets w
+        JOIN users u ON u.id = w.user_id
         WHERE user_id = $1
-        ORDER BY created_at DESC
+        ORDER BY w.created_at DESC
         LIMIT 20
         `,
         [resolvedUserId]
@@ -4141,234 +3959,6 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
-  // ── Handler's Jaz admin collaboration room ────────────────────────────────
-
-  app.get('/admin/handler-jaz/room', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-      
-      return loadHandlerJazSnapshot(client, access!);
-    });
-  });
-
-  app.get('/admin/handler-jaz/live', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    const query = (request.query ?? {}) as { cursor?: string };
-    const cursor = parseLiveCursor(query.cursor);
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-      
-      return loadHandlerJazSnapshot(client, access!, cursor);
-    });
-  });
-
-  app.post('/admin/handler-jaz/identity', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    const parsed = HandlerJazIdentitySchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return { error: 'validation_failed', issues: parsed.error.issues };
-    }
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-      const identity = await upsertAdminHandlerJazIdentity(client, {
-        userId: access!.user_id,
-        handle: parsed.data.handle,
-      });
-      await upsertAdminHandlerJazPresence(client, {
-        userId: access!.user_id,
-        handle: parsed.data.handle,
-        currentPane: 'HANDLER_JAZ',
-        isRoomOpen: true,
-      });
-      return {
-        identity: {
-          user_id: String(identity.user_id ?? access!.user_id),
-          handle: String(identity.handle ?? parsed.data.handle),
-          updated_at: timestampText(identity.updated_at),
-        },
-      };
-    });
-  });
-
-  app.post('/admin/handler-jaz/presence', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    const parsed = HandlerJazPresenceSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return { error: 'validation_failed', issues: parsed.error.issues };
-    }
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-      const handle = await resolveHandlerJazHandle(client, access!, parsed.data.handle);
-      if (!handle) {
-        reply.code(409);
-        return { error: 'handler_jaz_identity_required' };
-      }
-      const presence = await upsertAdminHandlerJazPresence(client, {
-        userId: access!.user_id,
-        handle,
-        currentPane: parsed.data.current_pane,
-        isRoomOpen: parsed.data.is_room_open,
-        isMinimized: parsed.data.is_minimized,
-        inCall: parsed.data.in_call,
-        callMode: parsed.data.call_mode,
-        screenShareActive: parsed.data.screen_share_active,
-        callSessionId: parsed.data.call_session_id,
-      });
-      const snapshot = await loadHandlerJazSnapshot(client, access!);
-      return {
-        presence: {
-          user_id: String(presence.user_id ?? access!.user_id),
-          handle: String(presence.handle ?? handle),
-          current_pane: String(presence.current_pane ?? 'OVERVIEW'),
-          in_call: presence.in_call === true,
-          call_mode: String(presence.call_mode ?? 'NONE'),
-          screen_share_active: presence.screen_share_active === true,
-          updated_at: timestampText(presence.updated_at),
-          last_seen_at: timestampText(presence.last_seen_at),
-        },
-        room: snapshot.room,
-        participants: snapshot.participants,
-        cursor: snapshot.cursor,
-      };
-    });
-  });
-
-  app.post('/admin/handler-jaz/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    const isMultipart = String(request.headers['content-type'] ?? '')
-      .toLowerCase()
-      .includes('multipart/form-data');
-
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-
-      let payload: any = {};
-      let attachmentUrl: string | null = null;
-      let attachmentName: string | null = null;
-      let attachmentMimeType: string | null = null;
-
-      if (isMultipart) {
-        const fields: Record<string, string> = {};
-        try {
-          for await (const part of request.parts()) {
-            if (part.type === 'file' && attachmentUrl == null) {
-              const uploaded = await storeMultipartAttachmentFile({
-                part,
-                prefix: 'handler-jaz-attachment',
-                maxBytes: 50 * 1024 * 1024,
-              });
-              attachmentUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
-              attachmentName = uploaded.fileName;
-              attachmentMimeType = uploaded.mimeType;
-            } else if (part.type === 'field') {
-              fields[part.fieldname] = String(part.value ?? '');
-            }
-          }
-        } catch (error) {
-          const handled = resolveMediaUploadError(error);
-          if (handled) {
-            reply.code(handled.statusCode);
-            return handled.payload;
-          }
-          throw error;
-        }
-        payload = {
-          body: fields.body ?? '',
-          attachment_url: attachmentUrl ?? undefined,
-          attachment_name: attachmentName ?? fields.attachment_name,
-          attachment_mime_type: attachmentMimeType ?? fields.attachment_mime_type,
-        };
-      } else {
-        payload = request.body ?? {};
-      }
-
-      const parsed = HandlerJazMessageSchema.safeParse(payload);
-      if (!parsed.success) {
-        reply.code(400);
-        return { error: 'validation_failed', issues: parsed.error.issues };
-      }
-
-      const handle = await resolveHandlerJazHandle(client, access!, null);
-      if (!handle) {
-        reply.code(409);
-        return { error: 'handler_jaz_identity_required' };
-      }
-
-      await upsertAdminHandlerJazPresence(client, {
-        userId: access!.user_id,
-        handle,
-        currentPane: 'HANDLER_JAZ',
-        isRoomOpen: true,
-      });
-      const message = await createAdminHandlerJazMessage(client, {
-        senderUserId: access!.user_id,
-        senderHandle: handle,
-        body: parsed.data.body,
-        attachmentUrl: parsed.data.attachment_url,
-        attachmentName: parsed.data.attachment_name,
-        attachmentMimeType: parsed.data.attachment_mime_type,
-      });
-      return { message };
-    });
-  });
-
-  app.post('/admin/handler-jaz/signals', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    const parsed = HandlerJazSignalSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return { error: 'validation_failed', issues: parsed.error.issues };
-    }
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-      const handle = await resolveHandlerJazHandle(client, access!, null);
-      if (!handle) {
-        reply.code(409);
-        return { error: 'handler_jaz_identity_required' };
-      }
-      await upsertAdminHandlerJazPresence(client, {
-        userId: access!.user_id,
-        handle,
-        currentPane: 'HANDLER_JAZ',
-        isRoomOpen: true,
-      });
-      const signal = await createAdminHandlerJazSignalEvent(client, {
-        senderUserId: access!.user_id,
-        senderHandle: handle,
-        eventType: parsed.data.event_type,
-        targetUserId: parsed.data.target_user_id,
-        payload: parsed.data.payload,
-      });
-      return { signal };
-    });
-  });
-
-  app.post('/admin/handler-jaz/leave', { preHandler: [app.adminOnly] }, async (request, reply) => {
-    return withTransaction(async (client) => {
-      await getLiveDashboardAccess(client, request);
-      const access = ((request as any).adminAccess ?? null) as DashboardAccessContext | null;
-      const denied = rejectInvalidHandlerJazAccess(access, reply);
-      if (denied) return denied;
-      await deactivateAdminHandlerJazPresence(client, access!.user_id);
-      return { ok: true };
-    });
-  });
-
   // ── Admin operations command center ────────────────────────────────────────
 
   app.get('/admin/operations/live', { preHandler: [app.adminOnly] }, async (request) => {
@@ -5098,7 +4688,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let idx = 1;
 
       if (query?.q) {
-        conditions.push(`(w.id::text ILIKE $${idx} OR w.user_id::text ILIKE $${idx})`);
+        conditions.push(`(
+          w.id::text ILIKE $${idx}
+          OR w.user_id::text ILIKE $${idx}
+          OR COALESCE(NULLIF(u.public_id, ''), '') ILIKE $${idx}
+          OR COALESCE(NULLIF(u.full_name, ''), '') ILIKE $${idx}
+          OR COALESCE(u.phone, '') ILIKE $${idx}
+          OR COALESCE(u.email, '') ILIKE $${idx}
+        )`);
         params.push(`%${query.q}%`);
         idx++;
       }
@@ -5132,7 +4729,12 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const res = await client.query(
-        `SELECT w.*, u.email AS user_email
+        `SELECT
+           w.*,
+           u.email AS user_email,
+           COALESCE(NULLIF(u.public_id, ''), split_part(u.email, '@', 1)) AS owner_username,
+           COALESCE(NULLIF(u.full_name, ''), u.email) AS owner_full_name,
+           u.phone AS owner_phone
          FROM wallets w
          JOIN users u ON u.id = w.user_id
          ${where}
@@ -5946,7 +5548,3 @@ export async function adminRoutes(app: FastifyInstance) {
     );
   }
 }
-
-
-
-

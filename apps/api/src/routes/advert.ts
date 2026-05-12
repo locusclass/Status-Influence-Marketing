@@ -854,7 +854,8 @@ export async function advertRoutes(app: FastifyInstance) {
         const listings = await client.query(`
           SELECT
             al.id, al.slug, al.title, al.summary, al.price, al.currency,
-            al.is_negotiable, al.location_text, al.status,
+            al.is_negotiable, al.location_text, al.status, al.access_state,
+            al.is_promoted, al.admin_action_note, al.admin_action_at,
             al.listing_quality_score, al.views_total, al.views_unique,
             al.created_at, al.expires_at, al.preview_token,
             lt.name AS listing_type_name,
@@ -917,14 +918,19 @@ export async function advertRoutes(app: FastifyInstance) {
 
         const listing = row.rows[0];
         const listingId = listing.id;
+        const accessState = String(listing.access_state ?? 'PUBLIC').toUpperCase();
 
-        // DRAFT listings: only accessible with a matching preview_token query param.
-        // Public visitors without the token get a 402 pending-payment response.
+        if (accessState !== 'PUBLIC') {
+          return {
+            gone: false,
+            notFound: false,
+            blocked: true,
+            blockedState: accessState,
+            title: listing.title,
+          };
+        }
+
         if (listing.status === 'DRAFT') {
-          const providedToken = (request.query as any)?.preview_token as string | undefined;
-          if (!providedToken || providedToken !== listing.preview_token) {
-            return { gone: false, notFound: false, pendingPayment: true, title: listing.title };
-          }
           const [mediaRows, fieldRows] = await Promise.all([
             client.query(`
               SELECT id, media_pack, media_type, url, thumbnail_url, file_name,
@@ -1013,10 +1019,10 @@ export async function advertRoutes(app: FastifyInstance) {
 
       if (!result) return reply.code(500).send({ error: 'internal_server_error' });
       if (result.notFound) return reply.code(404).send({ error: 'listing_not_found' });
-      if (result.pendingPayment) {
-        return reply.code(402).send({
-          error: 'listing_pending_payment',
-          message: 'This listing is not yet active. Payment is required to activate it.',
+      if ((result as any).blocked) {
+        return reply.code(404).send({
+          error: 'listing_access_restricted',
+          state: (result as any).blockedState,
           title: result.title,
         });
       }
@@ -1042,7 +1048,7 @@ export async function advertRoutes(app: FastifyInstance) {
       const result = await withTransaction(async (client) => {
         const row = await client.query(`
           SELECT
-            id, status, admin_keep_alive,
+            id, status, admin_keep_alive, access_state,
             campaign_start_at, campaign_end_at,
             EXTRACT(EPOCH FROM (campaign_end_at - now()))::bigint AS time_remaining_secs
           FROM advert_listings WHERE slug = $1
@@ -1050,14 +1056,20 @@ export async function advertRoutes(app: FastifyInstance) {
         return row.rows[0] ?? null;
       });
       if (!result) return reply.code(404).send({ error: 'listing_not_found' });
+      const accessState = String(result.access_state ?? 'PUBLIC').toUpperCase();
       const remaining = Number(result.time_remaining_secs ?? -1);
-      const isLive = result.admin_keep_alive || remaining > 0;
+      const isLive = accessState === 'PUBLIC' && (
+        result.status === 'DRAFT' ||
+        result.admin_keep_alive ||
+        remaining > 0
+      );
       return reply.send({
         is_live: isLive,
         time_remaining_secs: Math.max(0, remaining),
         campaign_start_at: result.campaign_start_at,
         campaign_end_at: result.campaign_end_at,
         status: result.status,
+        access_state: accessState,
       });
     } catch (err) {
       app.log.error(err, 'advert.time_status.error');
@@ -1525,7 +1537,11 @@ export async function advertRoutes(app: FastifyInstance) {
     try {
       const offer = await withTransaction(async (client) => {
         const listingRow = await client.query(
-          `SELECT id, currency, is_negotiable FROM advert_listings WHERE slug = $1 AND status = 'ACTIVE'`,
+          `SELECT id, currency, is_negotiable
+           FROM advert_listings
+           WHERE slug = $1
+             AND status = 'ACTIVE'
+             AND access_state = 'PUBLIC'`,
           [slug]
         );
         if (!listingRow.rows[0]) {
@@ -1720,20 +1736,21 @@ export async function advertRoutes(app: FastifyInstance) {
       const result = await withTransaction(async (client) => {
         const rows = await client.query(`
           SELECT
-            al.id, al.slug, al.title, al.status, al.admin_keep_alive,
+            al.id, al.slug, al.title, al.status, al.access_state,
+            al.is_promoted, al.admin_keep_alive, al.admin_action_note, al.admin_action_at,
             al.views_total, al.views_unique, al.listing_quality_score,
             al.campaign_start_at, al.campaign_end_at,
             al.created_at,
             EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
             u.full_name AS business_name, u.email AS business_email,
-            c.id AS campaign_id,
+            COALESCE(c.id, al.campaign_id) AS campaign_id,
             lt.name AS listing_type_name,
             s.name AS subcategory_name,
             cat.name AS category_name,
             (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id AND o.status = 'PENDING') AS pending_offers
           FROM advert_listings al
           JOIN users u ON u.id = al.business_id
-          JOIN campaigns c ON c.id = al.campaign_id
+          LEFT JOIN campaigns c ON c.id = al.campaign_id
           JOIN advert_listing_types lt ON lt.id = al.listing_type_id
           JOIN advert_subcategories s ON s.id = lt.subcategory_id
           JOIN advert_categories cat ON cat.id = s.category_id
@@ -1742,7 +1759,7 @@ export async function advertRoutes(app: FastifyInstance) {
                  al.title ILIKE '%' || $4 || '%' OR
                  u.full_name ILIKE '%' || $4 || '%' OR
                  al.slug ILIKE '%' || $4 || '%')
-          ORDER BY al.created_at DESC
+          ORDER BY al.is_promoted DESC, al.created_at DESC
           LIMIT $1 OFFSET $2
         `, [limit, offset, query.status ?? null, query.search ?? null]);
 
@@ -1771,6 +1788,88 @@ export async function advertRoutes(app: FastifyInstance) {
   });
 
   // ─── ADMIN: KEEP-ALIVE OVERRIDE ──────────────────────────────────────────
+
+  app.patch('/admin/advert/listings/:slug/actions', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const adminUserId = String((request.user as any)?.sub ?? '').trim();
+    const bodySchema = z.object({
+      action: z.enum([
+        'REVOKE_URL',
+        'RESTORE_URL',
+        'BAN',
+        'UNBAN',
+        'CLOSE',
+        'REOPEN',
+        'PROMOTE',
+        'DEMOTE',
+      ]),
+      note: z.string().max(500).optional().nullable(),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch {
+      return reply.code(400).send({ error: 'validation_error' });
+    }
+
+    try {
+      const updated = await withTransaction(async (client) => {
+        const row = await client.query(
+          `SELECT slug, access_state, is_promoted FROM advert_listings WHERE slug = $1`,
+          [slug]
+        );
+        if (!row.rows[0]) {
+          throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        }
+
+        const action = body.action;
+        const nextAccessState =
+          action === 'REVOKE_URL'
+            ? 'REVOKED'
+            : action === 'BAN'
+              ? 'BANNED'
+              : action === 'CLOSE'
+                ? 'CLOSED'
+                : action === 'RESTORE_URL' || action === 'UNBAN' || action === 'REOPEN'
+                  ? 'PUBLIC'
+                  : String(row.rows[0].access_state ?? 'PUBLIC');
+        const nextPromoted =
+          action === 'PROMOTE'
+            ? true
+            : action === 'DEMOTE'
+              ? false
+              : Boolean(row.rows[0].is_promoted);
+
+        const result = await client.query(`
+          UPDATE advert_listings
+          SET access_state = $2,
+              is_promoted = $3,
+              admin_action_note = $4,
+              admin_action_at = now(),
+              admin_action_by_user_id = $5,
+              updated_at = now()
+          WHERE slug = $1
+          RETURNING id, slug, status, access_state, is_promoted, admin_action_note, admin_action_at, admin_keep_alive, campaign_end_at
+        `, [
+          slug,
+          nextAccessState,
+          nextPromoted,
+          body.note ?? null,
+          adminUserId || null,
+        ]);
+        return result.rows[0];
+      });
+
+      return reply.send({ listing: updated });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'advert.admin_action.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
 
   // PATCH /api/advert/listings/:slug/admin-keep-alive
   // Allows admins to keep a listing accessible after its campaign has ended.

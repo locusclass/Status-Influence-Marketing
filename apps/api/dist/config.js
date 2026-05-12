@@ -54,7 +54,7 @@ const configuredYoBaseUrl = stripWrappingQuotes(process.env.YO_PROXY_URL ??
     '');
 const configuredAtUsername = stripWrappingQuotes(process.env.AT_USERNAME ?? '');
 const configuredAtApiKey = stripWrappingQuotes(process.env.AT_API_KEY ?? '');
-const configuredAtSenderId = stripWrappingQuotes(process.env.AT_SENDER_ID ?? 'PRIMESTATUS');
+const configuredAtSenderId = stripWrappingQuotes(process.env.AT_SENDER_ID ?? '');
 const africaTalkingEnvironment = configuredAtUsername.trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'live';
 const yoConfig = {
     allowDirectApiBypass,

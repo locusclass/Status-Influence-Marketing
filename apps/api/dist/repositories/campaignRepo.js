@@ -17,7 +17,7 @@ export class CampaignRepo {
             input.platform,
             input.delivery_model ?? 'DETERMINISTIC',
             input.execution_mode ?? 'PRIVATE_CONTRACT',
-            input.visibility ?? 'PUBLIC',
+            input.visibility ?? 'PRIVATE',
             input.payout_amount,
             input.budget_total,
             input.impression_target ?? null,

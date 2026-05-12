@@ -160,6 +160,10 @@ export function queueSmsDispatch(
 
   void dispatchSmsJobs(jobs)
     .then((results) => {
+      const sentCount = results.filter((result) => result.ok).length;
+      const skippedCount = results.filter(
+        (result) => result.providerStatus === 'SKIPPED'
+      ).length;
       const failures = results
         .filter((result) => !result.ok)
         .map((result) => ({
@@ -168,7 +172,20 @@ export function queueSmsDispatch(
           status: result.providerStatus,
           error: result.error,
           log_id: result.logId,
+          http_status: result.response?.httpStatus ?? null,
         }));
+      if (logger?.warn) {
+        logger.warn(
+          {
+            context: context ?? null,
+            queued_count: jobs.length,
+            sent_count: sentCount,
+            skipped_count: skippedCount,
+            failed_count: failures.length,
+          },
+          'sms_dispatch_completed'
+        );
+      }
       if (failures.length > 0 && logger?.warn) {
         logger.warn(
           {

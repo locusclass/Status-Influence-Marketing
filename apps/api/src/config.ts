@@ -80,7 +80,7 @@ const configuredYoBaseUrl = stripWrappingQuotes(
 const configuredAtUsername = stripWrappingQuotes(process.env.AT_USERNAME ?? '');
 const configuredAtApiKey = stripWrappingQuotes(process.env.AT_API_KEY ?? '');
 const configuredAtSenderId = stripWrappingQuotes(
-  process.env.AT_SENDER_ID ?? 'PRIMESTATUS'
+  process.env.AT_SENDER_ID ?? ''
 );
 const africaTalkingEnvironment =
   configuredAtUsername.trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'live';

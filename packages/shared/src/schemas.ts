@@ -5,6 +5,14 @@ export const MediaTypeSchema = z.enum(['IMAGE', 'VIDEO', 'TEXT']);
 export const DeliveryModelSchema = z.enum(['DETERMINISTIC', 'PROBABILISTIC']);
 export const PricePrivacyModeSchema = z.enum(['NEGOTIABLE', 'FIXED']);
 
+const BeneficiaryPricingSchema = z.object({
+  user_id: z.string().uuid().optional(),
+  phone: z.string().trim().min(7).max(20).optional(),
+  selected_rate_ugx: z.number().int().positive(),
+  impression_target: z.number().int().min(1).optional(),
+  pricing_reference_engagements_24h: z.number().int().min(1).optional(),
+});
+
 export const CreateVerificationSessionSchema = z.object({
   user_id: z.string().trim().min(3),
   campaign_id: z.string().trim().min(3),
@@ -25,12 +33,13 @@ export const CampaignBundleItemSchema = z
     delivery_model: DeliveryModelSchema.optional(),
     payout_amount: z.number().int().positive(),
     budget_total: z.number().int().positive(),
-    execution_mode: z.enum(['PRIVATE_CONTRACT', 'OPEN_BUDGET']).optional(),
-    visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
+    execution_mode: z.enum(['PRIVATE_CONTRACT']).optional(),
+    visibility: z.enum(['PRIVATE']).optional(),
     counterparty_contact: z.string().trim().min(7).max(20).optional(),
     beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
     beneficiary_user_ids: z.array(z.string().uuid()).optional(),
     beneficiary_group_id: z.string().uuid().optional(),
+    beneficiary_pricing: z.array(BeneficiaryPricingSchema).max(200).optional(),
     start_date: z.string(),
     end_date: z.string(),
     media_type: MediaTypeSchema,
@@ -74,12 +83,13 @@ export const CreateCampaignSchema = z
     delivery_model: DeliveryModelSchema.optional(),
     payout_amount: z.number().int().positive().optional(),
     budget_total: z.number().int().positive().optional(),
-    execution_mode: z.enum(['PRIVATE_CONTRACT', 'OPEN_BUDGET']).optional(),
-    visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
+    execution_mode: z.enum(['PRIVATE_CONTRACT']).optional(),
+    visibility: z.enum(['PRIVATE']).optional(),
     counterparty_contact: z.string().trim().min(7).max(20).optional(),
     beneficiary_contacts: z.array(z.string().trim().min(7).max(20)).optional(),
     beneficiary_user_ids: z.array(z.string().uuid()).optional(),
     beneficiary_group_id: z.string().uuid().optional(),
+    beneficiary_pricing: z.array(BeneficiaryPricingSchema).max(200).optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
     media_type: MediaTypeSchema.optional(),

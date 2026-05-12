@@ -59,7 +59,6 @@ import {
 import { ensureSmsSchema } from './services/smsDispatch.js';
 import { ensurePublicIdColumns } from './services/publicId.js';
 import { ensureAdminOperationsSchema } from './services/adminOperations.js';
-import { ensureAdminHandlerJazSchema } from './services/adminHandlerJaz.js';
 import {
   ensurePrimarySuperAdmin,
   hasAdminModuleAccess,
@@ -147,7 +146,6 @@ export function buildServer() {
         await ensurePrimarySuperAdmin(client);
         await ensurePublicIdColumns(client);
         await ensureAdminOperationsSchema(client);
-        await ensureAdminHandlerJazSchema(client);
       });
     } catch (error) {
       app.log.error(
@@ -472,4 +470,3 @@ export function buildServer() {
 
   return app;
 }
-
