@@ -54,34 +54,9 @@ async function insertBusiness() {
   return result.rows[0];
 }
 
-async function insertActiveAmbassadors(count: number) {
-  if (count <= 0) return;
-  await pool!.query(
-    `
-    INSERT INTO users (
-      full_name,
-      email,
-      phone,
-      password_hash,
-      role,
-      status
-    )
-    SELECT
-      'Ambassador ' || series_id,
-      'ambassador-' || series_id || '@example.com',
-      '+25678' || LPAD(series_id::text, 7, '0'),
-      'x',
-      'AMBASSADOR',
-      'ACTIVE'
-    FROM generate_series(1, $1) AS series_id
-    `,
-    [count]
-  );
-}
-
 function buildPublicCampaignPayload() {
   return {
-    title: 'Threshold public campaign',
+    title: 'Retired public campaign',
     platform: 'WHATSAPP_STATUS',
     payout_amount: 100,
     budget_total: 5000,
@@ -93,11 +68,11 @@ function buildPublicCampaignPayload() {
     impression_target: 50,
     terms_keep_hours: 12,
     terms_min_views: 50,
-    terms_requirement: 'VIEWS',
+    terms_requirement: 'DURATION',
   };
 }
 
-describe('Public contract eligibility', () => {
+describe('Retired public contracts', () => {
   if (!pool) {
     it('skipped: TEST_DATABASE_URL not set', () => expect(true).toBe(true));
     return;
@@ -120,8 +95,7 @@ describe('Public contract eligibility', () => {
     await pool.end();
   });
 
-  it('reports the backend-confirmed active ambassador threshold for public contracts', async () => {
-    await insertActiveAmbassadors(4999);
+  it('returns 410 for the retired public-contract eligibility endpoint', async () => {
     const business = await insertBusiness();
     const token = app.jwt.sign(buildAuthClaims(business));
 
@@ -131,16 +105,13 @@ describe('Public contract eligibility', () => {
       headers: { authorization: `Bearer ${token}` },
     });
 
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(410);
     expect(response.json()).toMatchObject({
-      eligible: false,
-      active_ambassadors: 4999,
-      required_active_ambassadors: 5000,
+      error: 'public_contracts_retired',
     });
   });
 
-  it('blocks public contracts below the threshold and allows them once the backend confirms enough ambassadors', async () => {
-    await insertActiveAmbassadors(4999);
+  it('rejects OPEN_BUDGET campaign creation payloads', async () => {
     const business = await insertBusiness();
     const token = app.jwt.sign(buildAuthClaims(business));
 
@@ -151,28 +122,9 @@ describe('Public contract eligibility', () => {
       payload: buildPublicCampaignPayload(),
     });
 
-    expect(blocked.statusCode).toBe(409);
+    expect(blocked.statusCode).toBe(400);
     expect(blocked.json()).toMatchObject({
-      error: 'public_contract_ambassador_threshold_unmet',
-      eligible: false,
-      active_ambassadors: 4999,
-      required_active_ambassadors: 5000,
-    });
-
-    await insertActiveAmbassadors(1);
-
-    const allowed = await app.inject({
-      method: 'POST',
-      url: '/campaigns',
-      headers: { authorization: `Bearer ${token}` },
-      payload: buildPublicCampaignPayload(),
-    });
-
-    expect(allowed.statusCode).toBe(200);
-    expect(allowed.json().campaign).toMatchObject({
-      platform: 'WHATSAPP_STATUS',
-      execution_mode: 'OPEN_BUDGET',
-      visibility: 'PUBLIC',
+      error: 'validation_error',
     });
   });
 });

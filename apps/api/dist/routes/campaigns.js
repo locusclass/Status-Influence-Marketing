@@ -1,4 +1,4 @@
-import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, isCreatorPlatform, normalizeExecutionMeta, recordCampaignRevenueEntry, resolveDeliveryModel, } from '@prime/shared';
+import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, normalizeExecutionMeta, recordCampaignRevenueEntry, resolveDeliveryModel, } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
@@ -1270,41 +1270,20 @@ async function loadEditableCampaign(client, campaignId, businessId) {
     return { root, children, escrow, bundle_id: bundleId, bundle_roots: bundleRoots };
 }
 function deriveCampaignBudget(platform, executionMode, budgetTotal, payoutAmount, requestedMetricTarget, mediaType) {
-    const platformFeePercent = executionMode === 'OPEN_BUDGET'
-        ? OPEN_PLATFORM_FEE_PERCENT
-        : PRIVATE_PLATFORM_FEE_PERCENT;
+    void platform;
+    void mediaType;
+    const platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
     const distributableBudget = Math.max(0, Math.floor(budgetTotal));
-    const publicUnitRate = getPublicContractUnitRate(mediaType);
-    if (isCreatorPlatform(platform) && executionMode === 'OPEN_BUDGET') {
-        const impressionTarget = Math.max(1, Math.floor(distributableBudget / publicUnitRate));
-        const estimatedAllocationCount = Math.max(1, Math.ceil(impressionTarget / CREATOR_DEFAULT_TARGET_METRIC));
-        const normalizedPayout = publicUnitRate;
-        return {
-            platformFeePercent,
-            distributableBudget,
-            normalizedPayout,
-            impressionTarget,
-            estimatedAllocationCount,
-            perAllocationTarget: Math.max(1, Math.ceil(impressionTarget / estimatedAllocationCount)),
-            visibility: 'PUBLIC',
-        };
-    }
-    const normalizedPayout = executionMode === 'OPEN_BUDGET'
-        ? publicUnitRate
-        : Math.max(1, Number(payoutAmount ?? distributableBudget));
-    const impressionTarget = executionMode === 'OPEN_BUDGET'
-        ? Math.max(1, Math.floor(distributableBudget / publicUnitRate))
-        : Math.max(1, Math.round(Number(requestedMetricTarget ?? 1)));
+    const normalizedPayout = Math.max(1, Number(payoutAmount ?? distributableBudget));
+    const impressionTarget = Math.max(1, Math.round(Number(requestedMetricTarget ?? 1)));
     return {
         platformFeePercent,
         distributableBudget,
         normalizedPayout,
         impressionTarget,
-        estimatedAllocationCount: executionMode === 'OPEN_BUDGET'
-            ? Math.max(1, Math.floor(distributableBudget / normalizedPayout))
-            : 1,
+        estimatedAllocationCount: 1,
         perAllocationTarget: impressionTarget,
-        visibility: executionMode === 'OPEN_BUDGET' ? 'PUBLIC' : 'PRIVATE',
+        visibility: 'PRIVATE',
     };
 }
 function resolveExecutionMode(platform, requestedMode) {
@@ -2573,31 +2552,16 @@ export async function campaignRoutes(app) {
                     }
                     const resolvedMediaUrls = normalizeCampaignMediaUrls(item);
                     const resolvedMediaUrl = primaryCampaignMediaUrl(item);
-                    const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, executionMode === 'PRIVATE_CONTRACT'
-                        ? {
-                            private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
-                            private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
-                            private_pricing_model: 'AMBASSADOR_RATE',
-                            private_beneficiaries: privateBeneficiaryMeta,
-                            private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
-                            private_total_rate_ugx: resolvedBudgetTotal,
-                            private_total_proven_engagements_24h: resolvedImpressionTarget,
-                            media_urls: resolvedMediaUrls,
-                        }
-                        : isCreatorPlatform(item.platform) &&
-                            executionMode === 'OPEN_BUDGET'
-                            ? {
-                                allocation_strategy: 'REPUTATION_BASED',
-                                creator_unit_count: estimatedAllocationCount,
-                                per_creator_target_metric: perAllocationTarget,
-                                target_metric_total: resolvedImpressionTarget,
-                                public_contract_rate_ugx: getPublicContractUnitRate(item.media_type),
-                                media_urls: resolvedMediaUrls,
-                            }
-                            : {
-                                public_contract_rate_ugx: getPublicContractUnitRate(item.media_type),
-                                media_urls: resolvedMediaUrls,
-                            });
+                    const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, {
+                        private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                        private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
+                        private_pricing_model: 'AMBASSADOR_RATE',
+                        private_beneficiaries: privateBeneficiaryMeta,
+                        private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
+                        private_total_rate_ugx: resolvedBudgetTotal,
+                        private_total_proven_engagements_24h: resolvedImpressionTarget,
+                        media_urls: resolvedMediaUrls,
+                    });
                     const campaignBurstMode = getCampaignBurstMode({
                         execution_meta: executionMeta,
                     });
@@ -2906,31 +2870,16 @@ export async function campaignRoutes(app) {
                 }
                 const resolvedMediaUrls = normalizeCampaignMediaUrls(body);
                 const resolvedMediaUrl = primaryCampaignMediaUrl(body);
-                const executionMeta = buildCampaignExecutionMeta(platformKey, body.execution_meta, executionMode === 'PRIVATE_CONTRACT'
-                    ? {
-                        private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
-                        private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
-                        private_pricing_model: 'AMBASSADOR_RATE',
-                        private_beneficiaries: privateBeneficiaryMeta,
-                        private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
-                        private_total_rate_ugx: resolvedBudgetTotal,
-                        private_total_proven_engagements_24h: resolvedImpressionTarget,
-                        media_urls: resolvedMediaUrls,
-                    }
-                    : isCreatorPlatform(body.platform) &&
-                        executionMode === 'OPEN_BUDGET'
-                        ? {
-                            allocation_strategy: 'REPUTATION_BASED',
-                            creator_unit_count: estimatedAllocationCount,
-                            per_creator_target_metric: perAllocationTarget,
-                            target_metric_total: resolvedImpressionTarget,
-                            public_contract_rate_ugx: getPublicContractUnitRate(body.media_type),
-                            media_urls: resolvedMediaUrls,
-                        }
-                        : {
-                            public_contract_rate_ugx: getPublicContractUnitRate(body.media_type),
-                            media_urls: resolvedMediaUrls,
-                        });
+                const executionMeta = buildCampaignExecutionMeta(platformKey, body.execution_meta, {
+                    private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
+                    private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
+                    private_pricing_model: 'AMBASSADOR_RATE',
+                    private_beneficiaries: privateBeneficiaryMeta,
+                    private_group_beneficiary: buildPrivateGroupMeta(privateGroupQuote),
+                    private_total_rate_ugx: resolvedBudgetTotal,
+                    private_total_proven_engagements_24h: resolvedImpressionTarget,
+                    media_urls: resolvedMediaUrls,
+                });
                 const campaignBurstMode = getCampaignBurstMode({
                     execution_meta: executionMeta,
                 });
@@ -3662,7 +3611,7 @@ export async function campaignRoutes(app) {
                 return { error: 'campaign_not_found' };
             if (campaign.status !== 'ACTIVE')
                 return { error: 'campaign_not_active' };
-            if (campaign.execution_mode === 'OPEN_BUDGET') {
+            if (campaign.execution_mode !== 'PRIVATE_CONTRACT') {
                 return { error: 'public_contracts_retired' };
             }
             if (campaign.business_id === authUser) {
@@ -3784,7 +3733,7 @@ export async function campaignRoutes(app) {
          RETURNING *`, [params.id]);
             await client.query(`UPDATE campaigns
          SET last_allocated_at = CASE
-               WHEN execution_mode='OPEN_BUDGET'
+               WHEN execution_mode <> 'PRIVATE_CONTRACT'
                THEN now() - interval '2 hours'
                ELSE last_allocated_at
              END
