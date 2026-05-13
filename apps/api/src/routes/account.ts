@@ -403,6 +403,42 @@ async function ensureAccountSchema(client: any) {
   await ensureUserProfilesTable(client);
   await ensureViewerVerificationSchema(client);
   await client.query(`
+    CREATE TABLE IF NOT EXISTS countries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name TEXT NOT NULL,
+      code TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await client.query(`
+    INSERT INTO countries (name, code, status)
+    VALUES ('Global Temp', 'GLOBAL_TEMP', 'ACTIVE')
+    ON CONFLICT (code) DO NOTHING
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS divisions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      country_id UUID NOT NULL REFERENCES countries(id),
+      name TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('CITY', 'UNIVERSITY', 'DISTRICT', 'OTHER')),
+      created_by UUID REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS admin_role TEXT NOT NULL DEFAULT 'USER'
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS country_id UUID REFERENCES countries(id)
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS division_id UUID REFERENCES divisions(id)
+  `);
+  await client.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''
   `);
@@ -473,6 +509,13 @@ async function ensureAccountSchema(client: any) {
   await client.query(`
     ALTER TABLE users
       ADD CONSTRAINT users_beneficiary_listing_mode_check CHECK (beneficiary_listing_mode IN ('LISTED', 'DIRECT_ONLY'))
+  `);
+  await client.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_admin_role_check
+  `);
+  await client.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_admin_role_check CHECK (admin_role IN ('SUPER_ADMIN', 'ADMIN', 'COUNTRY_ADMIN', 'DIVISION_ADMIN', 'USER'))
   `);
   await client.query(`
     UPDATE users

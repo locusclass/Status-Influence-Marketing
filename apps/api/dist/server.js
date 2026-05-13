@@ -227,6 +227,12 @@ export function buildServer() {
         }, `unhandled:error ${request.method} ${request.url}`);
         if (reply.sent)
             return;
+        const origin = request.headers.origin;
+        if (origin && isOriginAllowed(origin)) {
+            reply.header('Access-Control-Allow-Origin', origin);
+            reply.header('Access-Control-Allow-Credentials', 'true');
+            reply.header('Vary', 'Origin');
+        }
         reply.status(error.statusCode ?? 500).send({
             error: error.statusCode && error.statusCode < 500 ? error.message : 'internal_server_error'
         });
