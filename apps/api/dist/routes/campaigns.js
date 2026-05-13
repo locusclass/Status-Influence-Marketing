@@ -864,13 +864,21 @@ function normalizeCampaignMediaUrls(value) {
         .filter((entry) => entry.length > 0);
     return Array.from(new Set(urls));
 }
+function limitCampaignDeliveryMediaUrls(mediaType, urls) {
+    const normalizedType = String(mediaType ?? '').trim().toUpperCase();
+    const limit = normalizedType === 'VIDEO' ? 1 : 3;
+    return urls.slice(0, limit);
+}
 function primaryCampaignMediaUrl(value) {
     return normalizeCampaignMediaUrls(value)[0] ?? null;
 }
 function withCampaignMediaUrls(campaign) {
+    const mediaUrls = limitCampaignDeliveryMediaUrls(campaign.media_type, normalizeCampaignMediaUrls(campaign));
     return {
         ...campaign,
-        media_urls: normalizeCampaignMediaUrls(campaign),
+        media_url: mediaUrls[0] ??
+            (campaign.media_url == null ? campaign.media_url : String(campaign.media_url)),
+        media_urls: mediaUrls,
     };
 }
 async function buildPrivatePricingQuote(client, ambassador, mediaType, platform, options) {
@@ -2117,8 +2125,17 @@ export async function campaignRoutes(app) {
                al.status AS advert_listing_status,
                al.title AS advert_listing_title
         FROM campaigns c
-        LEFT JOIN campaigns parent ON parent.id = c.parent_campaign_id
-        LEFT JOIN advert_listings al ON al.campaign_id = c.id AND al.status != 'CANCELLED'
+        LEFT JOIN LATERAL (
+          SELECT slug, status, title
+          FROM advert_listings
+          WHERE status != 'CANCELLED'
+            AND (
+              campaign_id = c.id
+              OR (c.parent_campaign_id IS NOT NULL AND campaign_id = c.parent_campaign_id)
+            )
+          ORDER BY CASE WHEN campaign_id = c.id THEN 0 ELSE 1 END, updated_at DESC
+          LIMIT 1
+        ) al ON TRUE
         WHERE c.id IN (
           SELECT c2.id
           FROM campaigns c2
@@ -2171,7 +2188,17 @@ export async function campaignRoutes(app) {
             const found = await campaignRepo.getCampaign(client, params.id);
             if (!found)
                 return null;
-            const listingRes = await client.query(`SELECT slug, status, title FROM advert_listings WHERE campaign_id=$1 AND status != 'CANCELLED' LIMIT 1`, [found.id]);
+            const listingRes = await client.query(`
+        SELECT slug, status, title
+        FROM advert_listings
+        WHERE status != 'CANCELLED'
+          AND (
+            campaign_id = $1
+            OR ($2::uuid IS NOT NULL AND campaign_id = $2)
+          )
+        ORDER BY CASE WHEN campaign_id = $1 THEN 0 ELSE 1 END, updated_at DESC
+        LIMIT 1
+        `, [found.id, found.parent_campaign_id ?? null]);
             const listing = listingRes.rows[0] ?? null;
             if (String(found.platform ?? '').trim().toUpperCase() !==
                 ACTIVE_CAMPAIGN_PLATFORM &&
@@ -2550,8 +2577,8 @@ export async function campaignRoutes(app) {
                         estimatedAllocationCount = publicBudget.estimatedAllocationCount;
                         perAllocationTarget = publicBudget.perAllocationTarget;
                     }
-                    const resolvedMediaUrls = normalizeCampaignMediaUrls(item);
-                    const resolvedMediaUrl = primaryCampaignMediaUrl(item);
+                    const resolvedMediaUrls = limitCampaignDeliveryMediaUrls(item.media_type, normalizeCampaignMediaUrls(item));
+                    const resolvedMediaUrl = resolvedMediaUrls[0] ?? primaryCampaignMediaUrl(item);
                     const executionMeta = buildCampaignExecutionMeta(item.platform, item.execution_meta, {
                         private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
                         private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',
@@ -2868,8 +2895,8 @@ export async function campaignRoutes(app) {
                     currentRootBudget !== nextRootBudget) {
                     return { error: 'campaign_edit_budget_locked' };
                 }
-                const resolvedMediaUrls = normalizeCampaignMediaUrls(body);
-                const resolvedMediaUrl = primaryCampaignMediaUrl(body);
+                const resolvedMediaUrls = limitCampaignDeliveryMediaUrls(body.media_type, normalizeCampaignMediaUrls(body));
+                const resolvedMediaUrl = resolvedMediaUrls[0] ?? primaryCampaignMediaUrl(body);
                 const executionMeta = buildCampaignExecutionMeta(platformKey, body.execution_meta, {
                     private_contract_window_hours: PRIVATE_CONTRACT_WINDOW_HOURS,
                     private_contract_scope: privateGroupQuote == null ? 'INDIVIDUALS' : 'GROUP',

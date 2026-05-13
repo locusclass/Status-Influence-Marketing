@@ -644,7 +644,7 @@ export async function tenantAdminRoutes(app) {
             return { campaigns: res.rows };
         });
     });
-    app.get('/country/divisions', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
+    app.get('/country/divisions', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
         return withTransaction(async (client) => {
             const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_DIVISIONS);
             if (!access) {
@@ -672,7 +672,7 @@ export async function tenantAdminRoutes(app) {
             return { divisions: res.rows };
         });
     });
-    app.post('/country/divisions', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] }, async (request, reply) => {
+    app.post('/country/divisions', { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_SUPER_ADMIN])] }, async (request, reply) => {
         const body = CreateDivisionSchema.parse(request.body);
         return withTransaction(async (client) => {
             const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_DIVISIONS);

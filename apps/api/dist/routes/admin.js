@@ -177,10 +177,14 @@ const AdminSettingsPatchSchema = z
     campaign_approval_mode: z.enum(['AUTO', 'MANUAL']).optional(),
     operations_sla_minutes: z.number().int().min(5).max(120).optional(),
     operations_ack_minutes: z.number().int().min(1).max(120).optional(),
+    hr_notes_json: z.string().min(2).max(500000).optional(),
+    ai_registry_json: z.string().min(2).max(500000).optional(),
 })
     .refine((value) => value.campaign_approval_mode !== undefined ||
     value.operations_sla_minutes !== undefined ||
-    value.operations_ack_minutes !== undefined, {
+    value.operations_ack_minutes !== undefined ||
+    value.hr_notes_json !== undefined ||
+    value.ai_registry_json !== undefined, {
     message: 'at least one field is required',
 });
 function appendTenantScope(state, access, scope) {
@@ -3353,6 +3357,16 @@ export async function adminRoutes(app) {
                 await client.query(`INSERT INTO admin_settings (key, value, updated_at)
            VALUES ('operations_ack_minutes', $1, now())
            ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, [String(body.data.operations_ack_minutes)]);
+            }
+            if (body.data.hr_notes_json !== undefined) {
+                await client.query(`INSERT INTO admin_settings (key, value, updated_at)
+           VALUES ('hr_notes_json', $1, now())
+           ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, [body.data.hr_notes_json]);
+            }
+            if (body.data.ai_registry_json !== undefined) {
+                await client.query(`INSERT INTO admin_settings (key, value, updated_at)
+           VALUES ('ai_registry_json', $1, now())
+           ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, [body.data.ai_registry_json]);
             }
             const res = await client.query('SELECT key, value FROM admin_settings');
             const settings = {

@@ -931,7 +931,7 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
 
   app.get(
     '/country/divisions',
-    { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] },
+    { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_SUPER_ADMIN])] },
     async (request, reply) => {
       return withTransaction(async (client) => {
         const access = await requireModuleAccess(
@@ -978,7 +978,7 @@ export async function tenantAdminRoutes(app: FastifyInstance) {
 
   app.post(
     '/country/divisions',
-    { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN])] },
+    { preHandler: [requireRole([ADMIN_ROLE_COUNTRY_ADMIN, ADMIN_ROLE_SUPER_ADMIN])] },
     async (request, reply) => {
       const body = CreateDivisionSchema.parse(request.body);
       return withTransaction(async (client) => {

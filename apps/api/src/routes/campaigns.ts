@@ -1218,6 +1218,15 @@ function normalizeCampaignMediaUrls(value: {
   return Array.from(new Set(urls));
 }
 
+function limitCampaignDeliveryMediaUrls(
+  mediaType: unknown,
+  urls: string[]
+) {
+  const normalizedType = String(mediaType ?? '').trim().toUpperCase();
+  const limit = normalizedType === 'VIDEO' ? 1 : 3;
+  return urls.slice(0, limit);
+}
+
 function primaryCampaignMediaUrl(value: {
   media_url?: unknown;
   media_urls?: unknown;
@@ -1227,9 +1236,16 @@ function primaryCampaignMediaUrl(value: {
 }
 
 function withCampaignMediaUrls<T extends Record<string, any>>(campaign: T) {
+  const mediaUrls = limitCampaignDeliveryMediaUrls(
+    campaign.media_type,
+    normalizeCampaignMediaUrls(campaign)
+  );
   return {
     ...campaign,
-    media_urls: normalizeCampaignMediaUrls(campaign),
+    media_url:
+      mediaUrls[0] ??
+      (campaign.media_url == null ? campaign.media_url : String(campaign.media_url)),
+    media_urls: mediaUrls,
   };
 }
 
@@ -2902,8 +2918,17 @@ export async function campaignRoutes(app: FastifyInstance) {
                al.status AS advert_listing_status,
                al.title AS advert_listing_title
         FROM campaigns c
-        LEFT JOIN campaigns parent ON parent.id = c.parent_campaign_id
-        LEFT JOIN advert_listings al ON al.campaign_id = c.id AND al.status != 'CANCELLED'
+        LEFT JOIN LATERAL (
+          SELECT slug, status, title
+          FROM advert_listings
+          WHERE status != 'CANCELLED'
+            AND (
+              campaign_id = c.id
+              OR (c.parent_campaign_id IS NOT NULL AND campaign_id = c.parent_campaign_id)
+            )
+          ORDER BY CASE WHEN campaign_id = c.id THEN 0 ELSE 1 END, updated_at DESC
+          LIMIT 1
+        ) al ON TRUE
         WHERE c.id IN (
           SELECT c2.id
           FROM campaigns c2
@@ -2971,8 +2996,18 @@ export async function campaignRoutes(app: FastifyInstance) {
       const found = await campaignRepo.getCampaign(client, params.id);
       if (!found) return null;
       const listingRes = await client.query(
-        `SELECT slug, status, title FROM advert_listings WHERE campaign_id=$1 AND status != 'CANCELLED' LIMIT 1`,
-        [found.id]
+        `
+        SELECT slug, status, title
+        FROM advert_listings
+        WHERE status != 'CANCELLED'
+          AND (
+            campaign_id = $1
+            OR ($2::uuid IS NOT NULL AND campaign_id = $2)
+          )
+        ORDER BY CASE WHEN campaign_id = $1 THEN 0 ELSE 1 END, updated_at DESC
+        LIMIT 1
+        `,
+        [found.id, found.parent_campaign_id ?? null]
       );
       const listing = listingRes.rows[0] ?? null;
       if (
@@ -3468,8 +3503,12 @@ export async function campaignRoutes(app: FastifyInstance) {
             estimatedAllocationCount = publicBudget.estimatedAllocationCount;
             perAllocationTarget = publicBudget.perAllocationTarget;
           }
-          const resolvedMediaUrls = normalizeCampaignMediaUrls(item);
-          const resolvedMediaUrl = primaryCampaignMediaUrl(item);
+          const resolvedMediaUrls = limitCampaignDeliveryMediaUrls(
+            item.media_type,
+            normalizeCampaignMediaUrls(item)
+          );
+          const resolvedMediaUrl =
+            resolvedMediaUrls[0] ?? primaryCampaignMediaUrl(item);
 
           const executionMeta = buildCampaignExecutionMeta(
             item.platform,
@@ -3893,8 +3932,12 @@ export async function campaignRoutes(app: FastifyInstance) {
         ) {
           return { error: 'campaign_edit_budget_locked' } as any;
         }
-        const resolvedMediaUrls = normalizeCampaignMediaUrls(body);
-        const resolvedMediaUrl = primaryCampaignMediaUrl(body);
+        const resolvedMediaUrls = limitCampaignDeliveryMediaUrls(
+          body.media_type,
+          normalizeCampaignMediaUrls(body)
+        );
+        const resolvedMediaUrl =
+          resolvedMediaUrls[0] ?? primaryCampaignMediaUrl(body);
         const executionMeta = buildCampaignExecutionMeta(
           platformKey,
           body.execution_meta,

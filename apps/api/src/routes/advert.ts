@@ -559,6 +559,8 @@ export async function advertRoutes(app: FastifyInstance) {
   });
 
   // PATCH /api/advert/listings/:slug/attach-campaign — Link a DRAFT listing to a campaign
+  // If the campaign already has another draft listing attached, replace it so
+  // the business can change the product page before funding.
   app.patch('/advert/listings/:slug/attach-campaign', {
     preHandler: [(app as any).authenticate],
   }, async (request, reply) => {
@@ -589,10 +591,26 @@ export async function advertRoutes(app: FastifyInstance) {
         if (campRow.rows[0].business_id !== userId) throw Object.assign(new Error('forbidden'), { statusCode: 403 });
 
         const existing = await client.query(
-          `SELECT id FROM advert_listings WHERE campaign_id = $1 AND id != $2`,
+          `SELECT id, status FROM advert_listings WHERE campaign_id = $1 AND id != $2`,
           [body.campaign_id, listingRow.rows[0].id]
         );
-        if (existing.rows.length > 0) throw Object.assign(new Error('campaign_already_has_listing'), { statusCode: 409 });
+        if (existing.rows.length > 0) {
+          const blocking = existing.rows.find(
+            (row) => String(row.status ?? '').trim().toUpperCase() !== 'DRAFT'
+          );
+          if (blocking) {
+            throw Object.assign(new Error('campaign_already_has_listing'), { statusCode: 409 });
+          }
+          await client.query(
+            `UPDATE advert_listings
+             SET campaign_id = NULL,
+                 updated_at = now()
+             WHERE campaign_id = $1
+               AND id != $2
+               AND status = 'DRAFT'`,
+            [body.campaign_id, listingRow.rows[0].id]
+          );
+        }
 
         const updated = await client.query(
           `UPDATE advert_listings SET campaign_id = $1, updated_at = now() WHERE id = $2 RETURNING *`,
