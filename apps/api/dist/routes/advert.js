@@ -233,7 +233,7 @@ export async function advertRoutes(app) {
                 if (!userRow.rows[0]) {
                     throw Object.assign(new Error('user_not_found'), { statusCode: 404 });
                 }
-                if (!canAccessBusinessFeatures(userRow.rows[0])) {
+                if (!canAccessBusinessFeatures(userRow.rows[0]?.role)) {
                     throw Object.assign(new Error('business_role_required'), { statusCode: 403 });
                 }
                 // Verify campaign belongs to user and extract its duration window
@@ -407,7 +407,7 @@ export async function advertRoutes(app) {
                 const userRow = await client.query(`SELECT id, role, active_role FROM users WHERE id = $1`, [userId]);
                 if (!userRow.rows[0])
                     throw Object.assign(new Error('user_not_found'), { statusCode: 404 });
-                if (!canAccessBusinessFeatures(userRow.rows[0])) {
+                if (!canAccessBusinessFeatures(userRow.rows[0]?.role)) {
                     throw Object.assign(new Error('business_role_required'), { statusCode: 403 });
                 }
                 const draftCount = await client.query(`SELECT COUNT(*) FROM advert_listings WHERE business_id = $1 AND status = 'DRAFT'`, [userId]);

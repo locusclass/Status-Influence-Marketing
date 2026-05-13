@@ -256,7 +256,7 @@ export async function advertRoutes(app: FastifyInstance) {
         if (!userRow.rows[0]) {
           throw Object.assign(new Error('user_not_found'), { statusCode: 404 });
         }
-        if (!canAccessBusinessFeatures(userRow.rows[0])) {
+        if (!canAccessBusinessFeatures(userRow.rows[0]?.role)) {
           throw Object.assign(new Error('business_role_required'), { statusCode: 403 });
         }
 
@@ -457,7 +457,7 @@ export async function advertRoutes(app: FastifyInstance) {
           `SELECT id, role, active_role FROM users WHERE id = $1`, [userId]
         );
         if (!userRow.rows[0]) throw Object.assign(new Error('user_not_found'), { statusCode: 404 });
-        if (!canAccessBusinessFeatures(userRow.rows[0])) {
+        if (!canAccessBusinessFeatures(userRow.rows[0]?.role)) {
           throw Object.assign(new Error('business_role_required'), { statusCode: 403 });
         }
 

@@ -13,8 +13,18 @@ function normalizeLegacyRoleValue(value) {
     }
     return role;
 }
+function extractRoleSource(value) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const record = value;
+        if (record.role != null)
+            return record.role;
+        if (record.active_role != null)
+            return record.active_role;
+    }
+    return value;
+}
 export function normalizeAccountRole(value) {
-    const role = normalizeLegacyRoleValue(value);
+    const role = normalizeLegacyRoleValue(extractRoleSource(value));
     if (role === ACCOUNT_ROLE_ADMIN)
         return ACCOUNT_ROLE_ADMIN;
     if (role === ACCOUNT_ROLE_BUSINESS)
