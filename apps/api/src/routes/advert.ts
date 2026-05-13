@@ -857,6 +857,48 @@ export async function advertRoutes(app: FastifyInstance) {
     }
   });
 
+  // DELETE /api/advert/listings/:slug — Remove a draft listing owned by the business
+  app.delete('/advert/listings/:slug', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    const { slug } = request.params as { slug: string };
+
+    try {
+      await withTransaction(async (client) => {
+        const listingRow = await client.query(
+          `SELECT id, business_id, status FROM advert_listings WHERE slug = $1`,
+          [slug]
+        );
+        if (!listingRow.rows[0]) {
+          throw Object.assign(new Error('listing_not_found'), {
+            statusCode: 404,
+          });
+        }
+        if (listingRow.rows[0].business_id !== userId) {
+          throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+        }
+        if (String(listingRow.rows[0].status ?? '').trim().toUpperCase() !== 'DRAFT') {
+          throw Object.assign(new Error('listing_not_deletable'), {
+            statusCode: 409,
+          });
+        }
+
+        await client.query(`DELETE FROM advert_listings WHERE id = $1`, [
+          listingRow.rows[0].id,
+        ]);
+      });
+
+      return reply.send({ success: true, slug });
+    } catch (err: any) {
+      if (err.statusCode) {
+        return reply.code(err.statusCode).send({ error: err.message });
+      }
+      app.log.error(err, 'advert.listing.delete.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
   // GET /api/advert/listings/me — Business's own listings
   app.get('/advert/listings/me', {
     preHandler: [(app as any).authenticate],
@@ -915,6 +957,12 @@ export async function advertRoutes(app: FastifyInstance) {
   // GET /api/advert/listings/:slug — Public listing page
   app.get('/advert/listings/:slug', async (request, reply) => {
     const { slug } = request.params as { slug: string };
+    const queryParams = (request.query as Record<string, unknown> | undefined) ?? {};
+    const previewToken = String(
+      queryParams.preview_token ?? queryParams.preview ?? ''
+    )
+      .trim()
+      .toLowerCase();
 
     try {
       const result = await withTransaction(async (client) => {
@@ -949,6 +997,13 @@ export async function advertRoutes(app: FastifyInstance) {
         }
 
         if (listing.status === 'DRAFT') {
+          const storedPreviewToken = String(listing.preview_token ?? '')
+            .trim()
+            .toLowerCase();
+          if (!previewToken || !storedPreviewToken || previewToken !== storedPreviewToken) {
+            return { gone: false, notFound: true };
+          }
+
           const [mediaRows, fieldRows] = await Promise.all([
             client.query(`
               SELECT id, media_pack, media_type, url, thumbnail_url, file_name,
