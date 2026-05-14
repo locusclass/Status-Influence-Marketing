@@ -874,10 +874,6 @@ export async function advertRoutes(app) {
     // GET /api/advert/listings/:slug — Public listing page
     app.get('/advert/listings/:slug', async (request, reply) => {
         const { slug } = request.params;
-        const queryParams = request.query ?? {};
-        const previewToken = String(queryParams.preview_token ?? queryParams.preview ?? '')
-            .trim()
-            .toLowerCase();
         try {
             const result = await withTransaction(async (client) => {
                 const row = await client.query(`
@@ -908,12 +904,6 @@ export async function advertRoutes(app) {
                     };
                 }
                 if (listing.status === 'DRAFT') {
-                    const storedPreviewToken = String(listing.preview_token ?? '')
-                        .trim()
-                        .toLowerCase();
-                    if (!previewToken || !storedPreviewToken || previewToken !== storedPreviewToken) {
-                        return { gone: false, notFound: true };
-                    }
                     const [mediaRows, fieldRows] = await Promise.all([
                         client.query(`
               SELECT id, media_pack, media_type, url, thumbnail_url, file_name,
