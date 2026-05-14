@@ -4144,11 +4144,43 @@ export async function campaignRoutes(app: FastifyInstance) {
           );
           if (!draftRes.rows[0]) return { error: 'campaign_not_found' } as any;
           if (draftRes.rows[0].business_id !== authUser) return { error: 'forbidden' } as any;
+
           const childRes = await client.query(
             `SELECT id FROM campaigns WHERE parent_campaign_id = $1`,
             [params.id]
           );
           const draftIds: string[] = [params.id, ...childRes.rows.map((r: any) => r.id)];
+
+          // Same FK teardown order as the funded-campaign path, minus escrow/pesapal
+          // (those rows don't exist for an unfunded draft).
+          const sessionRes = await client.query(
+            `SELECT id FROM verification_sessions WHERE campaign_id = ANY($1::uuid[])`,
+            [draftIds]
+          );
+          const sessionIds: string[] = sessionRes.rows.map((r: any) => r.id);
+
+          if (sessionIds.length) {
+            const proofRes = await client.query(
+              `SELECT id FROM proofs WHERE session_id = ANY($1::uuid[])`,
+              [sessionIds]
+            );
+            const proofIds: string[] = proofRes.rows.map((r: any) => r.id);
+            if (proofIds.length) {
+              await client.query(
+                `DELETE FROM payout_requests WHERE proof_id = ANY($1::uuid[])`,
+                [proofIds]
+              );
+              await client.query(
+                `DELETE FROM proofs WHERE id = ANY($1::uuid[])`,
+                [proofIds]
+              );
+            }
+            await client.query(
+              `DELETE FROM verification_sessions WHERE id = ANY($1::uuid[])`,
+              [sessionIds]
+            );
+          }
+
           await client.query(`DELETE FROM contracts WHERE campaign_id = ANY($1::uuid[])`, [draftIds]);
           await client.query(`DELETE FROM campaigns WHERE id = ANY($1::uuid[])`, [draftIds]);
           return { deleted: true, campaign_id: params.id };
