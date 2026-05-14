@@ -4136,6 +4136,23 @@ export async function campaignRoutes(app: FastifyInstance) {
       await ensureAdminWriteAccess(client, authUser, role);
       const editable = await loadEditableCampaign(client, params.id, authUser);
       if ('error' in editable) {
+        // A campaign with no escrow was never funded — it is a deletable draft.
+        if ((editable as any).error === 'escrow_not_found') {
+          const draftRes = await client.query(
+            `SELECT id, business_id FROM campaigns WHERE id = $1`,
+            [params.id]
+          );
+          if (!draftRes.rows[0]) return { error: 'campaign_not_found' } as any;
+          if (draftRes.rows[0].business_id !== authUser) return { error: 'forbidden' } as any;
+          const childRes = await client.query(
+            `SELECT id FROM campaigns WHERE parent_campaign_id = $1`,
+            [params.id]
+          );
+          const draftIds: string[] = [params.id, ...childRes.rows.map((r: any) => r.id)];
+          await client.query(`DELETE FROM contracts WHERE campaign_id = ANY($1::uuid[])`, [draftIds]);
+          await client.query(`DELETE FROM campaigns WHERE id = ANY($1::uuid[])`, [draftIds]);
+          return { deleted: true, campaign_id: params.id };
+        }
         return editable as any;
       }
 
