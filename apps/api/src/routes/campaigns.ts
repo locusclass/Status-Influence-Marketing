@@ -4238,13 +4238,6 @@ export async function campaignRoutes(app: FastifyInstance) {
           [escrowOwnerId]
         );
       }
-      // Explicitly delete linked advert listings before removing campaigns.
-      // ON DELETE CASCADE covers this when the migration has run on the live DB,
-      // but doing it explicitly keeps the delete correct in all environments.
-      await client.query(
-        `DELETE FROM advert_listings WHERE campaign_id = ANY($1::uuid[])`,
-        [campaignIds]
-      );
       await client.query(
         `DELETE FROM campaigns
          WHERE id = ANY($1::uuid[])`,
