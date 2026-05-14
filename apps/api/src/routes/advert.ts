@@ -904,39 +904,66 @@ export async function advertRoutes(app: FastifyInstance) {
           listingRow.rows[0].id,
         ]);
 
-        // Delete the linked draft campaign and all its dependencies
+        // Delete the linked draft campaign using the same teardown order as the
+        // campaign delete endpoint, so no FK constraint is left dangling.
         if (linkedCampaignId) {
+          // Collect root + any child campaign IDs
+          const allCampaignIdsRes = await client.query(
+            `SELECT id FROM campaigns WHERE id = $1 OR parent_campaign_id = $1`,
+            [linkedCampaignId]
+          );
+          const allCampaignIds: string[] = allCampaignIdsRes.rows.map((r: any) => r.id);
+
+          const sessionRes = await client.query(
+            `SELECT id FROM verification_sessions WHERE campaign_id = ANY($1::uuid[])`,
+            [allCampaignIds]
+          );
+          const sessionIds: string[] = sessionRes.rows.map((r: any) => r.id);
+
+          const proofRes = await client.query(
+            `SELECT id FROM proofs WHERE session_id = ANY($1::uuid[])`,
+            [sessionIds.length ? sessionIds : [linkedCampaignId]]
+          );
+          const proofIds: string[] = proofRes.rows.map((r: any) => r.id);
+
+          if (proofIds.length) {
+            await client.query(
+              `DELETE FROM payout_requests WHERE proof_id = ANY($1::uuid[])`,
+              [proofIds]
+            );
+          }
+          // pesapal_transactions references escrow_ledger — must go before escrow_ledger
           await client.query(
-            `DELETE FROM payout_requests
-             WHERE proof_id IN (
-               SELECT pr.id FROM proofs pr
-               JOIN verification_sessions vs ON vs.id = pr.session_id
-               WHERE vs.campaign_id = $1
+            `DELETE FROM pesapal_transactions
+             WHERE escrow_id IN (
+               SELECT id FROM escrow_ledger WHERE campaign_id = ANY($1::uuid[])
              )`,
-            [linkedCampaignId]
+            [allCampaignIds]
+          );
+          if (proofIds.length || sessionIds.length) {
+            await client.query(
+              `DELETE FROM proofs WHERE id = ANY($1::uuid[]) OR session_id = ANY($2::uuid[])`,
+              [
+                proofIds.length ? proofIds : [linkedCampaignId],
+                sessionIds.length ? sessionIds : [linkedCampaignId],
+              ]
+            );
+          }
+          await client.query(
+            `DELETE FROM verification_sessions WHERE campaign_id = ANY($1::uuid[])`,
+            [allCampaignIds]
           );
           await client.query(
-            `DELETE FROM proofs
-             WHERE session_id IN (
-               SELECT id FROM verification_sessions WHERE campaign_id = $1
-             )`,
-            [linkedCampaignId]
+            `DELETE FROM contracts WHERE campaign_id = ANY($1::uuid[])`,
+            [allCampaignIds]
           );
           await client.query(
-            `DELETE FROM verification_sessions WHERE campaign_id = $1`,
-            [linkedCampaignId]
+            `DELETE FROM escrow_ledger WHERE campaign_id = ANY($1::uuid[])`,
+            [allCampaignIds]
           );
           await client.query(
-            `DELETE FROM contracts WHERE campaign_id = $1`,
-            [linkedCampaignId]
-          );
-          await client.query(
-            `DELETE FROM escrow_ledger WHERE campaign_id = $1`,
-            [linkedCampaignId]
-          );
-          await client.query(
-            `DELETE FROM campaigns WHERE id = $1`,
-            [linkedCampaignId]
+            `DELETE FROM campaigns WHERE id = ANY($1::uuid[])`,
+            [allCampaignIds]
           );
         }
       });
