@@ -177,7 +177,7 @@ describe('Beneficiary discovery', () => {
       fullName: 'Business Search',
       email: 'business-search@example.com',
       phone: '+256700000001',
-      role: 'BUSINESS',
+      role: 'AMBASSADOR',
       activeRole: 'BUSINESS',
       privateContractRateUgx: 0,
     });
@@ -236,7 +236,7 @@ describe('Beneficiary discovery', () => {
       fullName: 'Business Group Search',
       email: 'business-group@example.com',
       phone: '+256700000002',
-      role: 'BUSINESS',
+      role: 'AMBASSADOR',
       activeRole: 'BUSINESS',
       privateContractRateUgx: 0,
     });
@@ -281,5 +281,35 @@ describe('Beneficiary discovery', () => {
         member_count: 1,
       },
     });
+  });
+
+  it('loads the ambassador list for an active business session', async () => {
+    const business = await insertUser({
+      fullName: 'Business List',
+      email: 'business-list@example.com',
+      phone: '+256700000003',
+      role: 'AMBASSADOR',
+      activeRole: 'BUSINESS',
+      privateContractRateUgx: 0,
+    });
+    const ambassador = await insertUser({
+      fullName: 'Grace Nakato',
+      email: 'grace@example.com',
+      phone: '+256712345678',
+      role: 'AMBASSADOR',
+      activeRole: 'AMBASSADOR',
+      privateContractRateUgx: 9100,
+    });
+    const token = app.jwt.sign(buildAuthClaims(business));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/ambassadors/list?limit=20&offset=0',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { ambassadors: Array<{ id: string }> };
+    expect(body.ambassadors.map((row) => row.id)).toContain(ambassador.id);
   });
 });

@@ -1788,6 +1788,26 @@ async function loadEditableCampaign(client: any, campaignId: string, businessId:
   return { root, children, escrow, bundle_id: bundleId, bundle_roots: bundleRoots } satisfies EditableCampaign;
 }
 
+async function deleteCampaignLinkedArtifacts(client: any, campaignIds: string[]) {
+  const uniqueCampaignIds = Array.from(
+    new Set(
+      campaignIds
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (uniqueCampaignIds.length === 0) {
+    return;
+  }
+
+  await client.query(`DELETE FROM advert_listings WHERE campaign_id = ANY($1::uuid[])`, [
+    uniqueCampaignIds,
+  ]);
+  await client.query(`DELETE FROM earnings_ledger WHERE campaign_id = ANY($1::uuid[])`, [
+    uniqueCampaignIds,
+  ]);
+}
+
 function deriveCampaignBudget(
   platform: string,
   executionMode: 'PRIVATE_CONTRACT',
@@ -2678,7 +2698,10 @@ export async function campaignRoutes(app: FastifyInstance) {
     );
 
   app.get('/campaigns/ambassador-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const role = (request.user as any)?.role as string | undefined;
+    const role = normalizeActiveRole(
+      (request.user as any)?.active_role,
+      (request.user as any)?.role
+    );
     if (!canAccessBusinessFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' };
@@ -2717,7 +2740,10 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
 
   app.get('/ambassadors/lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const role = (request.user as any)?.role as string | undefined;
+    const role = normalizeActiveRole(
+      (request.user as any)?.active_role,
+      (request.user as any)?.role
+    );
     if (!canAccessBusinessFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' };
@@ -2761,7 +2787,10 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
 
   app.get('/campaigns/group-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const role = (request.user as any)?.role as string | undefined;
+    const role = normalizeActiveRole(
+      (request.user as any)?.active_role,
+      (request.user as any)?.role
+    );
     if (!canAccessBusinessFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' };
@@ -4122,7 +4151,10 @@ export async function campaignRoutes(app: FastifyInstance) {
     const params = request.params as { id: string };
     const authSub = (request.user as any)?.sub as string | undefined;
     const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
-    const role = (request.user as any)?.role as string | undefined;
+    const role = normalizeActiveRole(
+      (request.user as any)?.active_role,
+      (request.user as any)?.role
+    );
     if (!authUser) {
       reply.code(401);
       return { error: 'unauthorized' };
@@ -4182,6 +4214,7 @@ export async function campaignRoutes(app: FastifyInstance) {
           }
 
           await client.query(`DELETE FROM contracts WHERE campaign_id = ANY($1::uuid[])`, [draftIds]);
+          await deleteCampaignLinkedArtifacts(client, draftIds);
           await client.query(`DELETE FROM campaigns WHERE id = ANY($1::uuid[])`, [draftIds]);
           return { deleted: true, campaign_id: params.id };
         }
@@ -4244,6 +4277,7 @@ export async function campaignRoutes(app: FastifyInstance) {
          WHERE campaign_id = ANY($1::uuid[])`,
         [campaignIds]
       );
+      await deleteCampaignLinkedArtifacts(client, campaignIds);
       if (editable.bundle_id && remainingBundleRoots.length > 0) {
         const nextEscrowTotal = Math.max(
           0,
@@ -5332,7 +5366,16 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   // ── List all active ambassadors (for beneficiary picker) ────────────────────
   app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const { id: authUser, role } = (request as any).user;
+    const authSub = String((request.user as any)?.sub ?? '').trim();
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
+    const role = normalizeActiveRole(
+      (request.user as any)?.active_role,
+      (request.user as any)?.role
+    );
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
     if (!canAccessBusinessFeatures(role)) {
       reply.code(403);
       return { error: 'forbidden' };
