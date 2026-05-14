@@ -869,7 +869,7 @@ export async function advertRoutes(app: FastifyInstance) {
     try {
       await withTransaction(async (client) => {
         const listingRow = await client.query(
-          `SELECT id, business_id, status FROM advert_listings WHERE slug = $1`,
+          `SELECT id, business_id, status, campaign_id FROM advert_listings WHERE slug = $1`,
           [slug]
         );
         if (!listingRow.rows[0]) {
@@ -886,9 +886,59 @@ export async function advertRoutes(app: FastifyInstance) {
           });
         }
 
+        const linkedCampaignId: string | null = listingRow.rows[0].campaign_id ?? null;
+
+        if (linkedCampaignId) {
+          const escrowCheck = await client.query(
+            `SELECT status FROM escrow_ledger WHERE campaign_id = $1 LIMIT 1`,
+            [linkedCampaignId]
+          );
+          const escrowStatus = String(escrowCheck.rows[0]?.status ?? 'PENDING').toUpperCase();
+          if (escrowStatus !== 'PENDING') {
+            throw Object.assign(new Error('listing_not_deletable'), { statusCode: 409 });
+          }
+        }
+
+        // Delete the listing first (cascades through media, offers, sessions, analytics, etc.)
         await client.query(`DELETE FROM advert_listings WHERE id = $1`, [
           listingRow.rows[0].id,
         ]);
+
+        // Delete the linked draft campaign and all its dependencies
+        if (linkedCampaignId) {
+          await client.query(
+            `DELETE FROM payout_requests
+             WHERE proof_id IN (
+               SELECT pr.id FROM proofs pr
+               JOIN verification_sessions vs ON vs.id = pr.session_id
+               WHERE vs.campaign_id = $1
+             )`,
+            [linkedCampaignId]
+          );
+          await client.query(
+            `DELETE FROM proofs
+             WHERE session_id IN (
+               SELECT id FROM verification_sessions WHERE campaign_id = $1
+             )`,
+            [linkedCampaignId]
+          );
+          await client.query(
+            `DELETE FROM verification_sessions WHERE campaign_id = $1`,
+            [linkedCampaignId]
+          );
+          await client.query(
+            `DELETE FROM contracts WHERE campaign_id = $1`,
+            [linkedCampaignId]
+          );
+          await client.query(
+            `DELETE FROM escrow_ledger WHERE campaign_id = $1`,
+            [linkedCampaignId]
+          );
+          await client.query(
+            `DELETE FROM campaigns WHERE id = $1`,
+            [linkedCampaignId]
+          );
+        }
       });
 
       return reply.send({ success: true, slug });

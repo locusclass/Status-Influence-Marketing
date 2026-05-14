@@ -3127,6 +3127,10 @@ export async function campaignRoutes(app) {
                 await client.query(`DELETE FROM escrow_ledger
            WHERE campaign_id = $1`, [escrowOwnerId]);
             }
+            // Explicitly delete linked advert listings before removing campaigns.
+            // ON DELETE CASCADE covers this when the migration has run on the live DB,
+            // but doing it explicitly keeps the delete correct in all environments.
+            await client.query(`DELETE FROM advert_listings WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
             await client.query(`DELETE FROM campaigns
          WHERE id = ANY($1::uuid[])`, [campaignIds]);
             return {
@@ -3249,9 +3253,17 @@ export async function campaignRoutes(app) {
                 reply.code(400);
                 return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' };
             }
-            const bundleMediaCheck = await client.query(`SELECT 1 FROM campaigns
-         WHERE (campaign_bundle_id = $1 OR bundle_root_campaign_id = $1 OR id = $1)
-           AND (media_url IS NOT NULL OR (media_type = 'TEXT' AND media_text IS NOT NULL))
+            const bundleMediaCheck = await client.query(`SELECT 1 FROM campaigns c
+         WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
+           AND (
+             c.media_url IS NOT NULL
+             OR (c.media_type = 'TEXT' AND c.media_text IS NOT NULL)
+             OR EXISTS (
+               SELECT 1 FROM advert_media am
+               JOIN advert_listings al ON al.id = am.listing_id
+               WHERE al.campaign_id = c.id
+             )
+           )
          LIMIT 1`, [bundle.bundle_root_campaign_id ?? bundle.bundle_id]);
             if (!bundleMediaCheck.rows.length) {
                 reply.code(400);
@@ -3456,8 +3468,14 @@ export async function campaignRoutes(app) {
             const hasCampaignMedia = (campaign.media_url && String(campaign.media_url).trim() !== '') ||
                 (campaign.media_type === 'TEXT' && campaign.media_text && String(campaign.media_text).trim() !== '');
             if (!hasCampaignMedia) {
-                reply.code(400);
-                return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' };
+                const listingMediaCheck = await client.query(`SELECT 1 FROM advert_media am
+           JOIN advert_listings al ON al.id = am.listing_id
+           WHERE al.campaign_id = $1
+           LIMIT 1`, [campaign.id]);
+                if (!listingMediaCheck.rows.length) {
+                    reply.code(400);
+                    return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' };
+                }
             }
             const bundleId = getCampaignBundleId(campaign);
             const escrowOwnerId = getEscrowCampaignId(campaign);
