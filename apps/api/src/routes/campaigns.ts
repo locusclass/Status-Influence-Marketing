@@ -5279,10 +5279,49 @@ export async function campaignRoutes(app: FastifyInstance) {
 
     return withTransaction(async (client) => {
       await ensureAdminWriteAccess(client, authUser, role);
+      await ensurePublicIdColumns(client);
+      await ensureUserProfilesTable(client);
+      await ensureViewerVerificationSchema(client);
+
       const hasFullName = await usersHasColumn(client, 'full_name');
+      const hasMaxStatusViewers = await usersHasColumn(
+        client,
+        'max_status_viewers_12h'
+      );
+      const hasRate12h = await usersHasColumn(
+        client,
+        'private_contract_rate_ugx'
+      );
+      const hasRate24h = await usersHasColumn(
+        client,
+        'private_contract_rate_24h_ugx'
+      );
+      const hasPricePrivacyMode = await usersHasColumn(
+        client,
+        'price_privacy_mode'
+      );
+      const hasBeneficiaryListingMode = await usersHasColumn(
+        client,
+        'beneficiary_listing_mode'
+      );
       const fullNameSelect = hasFullName
         ? "COALESCE(NULLIF(u.full_name, ''), NULLIF(p.full_name, ''), u.email)"
         : "COALESCE(NULLIF(p.full_name, ''), u.email)";
+      const maxStatusViewersSelect = hasMaxStatusViewers
+        ? 'COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h'
+        : '0::int AS max_status_viewers_12h';
+      const rate12hSelect = hasRate12h
+        ? 'COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx'
+        : '0::int AS private_contract_rate_ugx';
+      const rate24hSelect = hasRate24h
+        ? 'COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx'
+        : '0::int AS private_contract_rate_24h_ugx';
+      const pricePrivacyModeSelect = hasPricePrivacyMode
+        ? "COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode"
+        : "'NEGOTIABLE'::text AS price_privacy_mode";
+      const beneficiaryListingModeExpr = hasBeneficiaryListingMode
+        ? "COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED')"
+        : "'LISTED'::text";
 
       const params: any[] = [];
       let whereExtra = '';
@@ -5300,11 +5339,11 @@ export async function campaignRoutes(app: FastifyInstance) {
           u.phone,
           u.email,
           u.status,
-          COALESCE(u.max_status_viewers_12h, 0)::int AS max_status_viewers_12h,
-          COALESCE(u.private_contract_rate_ugx, 0)::int AS private_contract_rate_ugx,
-          COALESCE(u.private_contract_rate_24h_ugx, 0)::int AS private_contract_rate_24h_ugx,
-          COALESCE(NULLIF(u.price_privacy_mode, ''), 'NEGOTIABLE') AS price_privacy_mode,
-          COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') AS beneficiary_listing_mode,
+          ${maxStatusViewersSelect},
+          ${rate12hSelect},
+          ${rate24hSelect},
+          ${pricePrivacyModeSelect},
+          ${beneficiaryListingModeExpr} AS beneficiary_listing_mode,
           ${buildViewerVerificationFields()},
           ${fullNameSelect} AS full_name,
           COALESCE(p.avatar_url, '') AS avatar_url
@@ -5318,8 +5357,8 @@ export async function campaignRoutes(app: FastifyInstance) {
             // When searching specifically, also surface DIRECT_ONLY ambassadors —
             // they want to be found by name/phone but not appear in the default browse.
             : searchQ
-              ? `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') IN ('LISTED', 'DIRECT_ONLY')`
-              : `AND COALESCE(NULLIF(u.beneficiary_listing_mode, ''), 'LISTED') = 'LISTED'`
+              ? `AND ${beneficiaryListingModeExpr} IN ('LISTED', 'DIRECT_ONLY')`
+              : `AND ${beneficiaryListingModeExpr} = 'LISTED'`
           }
           ${whereExtra}
         ORDER BY
