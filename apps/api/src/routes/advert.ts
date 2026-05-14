@@ -4,6 +4,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { withTransaction, query } from '../db.js';
+import { config } from '../config.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
 
@@ -26,6 +27,19 @@ function generateListingSlug(title: string): string {
 
 function generateAmbassadorCode(): string {
   return Math.random().toString(36).slice(2, 10).toUpperCase();
+}
+
+function buildPublicListingUrl(slug: string): string {
+  const trimmedSlug = slug.trim();
+  if (!trimmedSlug) return '';
+
+  try {
+    const base = config.publicAppBaseUrl.trim() || 'https://primestatus.site';
+    const normalizedBase = base.endsWith('/') ? base : `${base}/`;
+    return new URL(`listing/${trimmedSlug}`, normalizedBase).toString();
+  } catch {
+    return `https://primestatus.site/listing/${trimmedSlug}`;
+  }
 }
 
 async function ensureAdvertSchema(client: any) {
@@ -339,7 +353,7 @@ export async function advertRoutes(app: FastifyInstance) {
           body.is_negotiable, body.location_text ?? null,
           body.latitude ?? null, body.longitude ?? null,
           body.cta_whatsapp ?? null, body.cta_phone ?? null,
-          body.cta_email ?? null, `https://primestatus.site/listing/${slug}`,
+          body.cta_email ?? null, buildPublicListingUrl(slug),
           campaignEndAt,      // expires_at = campaign end
           campaignStartAt,    // campaign_start_at
           campaignEndAt,      // campaign_end_at
@@ -502,7 +516,7 @@ export async function advertRoutes(app: FastifyInstance) {
           body.is_negotiable, body.location_text ?? null,
           body.latitude ?? null, body.longitude ?? null,
           body.cta_whatsapp ?? null, body.cta_phone ?? null,
-          body.cta_email ?? null, `https://primestatus.site/listing/${slug}`,
+          body.cta_email ?? null, buildPublicListingUrl(slug),
           qualityScore,
         ]);
 
@@ -977,6 +991,7 @@ export async function advertRoutes(app: FastifyInstance) {
         if (!row.rows[0]) return { gone: false, notFound: true };
 
         const listing = row.rows[0];
+        listing.cta_url = buildPublicListingUrl(String(listing.slug ?? slug));
         const listingId = listing.id;
         const accessState = String(listing.access_state ?? 'PUBLIC').toUpperCase();
 

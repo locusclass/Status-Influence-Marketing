@@ -141,6 +141,9 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET ?? 'dev-secret',
   corsOrigin: process.env.CORS_ORIGIN ?? '',
   apiBaseUrl: process.env.API_BASE_URL ?? '',
+  publicAppBaseUrl: stripWrappingQuotes(
+    process.env.PUBLIC_APP_BASE_URL ?? 'https://primestatus.site'
+  ),
   uploadDir: resolveUploadDir(),
   uploadSigningSecret: process.env.UPLOAD_SIGNING_SECRET ?? 'dev-upload-secret',
   fingerprintPepper: process.env.FINGERPRINT_PEPPER ?? 'dev-pepper',
