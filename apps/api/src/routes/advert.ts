@@ -2069,4 +2069,678 @@ export async function advertRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
+
+  // ─── ADMIN: SINGLE LISTING DETAIL ────────────────────────────────────────
+  app.get('/admin/advert/listings/:slug', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    try {
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(`
+          SELECT
+            al.*,
+            u.full_name AS business_name, u.email AS business_email, u.phone AS business_phone,
+            lt.name AS listing_type_name,
+            s.name AS subcategory_name,
+            cat.name AS category_name, cat.id AS category_id,
+            s.id AS subcategory_id,
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
+            c.id AS campaign_id, c.status AS campaign_status,
+            c.budget_total AS campaign_budget, c.payout_amount AS campaign_payout,
+            (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id) AS total_offers,
+            (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id AND o.status = 'PENDING') AS pending_offers,
+            (SELECT COUNT(*) FROM advert_media am WHERE am.listing_id = al.id) AS media_count,
+            (SELECT COUNT(*) FROM advert_tracking_links tl WHERE tl.listing_id = al.id) AS tracking_links_count,
+            (SELECT COUNT(*) FROM advert_page_sessions ps WHERE ps.listing_id = al.id) AS session_count
+          FROM advert_listings al
+          JOIN users u ON u.id = al.business_id
+          LEFT JOIN campaigns c ON c.id = al.campaign_id
+          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          JOIN advert_categories cat ON cat.id = s.category_id
+          WHERE al.slug = $1
+        `, [slug]);
+        if (!row.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        const media = await client.query(
+          `SELECT id, media_pack, media_type, url, thumbnail_url, file_name, mime_type, file_size_bytes, sort_order, created_at
+           FROM advert_media WHERE listing_id = $1 ORDER BY media_pack, sort_order`,
+          [row.rows[0].id]
+        );
+        return { listing: row.rows[0], media: media.rows };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'admin.advert.listing.detail.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: PLATFORM-WIDE ANALYTICS ──────────────────────────────────────
+  app.get('/admin/advert/analytics', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as { days?: string };
+    const days = Math.min(90, Math.max(1, parseInt(query.days ?? '30', 10)));
+    try {
+      const result = await withTransaction(async (client) => {
+        const [overview, topListings, categoryBreakdown, eventBreakdown, offerStats] = await Promise.all([
+          client.query(`
+            SELECT
+              (SELECT COUNT(*) FROM advert_listings) AS total_listings,
+              (SELECT COUNT(*) FROM advert_listings WHERE status = 'ACTIVE') AS active_listings,
+              (SELECT COUNT(*) FROM advert_listings WHERE status = 'DRAFT') AS draft_listings,
+              (SELECT COUNT(*) FROM advert_listings WHERE status = 'EXPIRED') AS expired_listings,
+              (SELECT COALESCE(SUM(views_total),0) FROM advert_listings) AS total_views,
+              (SELECT COALESCE(SUM(views_unique),0) FROM advert_listings) AS total_unique_views,
+              (SELECT COUNT(*) FROM advert_offers) AS total_offers,
+              (SELECT COUNT(*) FROM advert_offers WHERE status = 'PENDING') AS pending_offers,
+              (SELECT COUNT(*) FROM advert_offers WHERE status = 'ACCEPTED') AS accepted_offers,
+              (SELECT COUNT(*) FROM advert_page_sessions WHERE created_at > now() - ($1::int * interval '1 day')) AS recent_sessions,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'WHATSAPP_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS whatsapp_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'PHONE_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS phone_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'EMAIL_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS email_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'OUTBOUND_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS outbound_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE created_at > now() - ($1::int * interval '1 day')) AS total_events,
+              (SELECT COUNT(*) FROM advert_media) AS total_media_assets,
+              (SELECT COUNT(*) FROM advert_tracking_links) AS total_tracking_links
+          `, [days]),
+          client.query(`
+            SELECT al.id, al.slug, al.title, al.views_total, al.views_unique, al.listing_quality_score, al.status,
+              (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id) AS offer_count,
+              u.full_name AS business_name
+            FROM advert_listings al
+            JOIN users u ON u.id = al.business_id
+            ORDER BY al.views_total DESC LIMIT 10
+          `),
+          client.query(`
+            SELECT cat.name AS category, COUNT(al.id) AS listing_count, COALESCE(SUM(al.views_total),0) AS views
+            FROM advert_listings al
+            JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+            JOIN advert_subcategories s ON s.id = lt.subcategory_id
+            JOIN advert_categories cat ON cat.id = s.category_id
+            GROUP BY cat.name ORDER BY listing_count DESC
+          `),
+          client.query(`
+            SELECT event_type, COUNT(*) AS count
+            FROM advert_engagement_events
+            WHERE created_at > now() - ($1::int * interval '1 day')
+            GROUP BY event_type ORDER BY count DESC
+          `, [days]),
+          client.query(`
+            SELECT
+              COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+              COUNT(*) FILTER (WHERE status = 'ACCEPTED') AS accepted,
+              COUNT(*) FILTER (WHERE status = 'REJECTED') AS rejected,
+              COUNT(*) FILTER (WHERE status = 'COUNTERED') AS countered,
+              COUNT(*) FILTER (WHERE status = 'CLOSED') AS closed,
+              COALESCE(AVG(offer_amount) FILTER (WHERE offer_amount IS NOT NULL), 0)::numeric(12,2) AS avg_offer_amount
+            FROM advert_offers
+            WHERE created_at > now() - ($1::int * interval '1 day')
+          `, [days]),
+        ]);
+        return {
+          overview: overview.rows[0],
+          top_listings: topListings.rows,
+          category_breakdown: categoryBreakdown.rows,
+          event_breakdown: eventBreakdown.rows,
+          offer_stats: offerStats.rows[0],
+          period_days: days,
+        };
+      });
+      return reply.send(result);
+    } catch (err) {
+      app.log.error(err, 'admin.advert.analytics.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: PER-LISTING ANALYTICS ────────────────────────────────────────
+  app.get('/admin/advert/listings/:slug/analytics', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const query = request.query as { days?: string };
+    const days = Math.min(90, Math.max(1, parseInt(query.days ?? '30', 10)));
+    try {
+      const result = await withTransaction(async (client) => {
+        const listingRow = await client.query(
+          `SELECT id, title, views_total, views_unique FROM advert_listings WHERE slug = $1`,
+          [slug]
+        );
+        if (!listingRow.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        const listingId = listingRow.rows[0].id;
+        const [sessions, events, offers, mediaInteractions, trackingLinks] = await Promise.all([
+          client.query(`
+            SELECT COUNT(*) AS total_sessions,
+              COUNT(DISTINCT visitor_fingerprint) FILTER (WHERE visitor_fingerprint IS NOT NULL) AS unique_visitors,
+              COALESCE(AVG(session_duration_secs) FILTER (WHERE session_duration_secs > 0), 0)::numeric(10,2) AS avg_duration_secs,
+              COALESCE(AVG(scroll_depth_pct) FILTER (WHERE scroll_depth_pct > 0), 0)::numeric(10,2) AS avg_scroll_depth,
+              COUNT(*) FILTER (WHERE device_type = 'mobile') AS mobile_sessions,
+              COUNT(*) FILTER (WHERE device_type = 'desktop') AS desktop_sessions,
+              COUNT(*) FILTER (WHERE device_type = 'tablet') AS tablet_sessions
+            FROM advert_page_sessions
+            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+          `, [listingId, days]),
+          client.query(`
+            SELECT event_type, COUNT(*) AS count
+            FROM advert_engagement_events
+            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+            GROUP BY event_type ORDER BY count DESC
+          `, [listingId, days]),
+          client.query(`
+            SELECT status, COUNT(*) AS count, COALESCE(AVG(offer_amount),0)::numeric(12,2) AS avg_amount
+            FROM advert_offers WHERE listing_id = $1
+            GROUP BY status ORDER BY count DESC
+          `, [listingId]),
+          client.query(`
+            SELECT interaction_type, COUNT(*) AS count
+            FROM advert_media_interactions
+            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+            GROUP BY interaction_type ORDER BY count DESC
+          `, [listingId, days]),
+          client.query(`
+            SELECT tl.ambassador_code, u.full_name AS ambassador_name,
+              (SELECT COUNT(*) FROM advert_page_sessions ps WHERE ps.ambassador_code = tl.ambassador_code AND ps.listing_id = $1) AS sessions,
+              (SELECT COUNT(*) FROM advert_offers o WHERE o.ambassador_code = tl.ambassador_code AND o.listing_id = $1) AS offers
+            FROM advert_tracking_links tl
+            JOIN users u ON u.id = tl.ambassador_id
+            WHERE tl.listing_id = $1
+          `, [listingId]),
+        ]);
+        return {
+          listing: listingRow.rows[0],
+          sessions: sessions.rows[0],
+          events: events.rows,
+          offers: offers.rows,
+          media_interactions: mediaInteractions.rows,
+          tracking_links: trackingLinks.rows,
+          period_days: days,
+        };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'admin.advert.listing.analytics.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: LISTING MEDIA ─────────────────────────────────────────────────
+  app.get('/admin/advert/listings/:slug/media', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    try {
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(`SELECT id FROM advert_listings WHERE slug = $1`, [slug]);
+        if (!row.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        const media = await client.query(
+          `SELECT id, media_pack, media_type, url, thumbnail_url, file_name, mime_type, file_size_bytes, sort_order, created_at
+           FROM advert_media WHERE listing_id = $1 ORDER BY media_pack, sort_order`,
+          [row.rows[0].id]
+        );
+        return { media: media.rows, listing_id: row.rows[0].id };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.delete('/admin/advert/listings/:slug/media/:mediaId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { slug, mediaId } = request.params as { slug: string; mediaId: string };
+    try {
+      await withTransaction(async (client) => {
+        const row = await client.query(`SELECT id FROM advert_listings WHERE slug = $1`, [slug]);
+        if (!row.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        await client.query(`DELETE FROM advert_media WHERE id = $1 AND listing_id = $2`, [mediaId, row.rows[0].id]);
+      });
+      return reply.send({ deleted: true });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: OFFERS ────────────────────────────────────────────────────────
+  app.get('/admin/advert/offers', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as { page?: string; limit?: string; status?: string; search?: string };
+    const page = Math.max(1, parseInt(query.page ?? '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit ?? '30', 10)));
+    const offset = (page - 1) * limit;
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT o.*, al.slug AS listing_slug, al.title AS listing_title,
+            u.full_name AS business_name
+          FROM advert_offers o
+          JOIN advert_listings al ON al.id = o.listing_id
+          JOIN users u ON u.id = al.business_id
+          WHERE ($3::text IS NULL OR o.status = $3)
+            AND ($4::text IS NULL OR
+                 al.title ILIKE '%' || $4 || '%' OR
+                 o.offeror_name ILIKE '%' || $4 || '%')
+          ORDER BY o.created_at DESC
+          LIMIT $1 OFFSET $2
+        `, [limit, offset, query.status ?? null, query.search ?? null]);
+        const countRow = await client.query(`
+          SELECT COUNT(*) FROM advert_offers o
+          JOIN advert_listings al ON al.id = o.listing_id
+          WHERE ($1::text IS NULL OR o.status = $1)
+            AND ($2::text IS NULL OR al.title ILIKE '%' || $2 || '%' OR o.offeror_name ILIKE '%' || $2 || '%')
+        `, [query.status ?? null, query.search ?? null]);
+        return { offers: rows.rows, total: parseInt(countRow.rows[0]?.count ?? '0', 10), page, limit };
+      });
+      return reply.send(result);
+    } catch (err) {
+      app.log.error(err, 'admin.advert.offers.list.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.patch('/admin/advert/offers/:offerId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { offerId } = request.params as { offerId: string };
+    const bodySchema = z.object({
+      status: z.enum(['PENDING', 'ACCEPTED', 'REJECTED', 'COUNTERED', 'CONTACTED', 'CLOSED']).optional(),
+      admin_note: z.string().max(500).optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const result = await withTransaction(async (client) => {
+        const fields: string[] = [];
+        const vals: unknown[] = [offerId];
+        if (body.status) { fields.push(`status = $${vals.length + 1}`); vals.push(body.status); }
+        if (body.admin_note !== undefined) { fields.push(`admin_note = $${vals.length + 1}`); vals.push(body.admin_note); }
+        if (!fields.length) throw Object.assign(new Error('no_fields'), { statusCode: 400 });
+        fields.push(`updated_at = now()`);
+        const row = await client.query(
+          `UPDATE advert_offers SET ${fields.join(', ')} WHERE id = $1 RETURNING *`,
+          vals
+        );
+        if (!row.rows[0]) throw Object.assign(new Error('offer_not_found'), { statusCode: 404 });
+        return { offer: row.rows[0] };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: TAXONOMY — CATEGORIES ────────────────────────────────────────
+  app.get('/admin/advert/categories', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT cat.*, COUNT(DISTINCT s.id) AS subcategory_count, COUNT(DISTINCT al.id) AS listing_count
+          FROM advert_categories cat
+          LEFT JOIN advert_subcategories s ON s.category_id = cat.id
+          LEFT JOIN advert_listing_types lt ON lt.subcategory_id = s.id
+          LEFT JOIN advert_listings al ON al.listing_type_id = lt.id
+          GROUP BY cat.id ORDER BY cat.name
+        `);
+        return { categories: rows.rows };
+      });
+      return reply.send(result);
+    } catch (err) {
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.post('/admin/advert/categories', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const bodySchema = z.object({
+      name: z.string().min(2).max(80),
+      icon: z.string().max(10).optional().nullable(),
+      description: z.string().max(300).optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const slug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(
+          `INSERT INTO advert_categories (name, slug, icon, description) VALUES ($1, $2, $3, $4) RETURNING *`,
+          [body.name, slug, body.icon ?? null, body.description ?? null]
+        );
+        return { category: row.rows[0] };
+      });
+      return reply.code(201).send(result);
+    } catch (err: any) {
+      if (String(err.code) === '23505') return reply.code(409).send({ error: 'category_exists' });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.patch('/admin/advert/categories/:categoryId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { categoryId } = request.params as { categoryId: string };
+    const bodySchema = z.object({
+      name: z.string().min(2).max(80).optional(),
+      icon: z.string().max(10).optional().nullable(),
+      description: z.string().max(300).optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const result = await withTransaction(async (client) => {
+        const fields: string[] = [];
+        const vals: unknown[] = [categoryId];
+        if (body.name) { fields.push(`name = $${vals.length + 1}`); vals.push(body.name); }
+        if (body.icon !== undefined) { fields.push(`icon = $${vals.length + 1}`); vals.push(body.icon); }
+        if (body.description !== undefined) { fields.push(`description = $${vals.length + 1}`); vals.push(body.description); }
+        if (!fields.length) return reply.code(400).send({ error: 'no_fields' });
+        const row = await client.query(
+          `UPDATE advert_categories SET ${fields.join(', ')} WHERE id = $1 RETURNING *`, vals
+        );
+        if (!row.rows[0]) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+        return { category: row.rows[0] };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: TAXONOMY — SUBCATEGORIES ─────────────────────────────────────
+  app.get('/admin/advert/subcategories', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as { category_id?: string };
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT s.*, cat.name AS category_name,
+            COUNT(DISTINCT lt.id) AS listing_type_count
+          FROM advert_subcategories s
+          JOIN advert_categories cat ON cat.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.subcategory_id = s.id
+          WHERE ($1::uuid IS NULL OR s.category_id = $1::uuid)
+          GROUP BY s.id, cat.name ORDER BY cat.name, s.name
+        `, [query.category_id ?? null]);
+        return { subcategories: rows.rows };
+      });
+      return reply.send(result);
+    } catch (err) {
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.post('/admin/advert/subcategories', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const bodySchema = z.object({
+      category_id: z.string().uuid(),
+      name: z.string().min(2).max(80),
+      description: z.string().max(300).optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const slug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(
+          `INSERT INTO advert_subcategories (category_id, name, slug) VALUES ($1, $2, $3) RETURNING *`,
+          [body.category_id, body.name, slug]
+        );
+        return { subcategory: row.rows[0] };
+      });
+      return reply.code(201).send(result);
+    } catch (err: any) {
+      if (String(err.code) === '23505') return reply.code(409).send({ error: 'subcategory_exists' });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.patch('/admin/advert/subcategories/:subcategoryId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { subcategoryId } = request.params as { subcategoryId: string };
+    const bodySchema = z.object({ name: z.string().min(2).max(80).optional() });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(
+          `UPDATE advert_subcategories SET name = COALESCE($2, name) WHERE id = $1 RETURNING *`,
+          [subcategoryId, body.name ?? null]
+        );
+        if (!row.rows[0]) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+        return { subcategory: row.rows[0] };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: TAXONOMY — LISTING TYPES ─────────────────────────────────────
+  app.get('/admin/advert/listing-types', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as { subcategory_id?: string };
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT lt.*, s.name AS subcategory_name, cat.name AS category_name,
+            COUNT(DISTINCT fd.id) AS field_count,
+            COUNT(DISTINCT al.id) AS listing_count
+          FROM advert_listing_types lt
+          JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          JOIN advert_categories cat ON cat.id = s.category_id
+          LEFT JOIN advert_field_definitions fd ON fd.listing_type_id = lt.id
+          LEFT JOIN advert_listings al ON al.listing_type_id = lt.id
+          WHERE ($1::uuid IS NULL OR lt.subcategory_id = $1::uuid)
+          GROUP BY lt.id, s.name, cat.name ORDER BY cat.name, s.name, lt.name
+        `, [query.subcategory_id ?? null]);
+        return { listing_types: rows.rows };
+      });
+      return reply.send(result);
+    } catch (err) {
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.post('/admin/advert/listing-types', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const bodySchema = z.object({
+      subcategory_id: z.string().uuid(),
+      name: z.string().min(2).max(80),
+      description: z.string().max(300).optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const slug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(
+          `INSERT INTO advert_listing_types (subcategory_id, name, slug) VALUES ($1, $2, $3) RETURNING *`,
+          [body.subcategory_id, body.name, slug]
+        );
+        return { listing_type: row.rows[0] };
+      });
+      return reply.code(201).send(result);
+    } catch (err: any) {
+      if (String(err.code) === '23505') return reply.code(409).send({ error: 'type_exists' });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.patch('/admin/advert/listing-types/:typeId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { typeId } = request.params as { typeId: string };
+    const bodySchema = z.object({ name: z.string().min(2).max(80).optional() });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(
+          `UPDATE advert_listing_types SET name = COALESCE($2, name) WHERE id = $1 RETURNING *`,
+          [typeId, body.name ?? null]
+        );
+        if (!row.rows[0]) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+        return { listing_type: row.rows[0] };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: TAXONOMY — FIELD DEFINITIONS ─────────────────────────────────
+  app.get('/admin/advert/field-definitions', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as { listing_type_id?: string };
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT fd.*, lt.name AS listing_type_name
+          FROM advert_field_definitions fd
+          JOIN advert_listing_types lt ON lt.id = fd.listing_type_id
+          WHERE ($1::uuid IS NULL OR fd.listing_type_id = $1::uuid)
+          ORDER BY fd.listing_type_id, fd.sort_order
+        `, [query.listing_type_id ?? null]);
+        return { field_definitions: rows.rows };
+      });
+      return reply.send(result);
+    } catch (err) {
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.post('/admin/advert/field-definitions', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const bodySchema = z.object({
+      listing_type_id: z.string().uuid(),
+      field_key: z.string().min(2).max(60),
+      label: z.string().min(2).max(80),
+      field_type: z.enum(['TEXT', 'NUMBER', 'SELECT', 'MULTISELECT', 'BOOLEAN', 'DATE']),
+      is_required: z.boolean().default(false),
+      sort_order: z.number().int().min(0).default(0),
+      options_json: z.any().optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const result = await withTransaction(async (client) => {
+        const row = await client.query(
+          `INSERT INTO advert_field_definitions (listing_type_id, field_key, label, field_type, is_required, sort_order, options_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+          [body.listing_type_id, body.field_key, body.label, body.field_type, body.is_required, body.sort_order, body.options_json ? JSON.stringify(body.options_json) : null]
+        );
+        return { field_definition: row.rows[0] };
+      });
+      return reply.code(201).send(result);
+    } catch (err: any) {
+      if (String(err.code) === '23505') return reply.code(409).send({ error: 'field_exists' });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.patch('/admin/advert/field-definitions/:fieldId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { fieldId } = request.params as { fieldId: string };
+    const bodySchema = z.object({
+      label: z.string().min(2).max(80).optional(),
+      is_required: z.boolean().optional(),
+      sort_order: z.number().int().min(0).optional(),
+      options_json: z.any().optional().nullable(),
+    });
+    let body: z.infer<typeof bodySchema>;
+    try { body = bodySchema.parse(request.body); } catch { return reply.code(400).send({ error: 'validation_error' }); }
+    try {
+      const result = await withTransaction(async (client) => {
+        const fields: string[] = [];
+        const vals: unknown[] = [fieldId];
+        if (body.label !== undefined) { fields.push(`label = $${vals.length + 1}`); vals.push(body.label); }
+        if (body.is_required !== undefined) { fields.push(`is_required = $${vals.length + 1}`); vals.push(body.is_required); }
+        if (body.sort_order !== undefined) { fields.push(`sort_order = $${vals.length + 1}`); vals.push(body.sort_order); }
+        if (body.options_json !== undefined) { fields.push(`options_json = $${vals.length + 1}`); vals.push(body.options_json ? JSON.stringify(body.options_json) : null); }
+        if (!fields.length) return reply.code(400).send({ error: 'no_fields' });
+        const row = await client.query(
+          `UPDATE advert_field_definitions SET ${fields.join(', ')} WHERE id = $1 RETURNING *`, vals
+        );
+        if (!row.rows[0]) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+        return { field_definition: row.rows[0] };
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.delete('/admin/advert/field-definitions/:fieldId', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const { fieldId } = request.params as { fieldId: string };
+    try {
+      await withTransaction(async (client) => {
+        await client.query(`DELETE FROM advert_field_definitions WHERE id = $1`, [fieldId]);
+      });
+      return reply.send({ deleted: true });
+    } catch (err) {
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ─── ADMIN: TRACKING LINKS ────────────────────────────────────────────────
+  app.get('/admin/advert/tracking-links', {
+    preHandler: [(app as any).adminOnly],
+  }, async (request, reply) => {
+    const query = request.query as { page?: string; limit?: string; search?: string };
+    const page = Math.max(1, parseInt(query.page ?? '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit ?? '30', 10)));
+    const offset = (page - 1) * limit;
+    try {
+      const result = await withTransaction(async (client) => {
+        const rows = await client.query(`
+          SELECT tl.id, tl.ambassador_code, tl.created_at,
+            al.slug AS listing_slug, al.title AS listing_title,
+            u.full_name AS ambassador_name, u.phone AS ambassador_phone,
+            (SELECT COUNT(*) FROM advert_page_sessions ps WHERE ps.ambassador_code = tl.ambassador_code AND ps.listing_id = tl.listing_id) AS sessions,
+            (SELECT COUNT(*) FROM advert_offers o WHERE o.ambassador_code = tl.ambassador_code AND o.listing_id = tl.listing_id) AS offers_generated
+          FROM advert_tracking_links tl
+          JOIN advert_listings al ON al.id = tl.listing_id
+          JOIN users u ON u.id = tl.ambassador_id
+          WHERE ($3::text IS NULL OR u.full_name ILIKE '%' || $3 || '%' OR al.title ILIKE '%' || $3 || '%' OR tl.ambassador_code ILIKE '%' || $3 || '%')
+          ORDER BY tl.created_at DESC
+          LIMIT $1 OFFSET $2
+        `, [limit, offset, query.search ?? null]);
+        const countRow = await client.query(`
+          SELECT COUNT(*) FROM advert_tracking_links tl
+          JOIN advert_listings al ON al.id = tl.listing_id
+          JOIN users u ON u.id = tl.ambassador_id
+          WHERE ($1::text IS NULL OR u.full_name ILIKE '%' || $1 || '%' OR al.title ILIKE '%' || $1 || '%' OR tl.ambassador_code ILIKE '%' || $1 || '%')
+        `, [query.search ?? null]);
+        return { tracking_links: rows.rows, total: parseInt(countRow.rows[0]?.count ?? '0', 10), page, limit };
+      });
+      return reply.send(result);
+    } catch (err) {
+      app.log.error(err, 'admin.advert.tracking_links.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
 }

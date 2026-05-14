@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { z } from 'zod';
 import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PUBLIC_COMMUNICATION, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WITHDRAWALS, ADMIN_ROLE_ADMIN, ADMIN_ROLE_SUPER_ADMIN, ASSIGNABLE_ADMIN_MODULE_KEYS, adminModuleDefinitions, recordCampaignRevenueEntry, normalizeAdminModuleKey, } from '@prime/shared';
 import { withTransaction } from '../db.js';
@@ -49,6 +50,9 @@ const CreateBlockingNoticeSchema = z
     body: z.string().trim().min(6).max(4000),
     send_to_all: z.boolean().default(false),
     user_ids: z.array(z.string().trim().min(1).max(120)).max(500).default([]),
+    expires_in_minutes: z.number().int().positive().max(525600).optional(),
+    media_url: z.string().url().optional().nullable(),
+    media_type: z.enum(['IMAGE', 'VIDEO']).optional().nullable(),
 })
     .superRefine((value, ctx) => {
     if (!value.send_to_all && value.user_ids.length == 0) {
@@ -2568,6 +2572,7 @@ export async function adminRoutes(app) {
             let idx = 1;
             if (status === 'ACTIVE') {
                 conditions.push(`notice.removed_at IS NULL`);
+                conditions.push(`(notice.expires_at IS NULL OR notice.expires_at > NOW())`);
             }
             else if (status === 'REMOVED') {
                 conditions.push(`notice.removed_at IS NOT NULL`);
@@ -2595,6 +2600,9 @@ export async function adminRoutes(app) {
           notice.removed_at,
           notice.created_by_user_id,
           notice.removed_by_user_id,
+          notice.expires_at,
+          notice.media_url,
+          notice.media_type,
           COALESCE(NULLIF(creator.full_name, ''), creator.email, 'Admin') AS created_by_name,
           COALESCE(NULLIF(remover.full_name, ''), remover.email, 'Admin') AS removed_by_name,
           COUNT(DISTINCT target.user_id)::int AS target_count
@@ -2638,6 +2646,9 @@ export async function adminRoutes(app) {
                 return { error: 'notice_target_not_found' };
             }
             const actorId = String(request.user.sub ?? '').trim();
+            const expiresAt = parsed.data.expires_in_minutes
+                ? new Date(Date.now() + parsed.data.expires_in_minutes * 60 * 1000).toISOString()
+                : null;
             const notice = await createBlockingNotice(client, targetUsers.map((row) => row.id), {
                 title: parsed.data.title,
                 body: parsed.data.body,
@@ -2645,6 +2656,9 @@ export async function adminRoutes(app) {
                     ? 'ALL_SCOPED_USERS'
                     : 'SELECTED_USERS',
                 createdByUserId: actorId,
+                expiresAt,
+                mediaUrl: parsed.data.media_url ?? null,
+                mediaType: parsed.data.media_type ?? null,
             });
             if (!notice) {
                 reply.code(500);
@@ -3947,6 +3961,114 @@ export async function adminRoutes(app) {
             return { error: 'escrow_not_found' };
         }
         return { escrow: res };
+    });
+    const SystemFundSchema = z.object({
+        amount: z.number().int().positive().optional(),
+        note: z.string().max(500).optional(),
+    });
+    app.post('/admin/campaigns/:id/system-fund', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const params = request.params;
+        const body = SystemFundSchema.parse(request.body ?? {});
+        const adminId = String(request.user.sub ?? '');
+        return withTransaction(async (client) => {
+            const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_CAMPAIGNS);
+            if (!access)
+                return { error: 'forbidden' };
+            // Load campaign with its escrow
+            const campaignRes = await client.query(`SELECT c.id, c.title, c.country_id, c.division_id, c.status, c.budget_total,
+                e.id AS escrow_id, e.status AS escrow_status, e.amount_total AS escrow_amount
+         FROM campaigns c
+         LEFT JOIN escrow_ledger e ON e.campaign_id = c.id
+         WHERE c.id = $1
+         LIMIT 1`, [params.id]);
+            const campaign = campaignRes.rows[0];
+            if (!campaign) {
+                reply.code(404);
+                return { error: 'campaign_not_found' };
+            }
+            if (!matchesTenantScope(access, campaign)) {
+                reply.code(403);
+                return { error: 'forbidden' };
+            }
+            // Reject if already funded
+            const fundedStatuses = ['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'];
+            if (campaign.escrow_status && fundedStatuses.includes(String(campaign.escrow_status))) {
+                reply.code(400);
+                return { error: 'campaign_already_funded', detail: `Escrow is already ${campaign.escrow_status}.` };
+            }
+            let escrowId = campaign.escrow_id;
+            let escrowAmount = Number(campaign.escrow_amount ?? campaign.budget_total ?? 0);
+            // Create escrow if it doesn't exist
+            if (!escrowId) {
+                const amount = body.amount ?? Number(campaign.budget_total ?? 0);
+                if (!amount || amount <= 0) {
+                    reply.code(400);
+                    return { error: 'amount_required', detail: 'Campaign has no pending escrow. Provide a positive amount.' };
+                }
+                const newEscrow = await paymentRepo.createEscrow(client, params.id, amount);
+                escrowId = newEscrow.id;
+                escrowAmount = amount;
+            }
+            else if (body.amount && body.amount !== escrowAmount) {
+                // Admin is overriding the escrow amount
+                await client.query('UPDATE escrow_ledger SET amount_total = $2, amount_available = $2 WHERE id = $1', [escrowId, body.amount]);
+                escrowAmount = body.amount;
+            }
+            // Create a SYSTEM_GRANT pesapal_transactions record so hasConfirmedEscrowFunding passes
+            const merchantRef = `SYSTEM_GRANT:${crypto.randomUUID()}`;
+            const txnRes = await client.query(`INSERT INTO pesapal_transactions (escrow_id, type, amount, merchant_reference, status, raw_payload)
+         VALUES ($1, 'FUNDING', $2, $3, 'COMPLETED', $4::jsonb)
+         RETURNING *`, [
+                escrowId,
+                escrowAmount,
+                merchantRef,
+                JSON.stringify({
+                    kind: 'SYSTEM_GRANT',
+                    admin_note: body.note ?? null,
+                    admin_id: adminId,
+                    campaign_id: params.id,
+                }),
+            ]);
+            const txn = txnRes.rows[0];
+            // Mark escrow FUNDED, link the system-grant txn
+            await client.query(`UPDATE escrow_ledger SET status = 'FUNDED', pesapal_txn_id = $2 WHERE id = $1`, [escrowId, txn.id]);
+            // Audit
+            await logAudit(client, adminId, 'SYSTEM_FUND_CAMPAIGN', 'campaign', params.id, {
+                escrow_id: escrowId,
+                amount: escrowAmount,
+                txn_id: txn.id,
+                note: body.note ?? null,
+            });
+            // Notify assigned ambassadors (best-effort)
+            try {
+                const assignedRes = await client.query(`SELECT DISTINCT c.assigned_ambassador_id AS user_id, c.title
+           FROM campaigns c
+           WHERE (c.id = $1 OR c.parent_campaign_id = $1 OR c.bundle_root_campaign_id = $1)
+             AND c.assigned_ambassador_id IS NOT NULL`, [params.id]);
+                if (assignedRes.rows.length > 0) {
+                    const userIds = assignedRes.rows.map((r) => String(r.user_id));
+                    const campaignTitle = String(campaign.title ?? 'Your campaign');
+                    await createUserNotificationsWithSmsPlan(client, userIds, {
+                        category: 'CAMPAIGN_ASSIGNMENT',
+                        title: 'Campaign Funded',
+                        body: `"${campaignTitle}" has been funded and is now active. Open the app to view your contract.`,
+                        targetType: 'campaign',
+                        targetId: params.id,
+                        meta: { event: 'SYSTEM_FUND', admin_id: adminId },
+                    });
+                }
+            }
+            catch (_) {
+                // Notifications are best-effort — funding itself succeeded
+            }
+            return {
+                funded: true,
+                campaign_id: params.id,
+                escrow_id: escrowId,
+                amount: escrowAmount,
+                txn_reference: merchantRef,
+            };
+        });
     });
     app.get('/admin/payout-requests', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;

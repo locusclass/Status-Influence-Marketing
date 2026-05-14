@@ -1277,6 +1277,20 @@ async function loadEditableCampaign(client, campaignId, businessId) {
         return { error: 'escrow_not_found' };
     return { root, children, escrow, bundle_id: bundleId, bundle_roots: bundleRoots };
 }
+async function deleteCampaignLinkedArtifacts(client, campaignIds) {
+    const uniqueCampaignIds = Array.from(new Set(campaignIds
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)));
+    if (uniqueCampaignIds.length === 0) {
+        return;
+    }
+    await client.query(`DELETE FROM advert_listings WHERE campaign_id = ANY($1::uuid[])`, [
+        uniqueCampaignIds,
+    ]);
+    await client.query(`DELETE FROM earnings_ledger WHERE campaign_id = ANY($1::uuid[])`, [
+        uniqueCampaignIds,
+    ]);
+}
 function deriveCampaignBudget(platform, executionMode, budgetTotal, payoutAmount, requestedMetricTarget, mediaType) {
     void platform;
     void mediaType;
@@ -1941,7 +1955,7 @@ export async function campaignRoutes(app) {
         path: ['q'],
     });
     app.get('/campaigns/ambassador-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const role = request.user?.role;
+        const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
@@ -1971,7 +1985,7 @@ export async function campaignRoutes(app) {
         return { ambassador };
     });
     app.get('/ambassadors/lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const role = request.user?.role;
+        const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
@@ -2002,7 +2016,7 @@ export async function campaignRoutes(app) {
         return { profile };
     });
     app.get('/campaigns/group-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const role = request.user?.role;
+        const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };
@@ -3050,7 +3064,7 @@ export async function campaignRoutes(app) {
         const params = request.params;
         const authSub = request.user?.sub;
         const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
-        const role = request.user?.role;
+        const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         if (!authUser) {
             reply.code(401);
             return { error: 'unauthorized' };
@@ -3086,6 +3100,7 @@ export async function campaignRoutes(app) {
                         await client.query(`DELETE FROM verification_sessions WHERE id = ANY($1::uuid[])`, [sessionIds]);
                     }
                     await client.query(`DELETE FROM contracts WHERE campaign_id = ANY($1::uuid[])`, [draftIds]);
+                    await deleteCampaignLinkedArtifacts(client, draftIds);
                     await client.query(`DELETE FROM campaigns WHERE id = ANY($1::uuid[])`, [draftIds]);
                     return { deleted: true, campaign_id: params.id };
                 }
@@ -3123,6 +3138,7 @@ export async function campaignRoutes(app) {
          WHERE id = ANY($1::uuid[]) OR campaign_id = ANY($2::uuid[])`, [sessionIds, campaignIds]);
             await client.query(`DELETE FROM contracts
          WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+            await deleteCampaignLinkedArtifacts(client, campaignIds);
             if (editable.bundle_id && remainingBundleRoots.length > 0) {
                 const nextEscrowTotal = Math.max(0, Number(editable.escrow.amount_total ?? 0) - Number(editable.root.budget_total ?? 0));
                 if (isBundleOwner) {
@@ -3986,7 +4002,13 @@ export async function campaignRoutes(app) {
     });
     // ── List all active ambassadors (for beneficiary picker) ────────────────────
     app.get('/ambassadors/list', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const { id: authUser, role } = request.user;
+        const authSub = String(request.user?.sub ?? '').trim();
+        const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
+        const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
+        if (!authUser) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
         if (!canAccessBusinessFeatures(role)) {
             reply.code(403);
             return { error: 'forbidden' };

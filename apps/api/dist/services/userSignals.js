@@ -71,6 +71,18 @@ export async function ensureUserSignalSchema(client) {
     ON admin_blocking_notices (removed_at, created_at DESC)
   `);
     await client.query(`
+    ALTER TABLE admin_blocking_notices
+      ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+  `);
+    await client.query(`
+    ALTER TABLE admin_blocking_notices
+      ADD COLUMN IF NOT EXISTS media_url TEXT
+  `);
+    await client.query(`
+    ALTER TABLE admin_blocking_notices
+      ADD COLUMN IF NOT EXISTS media_type TEXT
+  `);
+    await client.query(`
     CREATE TABLE IF NOT EXISTS admin_blocking_notice_targets (
       notice_id UUID NOT NULL REFERENCES admin_blocking_notices(id) ON DELETE CASCADE,
       user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -168,15 +180,21 @@ export async function createBlockingNotice(client, userIds, input) {
       title,
       body,
       audience_kind,
-      created_by_user_id
+      created_by_user_id,
+      expires_at,
+      media_url,
+      media_type
     )
-    VALUES ($1, $2, $3, $4)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
     RETURNING *
     `, [
         input.title.trim(),
         input.body.trim(),
         input.audienceKind ?? 'SELECTED_USERS',
         createdByUserId,
+        input.expiresAt ?? null,
+        input.mediaUrl ?? null,
+        input.mediaType ?? null,
     ]);
     const notice = created.rows[0] ?? null;
     if (!notice?.id) {
@@ -222,12 +240,16 @@ export async function getActiveBlockingNotice(client, userId) {
       notice.audience_kind,
       notice.created_at,
       notice.updated_at,
-      notice.created_by_user_id
+      notice.created_by_user_id,
+      notice.expires_at,
+      notice.media_url,
+      notice.media_type
     FROM admin_blocking_notice_targets target
     JOIN admin_blocking_notices notice
       ON notice.id = target.notice_id
     WHERE target.user_id = $1
       AND notice.removed_at IS NULL
+      AND (notice.expires_at IS NULL OR notice.expires_at > NOW())
     ORDER BY notice.created_at DESC
     LIMIT 1
     `, [normalizedUserId]);
