@@ -2620,6 +2620,21 @@ export async function campaignRoutes(app: FastifyInstance) {
 
   const campaignRepo = new CampaignRepo();
   const paymentRepo = new PaymentRepo();
+
+  async function ambassadorHasSubscription(client: any, ambassadorId: string): Promise<boolean> {
+    const now = new Date();
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString().slice(0, 10); // e.g. '2026-05-01'
+    const res = await client.query(
+      `SELECT id FROM ambassador_subscriptions
+       WHERE ambassador_id = $1 AND period_start = $2
+         AND (is_waived = true OR paid_at IS NOT NULL)
+       LIMIT 1`,
+      [ambassadorId, periodStart]
+    );
+    return res.rows.length > 0;
+  }
+
   const AcceptContractSchema = z.object({
     campaign_id: z.string().trim().min(3),
   });
@@ -4954,6 +4969,12 @@ export async function campaignRoutes(app: FastifyInstance) {
         return restriction as any;
       }
 
+      // Subscription gate: ambassador must have paid for the current month
+      const hasSubscription = await ambassadorHasSubscription(client, authUser!);
+      if (!hasSubscription) {
+        return { error: 'subscription_required' } as any;
+      }
+
       const campaign = await campaignRepo.getCampaign(client, body.campaign_id);
       if (!campaign) return { error: 'campaign_not_found' } as any;
       if (campaign.status !== 'ACTIVE') return { error: 'campaign_not_active' } as any;
@@ -5063,6 +5084,10 @@ export async function campaignRoutes(app: FastifyInstance) {
     if ((result as any)?.error === 'account_restricted') {
       reply.code(403);
       return result as any;
+    }
+
+    if ((result as any).error === 'subscription_required') {
+      return reply.code(402).send({ error: 'subscription_required', message: 'An active monthly subscription is required to accept campaign contracts.' });
     }
 
     if ((result as any).error) {
@@ -5701,6 +5726,88 @@ export async function campaignRoutes(app: FastifyInstance) {
       });
 
       return { ok: true };
+    });
+  });
+
+  // ── AMBASSADOR SUBSCRIPTION ──────────────────────────────────────────────────
+
+  // GET /ambassador/subscription/status
+  app.get('/ambassador/subscription/status', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const authUser = (request.user as any)?.sub as string;
+    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
+    const now = new Date();
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString().slice(0, 10);
+    return withTransaction(async (client) => {
+      const row = await client.query(
+        `SELECT id, amount, currency, is_waived, paid_at, waived_at
+         FROM ambassador_subscriptions
+         WHERE ambassador_id = $1 AND period_start = $2 LIMIT 1`,
+        [authUser, periodStart]
+      );
+      const sub = row.rows[0] ?? null;
+      const isActive = sub && (sub.is_waived || sub.paid_at);
+      return {
+        period_start: periodStart,
+        is_active: !!isActive,
+        is_waived: sub?.is_waived ?? false,
+        paid_at: sub?.paid_at ?? null,
+        amount: 5000,
+        currency: 'UGX',
+      };
+    });
+  });
+
+  // POST /ambassador/subscription/pay — initiate a Pesapal payment for this month's subscription
+  app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const authUser = (request.user as any)?.sub as string;
+    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
+    const now = new Date();
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString().slice(0, 10);
+    return withTransaction(async (client) => {
+      // Upsert a pending row for this month
+      await client.query(
+        `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency)
+         VALUES ($1, $2, 5000, 'UGX')
+         ON CONFLICT (ambassador_id, period_start) DO NOTHING`,
+        [authUser, periodStart]
+      );
+      const subRow = await client.query(
+        `SELECT id FROM ambassador_subscriptions WHERE ambassador_id = $1 AND period_start = $2`,
+        [authUser, periodStart]
+      );
+      const subscriptionId = subRow.rows[0]?.id;
+      // Return enough info for the mobile app to open the checkout page
+      return {
+        subscription_id: subscriptionId,
+        amount: 5000,
+        currency: 'UGX',
+        period_start: periodStart,
+        description: `Prime Status Ambassador Subscription — ${periodStart.slice(0, 7)}`,
+      };
+    });
+  });
+
+  // POST /ambassador/subscription/confirm — called after payment is confirmed
+  app.post('/ambassador/subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const authUser = (request.user as any)?.sub as string;
+    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
+    const body = (request.body as any) ?? {};
+    const paymentReference = String(body.payment_reference ?? '').trim();
+    if (!paymentReference) return reply.code(400).send({ error: 'payment_reference_required' });
+    const now = new Date();
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString().slice(0, 10);
+    return withTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference, paid_at)
+         VALUES ($1, $2, 5000, 'UGX', $3, now())
+         ON CONFLICT (ambassador_id, period_start)
+         DO UPDATE SET payment_reference = $3, paid_at = now()`,
+        [authUser, periodStart, paymentReference]
+      );
+      return { ok: true, period_start: periodStart };
     });
   });
 }

@@ -5723,4 +5723,114 @@ export async function adminRoutes(app: FastifyInstance) {
       replayYoUgandaWebhook
     );
   }
+
+  // ── ADMIN: AMBASSADOR SUBSCRIPTIONS ─────────────────────────────────────────
+
+  // GET /admin/ambassador-subscriptions
+  app.get('/admin/ambassador-subscriptions', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const query = request.query as { limit?: string; offset?: string; q?: string; period?: string };
+    const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '100', 10)));
+    const offset = Math.max(0, parseInt(query.offset ?? '0', 10));
+    const now = new Date();
+    const defaultPeriod = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString().slice(0, 10);
+    const period = query.period ?? defaultPeriod;
+    try {
+      return withTransaction(async (client) => {
+        await getLiveDashboardAccess(client, request);
+        const rows = await client.query(`
+          SELECT
+            u.id AS ambassador_id,
+            u.full_name,
+            u.email,
+            u.phone,
+            u.country_id,
+            u.created_at AS joined_at,
+            sub.id AS subscription_id,
+            sub.period_start,
+            sub.amount,
+            sub.currency,
+            sub.paid_at,
+            sub.is_waived,
+            sub.waived_at,
+            sub.waived_note,
+            sub.payment_reference,
+            (SELECT COUNT(*) FROM contracts c WHERE c.distributor_id = u.id AND c.status = 'ACTIVE') AS active_contracts
+          FROM users u
+          LEFT JOIN ambassador_subscriptions sub
+            ON sub.ambassador_id = u.id AND sub.period_start = $2
+          WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
+            AND ($1::text IS NULL OR u.full_name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%' OR u.phone ILIKE '%' || $1 || '%')
+          ORDER BY u.full_name ASC
+          LIMIT $3 OFFSET $4
+        `, [query.q ?? null, period, limit, offset]);
+
+        const countRow = await client.query(`
+          SELECT COUNT(*) FROM users WHERE role IN ('AMBASSADOR', 'DUAL_USER')
+            AND ($1::text IS NULL OR full_name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR phone ILIKE '%' || $1 || '%')
+        `, [query.q ?? null]);
+
+        return {
+          ambassadors: rows.rows,
+          total: parseInt(countRow.rows[0]?.count ?? '0', 10),
+          period,
+          limit,
+          offset,
+        };
+      });
+    } catch (err) {
+      app.log.error(err, 'admin.ambassador_subscriptions.list.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // POST /admin/ambassador-subscriptions/:userId/waive
+  app.post('/admin/ambassador-subscriptions/:userId/waive', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const { userId } = request.params as { userId: string };
+    const body = (request.body as any) ?? {};
+    const note = String(body.note ?? '').trim() || null;
+    const period = String(body.period ?? '').trim();
+    if (!period) return reply.code(400).send({ error: 'period_required' });
+    try {
+      const adminId = ((request.user as any)?.sub as string) ?? null;
+      return withTransaction(async (client) => {
+        await getLiveDashboardAccess(client, request);
+        await client.query(`
+          INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, is_waived, waived_by_admin_id, waived_at, waived_note)
+          VALUES ($1, $2, 5000, 'UGX', true, $3, now(), $4)
+          ON CONFLICT (ambassador_id, period_start)
+          DO UPDATE SET is_waived = true, waived_by_admin_id = $3, waived_at = now(), waived_note = $4
+        `, [userId, period, adminId, note]);
+        return { ok: true };
+      });
+    } catch (err: any) {
+      if (err?.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'admin.ambassador_subscriptions.waive.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // DELETE /admin/ambassador-subscriptions/:userId/waive
+  app.delete('/admin/ambassador-subscriptions/:userId/waive', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const { userId } = request.params as { userId: string };
+    const body = (request.body as any) ?? {};
+    const period = String(body.period ?? '').trim();
+    if (!period) return reply.code(400).send({ error: 'period_required' });
+    try {
+      return withTransaction(async (client) => {
+        await getLiveDashboardAccess(client, request);
+        await client.query(`
+          UPDATE ambassador_subscriptions
+          SET is_waived = false, waived_by_admin_id = null, waived_at = null, waived_note = null
+          WHERE ambassador_id = $1 AND period_start = $2
+        `, [userId, period]);
+        return { ok: true };
+      });
+    } catch (err: any) {
+      if (err?.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
 }
