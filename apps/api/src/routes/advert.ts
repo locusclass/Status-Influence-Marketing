@@ -1920,7 +1920,8 @@ export async function advertRoutes(app: FastifyInstance) {
         };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ listings: [], total: 0, page, limit });
       app.log.error(err, 'admin.advert.listings.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
@@ -2190,7 +2191,24 @@ export async function advertRoutes(app: FastifyInstance) {
         };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      // 42P01 = undefined_table — advert schema not yet migrated; return zeroed data
+      if (err?.code === '42P01') {
+        return reply.send({
+          overview: {
+            total_listings: 0, active_listings: 0, draft_listings: 0, expired_listings: 0,
+            total_views: 0, total_unique_views: 0, total_offers: 0, pending_offers: 0,
+            accepted_offers: 0, recent_sessions: 0, whatsapp_taps: 0, phone_taps: 0,
+            email_taps: 0, outbound_taps: 0, total_events: 0, total_media_assets: 0,
+            total_tracking_links: 0,
+          },
+          top_listings: [],
+          category_breakdown: [],
+          event_breakdown: [],
+          offer_stats: { pending: 0, accepted: 0, rejected: 0, countered: 0, closed: 0, avg_offer_amount: '0.00' },
+          period_days: days,
+        });
+      }
       app.log.error(err, 'admin.advert.analytics.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
@@ -2339,7 +2357,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return { offers: rows.rows, total: parseInt(countRow.rows[0]?.count ?? '0', 10), page, limit };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ offers: [], total: 0, page, limit });
       app.log.error(err, 'admin.advert.offers.list.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
@@ -2394,7 +2413,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return { categories: rows.rows };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ categories: [] });
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
@@ -2476,7 +2496,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return { subcategories: rows.rows };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ subcategories: [] });
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
@@ -2552,7 +2573,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return { listing_types: rows.rows };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ listing_types: [] });
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
@@ -2623,7 +2645,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return { field_definitions: rows.rows };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ field_definitions: [] });
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
@@ -2738,7 +2761,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return { tracking_links: rows.rows, total: parseInt(countRow.rows[0]?.count ?? '0', 10), page, limit };
       });
       return reply.send(result);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === '42P01') return reply.send({ tracking_links: [], total: 0, page, limit });
       app.log.error(err, 'admin.advert.tracking_links.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
