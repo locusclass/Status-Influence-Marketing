@@ -2138,12 +2138,12 @@ export async function advertRoutes(app: FastifyInstance) {
               (SELECT COUNT(*) FROM advert_offers) AS total_offers,
               (SELECT COUNT(*) FROM advert_offers WHERE status = 'PENDING') AS pending_offers,
               (SELECT COUNT(*) FROM advert_offers WHERE status = 'ACCEPTED') AS accepted_offers,
-              (SELECT COUNT(*) FROM advert_page_sessions WHERE created_at > now() - ($1::int * interval '1 day')) AS recent_sessions,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'WHATSAPP_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS whatsapp_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'PHONE_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS phone_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'EMAIL_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS email_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'OUTBOUND_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS outbound_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE created_at > now() - ($1::int * interval '1 day')) AS total_events,
+              (SELECT COUNT(*) FROM advert_page_sessions WHERE session_start > now() - ($1::int * interval '1 day')) AS recent_sessions,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'WHATSAPP_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS whatsapp_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'PHONE_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS phone_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'EMAIL_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS email_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'OUTBOUND_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS outbound_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE occurred_at > now() - ($1::int * interval '1 day')) AS total_events,
               (SELECT COUNT(*) FROM advert_media) AS total_media_assets,
               (SELECT COUNT(*) FROM advert_tracking_links) AS total_tracking_links
           `, [days]),
@@ -2166,7 +2166,7 @@ export async function advertRoutes(app: FastifyInstance) {
           client.query(`
             SELECT event_type, COUNT(*) AS count
             FROM advert_engagement_events
-            WHERE created_at > now() - ($1::int * interval '1 day')
+            WHERE occurred_at > now() - ($1::int * interval '1 day')
             GROUP BY event_type ORDER BY count DESC
           `, [days]),
           client.query(`
@@ -2239,12 +2239,12 @@ export async function advertRoutes(app: FastifyInstance) {
               COUNT(*) FILTER (WHERE device_type = 'desktop') AS desktop_sessions,
               COUNT(*) FILTER (WHERE device_type = 'tablet') AS tablet_sessions
             FROM advert_page_sessions
-            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+            WHERE listing_id = $1 AND session_start > now() - ($2::int * interval '1 day')
           `, [listingId, days]),
           client.query(`
             SELECT event_type, COUNT(*) AS count
             FROM advert_engagement_events
-            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+            WHERE listing_id = $1 AND occurred_at > now() - ($2::int * interval '1 day')
             GROUP BY event_type ORDER BY count DESC
           `, [listingId, days]),
           client.query(`
