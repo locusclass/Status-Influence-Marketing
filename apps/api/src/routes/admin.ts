@@ -1243,6 +1243,44 @@ export async function adminRoutes(app: FastifyInstance) {
         await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`);
         await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS media_url TEXT`);
         await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS media_type TEXT`);
+        // Ops Room tables (self-healing)
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS ops_messages (
+            id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            admin_id    TEXT        NOT NULL,
+            admin_name  TEXT        NOT NULL,
+            channel     TEXT        NOT NULL DEFAULT 'general',
+            content     TEXT        NOT NULL,
+            message_type TEXT       NOT NULL DEFAULT 'TEXT',
+            is_pinned   BOOLEAN     NOT NULL DEFAULT false,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_ops_msgs_channel ON ops_messages(channel, created_at DESC)`);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS ops_tasks (
+            id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            title            TEXT        NOT NULL,
+            description      TEXT        NOT NULL DEFAULT '',
+            status           TEXT        NOT NULL DEFAULT 'TODO',
+            priority         TEXT        NOT NULL DEFAULT 'MEDIUM',
+            channel          TEXT        NOT NULL DEFAULT 'general',
+            assigned_to_name TEXT        NOT NULL DEFAULT '',
+            created_by_name  TEXT        NOT NULL DEFAULT '',
+            due_at           TIMESTAMPTZ,
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+        `);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS ops_presence (
+            admin_id   TEXT PRIMARY KEY,
+            admin_name TEXT NOT NULL,
+            channel    TEXT NOT NULL DEFAULT 'general',
+            status     TEXT NOT NULL DEFAULT 'ONLINE',
+            last_seen  TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+        `);
       }).catch((error) => {
         schemaReadyPromise = null;
         throw error;
@@ -5832,5 +5870,165 @@ export async function adminRoutes(app: FastifyInstance) {
       if (err?.statusCode) return reply.code(err.statusCode).send({ error: err.message });
       return reply.code(500).send({ error: 'internal_server_error' });
     }
+  });
+
+  // ── OPS ROOM ─────────────────────────────────────────────────────────────
+
+  // GET /admin/ops/messages
+  app.get('/admin/ops/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const q = request.query as { channel?: string; limit?: string; since?: string };
+    const channel = q.channel ?? 'general';
+    const limit = Math.min(100, Math.max(1, parseInt(q.limit ?? '60', 10)));
+    const since = q.since ? new Date(q.since) : null;
+    return withTransaction(async (client) => {
+      const rows = await client.query(
+        `SELECT * FROM ops_messages
+         WHERE channel = $1 ${since ? 'AND created_at > $3' : ''}
+         ORDER BY created_at ASC
+         LIMIT $2`,
+        since ? [channel, limit, since] : [channel, limit]
+      );
+      return { messages: rows.rows };
+    });
+  });
+
+  // POST /admin/ops/messages
+  app.post('/admin/ops/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const body = (request.body as any) ?? {};
+    const adminId = String((request.user as any)?.sub ?? '');
+    const content = String(body.content ?? '').trim();
+    const adminName = String(body.admin_name ?? 'Admin').trim();
+    const channel = String(body.channel ?? 'general').trim();
+    const messageType = String(body.message_type ?? 'TEXT').trim();
+    if (!content) return reply.code(400).send({ error: 'content_required' });
+    return withTransaction(async (client) => {
+      const row = await client.query(
+        `INSERT INTO ops_messages (admin_id, admin_name, channel, content, message_type)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [adminId, adminName, channel, content, messageType]
+      );
+      return { message: row.rows[0] };
+    });
+  });
+
+  // PATCH /admin/ops/messages/:id/pin
+  app.patch('/admin/ops/messages/:id/pin', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const { id } = request.params as { id: string };
+    const body = (request.body as any) ?? {};
+    const pinned = body.is_pinned !== false;
+    return withTransaction(async (client) => {
+      await client.query(`UPDATE ops_messages SET is_pinned = $1 WHERE id = $2`, [pinned, id]);
+      return { ok: true };
+    });
+  });
+
+  // GET /admin/ops/tasks
+  app.get('/admin/ops/tasks', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const q = request.query as { channel?: string };
+    const channel = q.channel ?? 'general';
+    return withTransaction(async (client) => {
+      const rows = await client.query(
+        `SELECT * FROM ops_tasks WHERE channel = $1 ORDER BY
+           CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
+           created_at DESC`,
+        [channel]
+      );
+      return { tasks: rows.rows };
+    });
+  });
+
+  // POST /admin/ops/tasks
+  app.post('/admin/ops/tasks', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const body = (request.body as any) ?? {};
+    const title = String(body.title ?? '').trim();
+    if (!title) return reply.code(400).send({ error: 'title_required' });
+    return withTransaction(async (client) => {
+      const row = await client.query(
+        `INSERT INTO ops_tasks (title, description, status, priority, channel, assigned_to_name, created_by_name, due_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [
+          title,
+          String(body.description ?? '').trim(),
+          String(body.status ?? 'TODO'),
+          String(body.priority ?? 'MEDIUM'),
+          String(body.channel ?? 'general'),
+          String(body.assigned_to_name ?? '').trim(),
+          String(body.created_by_name ?? 'Admin').trim(),
+          body.due_at ?? null,
+        ]
+      );
+      return { task: row.rows[0] };
+    });
+  });
+
+  // PATCH /admin/ops/tasks/:id
+  app.patch('/admin/ops/tasks/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const { id } = request.params as { id: string };
+    const body = (request.body as any) ?? {};
+    return withTransaction(async (client) => {
+      const row = await client.query(
+        `UPDATE ops_tasks SET
+           title = COALESCE($2, title),
+           description = COALESCE($3, description),
+           status = COALESCE($4, status),
+           priority = COALESCE($5, priority),
+           assigned_to_name = COALESCE($6, assigned_to_name),
+           updated_at = now()
+         WHERE id = $1 RETURNING *`,
+        [id, body.title ?? null, body.description ?? null, body.status ?? null,
+         body.priority ?? null, body.assigned_to_name ?? null]
+      );
+      return { task: row.rows[0] };
+    });
+  });
+
+  // DELETE /admin/ops/tasks/:id
+  app.delete('/admin/ops/tasks/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const { id } = request.params as { id: string };
+    return withTransaction(async (client) => {
+      await client.query(`DELETE FROM ops_tasks WHERE id = $1`, [id]);
+      return { ok: true };
+    });
+  });
+
+  // POST /admin/ops/presence  (heartbeat)
+  app.post('/admin/ops/presence', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    const adminId = String((request.user as any)?.sub ?? '');
+    const body = (request.body as any) ?? {};
+    const adminName = String(body.admin_name ?? 'Admin').trim();
+    const channel = String(body.channel ?? 'general').trim();
+    const status = String(body.status ?? 'ONLINE').trim();
+    return withTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO ops_presence (admin_id, admin_name, channel, status, last_seen)
+         VALUES ($1,$2,$3,$4,now())
+         ON CONFLICT (admin_id) DO UPDATE
+         SET admin_name=$2, channel=$3, status=$4, last_seen=now()`,
+        [adminId, adminName, channel, status]
+      );
+      return { ok: true };
+    });
+  });
+
+  // GET /admin/ops/presence
+  app.get('/admin/ops/presence', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    await ensureAdminRoutesSchema();
+    return withTransaction(async (client) => {
+      const rows = await client.query(
+        `SELECT admin_id, admin_name, channel, status, last_seen
+         FROM ops_presence
+         WHERE last_seen > now() - interval '2 minutes'
+         ORDER BY admin_name`
+      );
+      return { online: rows.rows };
+    });
   });
 }
