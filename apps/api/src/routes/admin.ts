@@ -1235,11 +1235,11 @@ export async function adminRoutes(app: FastifyInstance) {
         await ensureViewerVerificationSchema(client);
         // Self-healing column migrations — safe to run on every cold-start
         await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS is_observer BOOLEAN NOT NULL DEFAULT false`);
-        await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS access_state TEXT NOT NULL DEFAULT 'PUBLIC'`);
-        await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS is_promoted BOOLEAN NOT NULL DEFAULT false`);
-        await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS admin_action_note TEXT`);
-        await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS admin_action_at TIMESTAMPTZ`);
-        await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS admin_action_by_user_id UUID`);
+        await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS access_state TEXT NOT NULL DEFAULT 'PUBLIC'`);
+        await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS is_promoted BOOLEAN NOT NULL DEFAULT false`);
+        await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS admin_action_note TEXT`);
+        await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS admin_action_at TIMESTAMPTZ`);
+        await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS admin_action_by_user_id UUID`);
         await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`);
         await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS media_url TEXT`);
         await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS media_type TEXT`);
