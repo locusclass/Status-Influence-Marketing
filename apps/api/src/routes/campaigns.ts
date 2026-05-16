@@ -4471,6 +4471,18 @@ export async function campaignRoutes(app: FastifyInstance) {
         reply.code(400);
         return { error: 'amount_mismatch' } as any;
       }
+      const bundleListingCheck = await client.query(
+        `SELECT al.id FROM advert_listings al
+         JOIN campaigns c ON c.id = al.campaign_id
+         WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
+           AND al.status != 'CANCELLED'
+         LIMIT 1`,
+        [bundle.bundle_root_campaign_id ?? bundle.bundle_id]
+      );
+      if (!bundleListingCheck.rows.length) {
+        reply.code(400);
+        return { error: 'campaign_missing_product_listing', detail: 'Create a product page (My Listings) and attach it to this campaign before funding.' } as any;
+      }
       if (fundSource === 'WALLET') {
         const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
         const lockedWalletRes = await client.query(
@@ -4720,6 +4732,14 @@ export async function campaignRoutes(app: FastifyInstance) {
       if (body.amount !== escrow.amount_total) {
         reply.code(400);
         return { error: 'amount_mismatch' } as any;
+      }
+      const listingCheck = await client.query(
+        `SELECT id FROM advert_listings WHERE campaign_id = $1 AND status != 'CANCELLED' LIMIT 1`,
+        [campaign.id]
+      );
+      if (!listingCheck.rows.length) {
+        reply.code(400);
+        return { error: 'campaign_missing_product_listing', detail: 'Create a product page (My Listings) and attach it to this campaign before funding.' } as any;
       }
       if (fundSource === 'WALLET') {
         const wallet = await ensureWalletForUser(client, authUser!, preferredCurrency);
