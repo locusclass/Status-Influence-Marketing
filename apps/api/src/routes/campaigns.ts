@@ -5732,25 +5732,30 @@ export async function campaignRoutes(app: FastifyInstance) {
   // ── AMBASSADOR SUBSCRIPTION ──────────────────────────────────────────────────
 
   // GET /ambassador/subscription/status
+  // Returns the most recent active subscription (waived or paid within 30 days).
   app.get('/ambassador/subscription/status', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string;
     if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
-    const now = new Date();
-    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      .toISOString().slice(0, 10);
     return withTransaction(async (client) => {
       const row = await client.query(
-        `SELECT id, amount, currency, is_waived, paid_at, waived_at
+        `SELECT id, amount, currency, is_waived, paid_at, period_start,
+                (paid_at + interval '30 days') AS valid_until
          FROM ambassador_subscriptions
-         WHERE ambassador_id = $1 AND period_start = $2 LIMIT 1`,
-        [authUser, periodStart]
+         WHERE ambassador_id = $1
+           AND (is_waived = true OR paid_at IS NOT NULL)
+         ORDER BY COALESCE(paid_at, waived_at, created_at) DESC
+         LIMIT 1`,
+        [authUser]
       );
       const sub = row.rows[0] ?? null;
-      const isActive = sub && (sub.is_waived || sub.paid_at);
+      const isWaived = sub?.is_waived === true;
+      const validUntil = sub?.valid_until ? new Date(sub.valid_until) : null;
+      const isActive = isWaived || (sub?.paid_at != null && validUntil != null && validUntil > new Date());
       return {
-        period_start: periodStart,
-        is_active: !!isActive,
-        is_waived: sub?.is_waived ?? false,
+        period_start: sub?.period_start ?? null,
+        valid_until: sub?.valid_until ?? null,
+        is_active: isActive,
+        is_waived: isWaived,
         paid_at: sub?.paid_at ?? null,
         amount: 5000,
         currency: 'UGX',
@@ -5758,56 +5763,136 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
   });
 
-  // POST /ambassador/subscription/pay — initiate a Pesapal payment for this month's subscription
+  // POST /ambassador/subscription/pay — initiates a YO Uganda checkout for a 30-day subscription
   app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string;
     if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
-    const now = new Date();
-    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      .toISOString().slice(0, 10);
+
+    if (!hasYoClientCredentials()) {
+      reply.code(503);
+      return { error: 'yo_uganda_not_configured' };
+    }
+
     return withTransaction(async (client) => {
-      // Upsert a pending row for this month
+      // Fetch user profile for checkout
+      const userRes = await client.query(
+        `SELECT u.email, u.phone, up.country, up.first_name
+         FROM users u
+         LEFT JOIN user_profiles up ON up.user_id = u.id
+         WHERE u.id = $1`,
+        [authUser]
+      );
+      const userInfo = userRes.rows[0];
+      const userEmail = userInfo?.email ?? '';
+      const userCountry = (userInfo?.country ?? 'UG') as string;
+      const userPhone: string | null = userInfo?.phone ?? null;
+      const firstName: string = userInfo?.first_name ?? '';
+
+      const periodStart = new Date().toISOString().slice(0, 10); // DATE(now())
+      const merchantReference = uuid();
+
+      // Insert or refresh the pending subscription row
       await client.query(
-        `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency)
-         VALUES ($1, $2, 5000, 'UGX')
-         ON CONFLICT (ambassador_id, period_start) DO NOTHING`,
-        [authUser, periodStart]
+        `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference)
+         VALUES ($1, $2, 5000, 'UGX', $3)
+         ON CONFLICT (ambassador_id, period_start)
+         DO UPDATE SET payment_reference = $3`,
+        [authUser, periodStart, merchantReference]
       );
-      const subRow = await client.query(
-        `SELECT id FROM ambassador_subscriptions WHERE ambassador_id = $1 AND period_start = $2`,
-        [authUser, periodStart]
+
+      // Create a pesapal transaction record for traceability
+      const paymentRepo = new PaymentRepo();
+      await paymentRepo.createPesaPalTransaction(client, {
+        type: 'FUNDING',
+        amount: 5000,
+        merchant_reference: merchantReference,
+        raw_payload: {
+          kind: 'AMBASSADOR_SUBSCRIPTION',
+          ambassador_id: authUser,
+          period_start: periodStart,
+        },
+      });
+
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
+        userCountry,
+        { cardEnabled: hasYoEncryptionKey() }
       );
-      const subscriptionId = subRow.rows[0]?.id;
-      // Return enough info for the mobile app to open the checkout page
+
+      const checkoutPayload = {
+        provider: 'YO_UGANDA',
+        mode: 'DIRECT_CHARGE',
+        tx_ref: merchantReference,
+        amount: 5000,
+        currency: 'UGX',
+        payment_options: checkoutProfile.paymentOptions,
+        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
+        country: checkoutProfile.country,
+        redirect_url: `${config.publicAppBaseUrl ?? 'https://primestatus.app'}/payment/callback`,
+        customer: {
+          email: userEmail,
+          name: firstName || 'Ambassador',
+          phone_number: userPhone,
+        },
+        meta: {
+          merchant_reference: merchantReference,
+          kind: 'AMBASSADOR_SUBSCRIPTION',
+          ambassador_id: authUser,
+          period_start: periodStart,
+        },
+      };
+
       return {
-        subscription_id: subscriptionId,
+        checkout_payload: checkoutPayload,
         amount: 5000,
         currency: 'UGX',
         period_start: periodStart,
-        description: `Prime Status Ambassador Subscription — ${periodStart.slice(0, 7)}`,
+        description: `Prime Status Ambassador Subscription — 30 days from ${periodStart}`,
       };
     });
   });
 
-  // POST /ambassador/subscription/confirm — called after payment is confirmed
+  // POST /ambassador/subscription/confirm — marks subscription paid after checkout completes
   app.post('/ambassador/subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string;
     if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
     const body = (request.body as any) ?? {};
     const paymentReference = String(body.payment_reference ?? '').trim();
     if (!paymentReference) return reply.code(400).send({ error: 'payment_reference_required' });
-    const now = new Date();
-    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      .toISOString().slice(0, 10);
+
     return withTransaction(async (client) => {
-      await client.query(
-        `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference, paid_at)
-         VALUES ($1, $2, 5000, 'UGX', $3, now())
-         ON CONFLICT (ambassador_id, period_start)
-         DO UPDATE SET payment_reference = $3, paid_at = now()`,
-        [authUser, periodStart, paymentReference]
+      // Mark the subscription row that carries this payment reference as paid
+      const res = await client.query(
+        `UPDATE ambassador_subscriptions
+         SET paid_at = now()
+         WHERE ambassador_id = $1 AND payment_reference = $2 AND paid_at IS NULL
+         RETURNING period_start`,
+        [authUser, paymentReference]
       );
-      return { ok: true, period_start: periodStart };
+
+      // Fallback: if the reference didn't match (e.g. timing edge case), mark the newest pending row
+      if ((res.rowCount ?? 0) === 0) {
+        await client.query(
+          `UPDATE ambassador_subscriptions
+           SET paid_at = now(), payment_reference = $2
+           WHERE id = (
+             SELECT id FROM ambassador_subscriptions
+             WHERE ambassador_id = $1 AND paid_at IS NULL
+             ORDER BY created_at DESC LIMIT 1
+           )`,
+          [authUser, paymentReference]
+        );
+      }
+
+      // Mark the pesapal transaction completed
+      const paymentRepo = new PaymentRepo();
+      try {
+        await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+      } catch (_) { /* non-fatal if record doesn't exist */ }
+
+      return { ok: true };
     });
   });
 }
