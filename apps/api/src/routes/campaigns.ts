@@ -4471,39 +4471,6 @@ export async function campaignRoutes(app: FastifyInstance) {
         reply.code(400);
         return { error: 'amount_mismatch' } as any;
       }
-      // Campaign must have a product page (advert listing) and media before it can be funded
-      const bundleListingCheck = await client.query(
-        `SELECT al.id FROM advert_listings al
-         JOIN campaigns c ON c.id = al.campaign_id
-         WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
-           AND al.status != 'CANCELLED'
-         LIMIT 1`,
-        [bundle.bundle_root_campaign_id ?? bundle.bundle_id]
-      );
-      if (!bundleListingCheck.rows.length) {
-        reply.code(400);
-        return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' } as any;
-      }
-      const bundleMediaCheck = await client.query(
-        `SELECT 1 FROM campaigns c
-         WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
-           AND (
-             c.media_url IS NOT NULL
-             OR (c.media_type = 'TEXT' AND c.media_text IS NOT NULL)
-             OR EXISTS (
-               SELECT 1 FROM advert_media am
-               JOIN advert_listings al ON al.id = am.listing_id
-               WHERE al.campaign_id = c.id
-             )
-           )
-         LIMIT 1`,
-        [bundle.bundle_root_campaign_id ?? bundle.bundle_id]
-      );
-      if (!bundleMediaCheck.rows.length) {
-        reply.code(400);
-        return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' } as any;
-      }
-
       if (fundSource === 'WALLET') {
         const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
         const lockedWalletRes = await client.query(
@@ -4733,31 +4700,6 @@ export async function campaignRoutes(app: FastifyInstance) {
       if (campaign.approval_status === 'PENDING_APPROVAL') {
         reply.code(400);
         return { error: 'campaign_pending_approval' } as any;
-      }
-      // Campaign must have a product page (advert listing) and media before it can be funded
-      const listingCheck = await client.query(
-        `SELECT id FROM advert_listings WHERE campaign_id = $1 AND status != 'CANCELLED' LIMIT 1`,
-        [campaign.id]
-      );
-      if (!listingCheck.rows.length) {
-        reply.code(400);
-        return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' } as any;
-      }
-      const hasCampaignMedia =
-        (campaign.media_url && String(campaign.media_url).trim() !== '') ||
-        (campaign.media_type === 'TEXT' && campaign.media_text && String(campaign.media_text).trim() !== '');
-      if (!hasCampaignMedia) {
-        const listingMediaCheck = await client.query(
-          `SELECT 1 FROM advert_media am
-           JOIN advert_listings al ON al.id = am.listing_id
-           WHERE al.campaign_id = $1
-           LIMIT 1`,
-          [campaign.id]
-        );
-        if (!listingMediaCheck.rows.length) {
-          reply.code(400);
-          return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' } as any;
-        }
       }
       const bundleId = getCampaignBundleId(campaign);
       const escrowOwnerId = getEscrowCampaignId(campaign);
@@ -5763,23 +5705,106 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
   });
 
-  // POST /ambassador/subscription/pay — reserves a pending subscription slot and returns the tx_ref
+  // POST /ambassador/subscription/pay — reserves a subscription slot, creates a pesapal_transactions
+  // record, and returns a checkout_payload so the mobile client can open the payment screen.
   app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string;
     if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
 
+    if (!hasYoClientCredentials()) {
+      reply.code(503);
+      return { error: 'yo_uganda_not_configured' };
+    }
+
     const periodStart = new Date().toISOString().slice(0, 10);
-    const txRef = uuid();
+    const merchantReference = uuid();
 
     return withTransaction(async (client) => {
+      // Look up user details for checkout payload customer info
+      const userRes = await client.query(
+        'SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1',
+        [authUser]
+      );
+      const user = userRes.rows[0];
+      const userCountry = (user?.country as string | undefined) ?? 'UG';
+      const userEmail = (user?.email as string | undefined) ?? '';
+      const userPhone = (user?.phone as string | undefined) ?? null;
+      const userName = (user?.full_name as string | undefined) ?? 'Ambassador';
+
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
+        userCountry,
+        { cardEnabled: hasYoEncryptionKey() }
+      );
+
+      const rawPayload = {
+        kind: 'AMBASSADOR_SUBSCRIPTION',
+        user_id: authUser,
+        amount: 5000,
+        currency: 'UGX',
+        country: checkoutProfile.country,
+        payment_options: checkoutProfile.paymentOptions,
+        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
+        customer: {
+          email: userEmail,
+          name: userName,
+          phone_number: userPhone,
+        },
+      };
+
+      // Reserve the subscription slot
       await client.query(
         `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference)
          VALUES ($1, $2, 5000, 'UGX', $3)
          ON CONFLICT (ambassador_id, period_start)
          DO UPDATE SET payment_reference = EXCLUDED.payment_reference`,
-        [authUser, periodStart, txRef]
+        [authUser, periodStart, merchantReference]
       );
-      return { ok: true, tx_ref: txRef, amount: 5000, currency: 'UGX', period_start: periodStart };
+
+      // Create the pesapal_transactions record so initiateYoUgandaPayment can find it
+      const paymentRepo = new PaymentRepo();
+      await paymentRepo.createPesaPalTransaction(client, {
+        escrow_id: undefined,
+        type: 'FUNDING',
+        amount: 5000,
+        merchant_reference: merchantReference,
+        raw_payload: rawPayload,
+      });
+
+      const checkoutPayload = {
+        provider: 'YO_UGANDA',
+        mode: 'DIRECT_CHARGE',
+        tx_ref: merchantReference,
+        amount: 5000,
+        currency: 'UGX',
+        payment_options: checkoutProfile.paymentOptions,
+        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
+        country: checkoutProfile.country,
+        customer: {
+          email: userEmail,
+          name: userName,
+          phone_number: userPhone,
+        },
+        meta: {
+          merchant_reference: merchantReference,
+          kind: 'AMBASSADOR_SUBSCRIPTION',
+          user_id: authUser,
+        },
+      };
+
+      return {
+        ok: true,
+        tx_ref: merchantReference,
+        amount: 5000,
+        currency: 'UGX',
+        period_start: periodStart,
+        checkout_payload: checkoutPayload,
+      };
     });
   });
 

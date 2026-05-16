@@ -572,6 +572,50 @@ export async function paymentRoutes(app: FastifyInstance) {
       return { ok: true, pending: true, type: 'wallet_deposit' };
     }
 
+    if (txKind === 'AMBASSADOR_SUBSCRIPTION') {
+      if (txn.status === 'COMPLETED') {
+        return { ok: true, duplicate: true, type: 'ambassador_subscription' };
+      }
+
+      if (statusSuccess.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'COMPLETED',
+          String(paymentEvent.transactionId)
+        );
+        // Mark the ambassador subscription as paid
+        const userId = String(txnPayload.user_id ?? '');
+        if (userId) {
+          await client.query(
+            `UPDATE ambassador_subscriptions
+             SET paid_at = now()
+             WHERE ambassador_id = $1 AND payment_reference = $2 AND paid_at IS NULL`,
+            [userId, String(paymentEvent.reference)]
+          );
+        }
+        return { ok: true, type: 'ambassador_subscription', smsJobs: [] };
+      }
+
+      if (statusFailure.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'FAILED',
+          String(paymentEvent.transactionId)
+        );
+        return { ok: true, type: 'ambassador_subscription', smsJobs: [] };
+      }
+
+      await paymentRepo.updatePesaPalTxnStatus(
+        client,
+        String(paymentEvent.reference),
+        'PENDING',
+        String(paymentEvent.transactionId)
+      );
+      return { ok: true, pending: true, type: 'ambassador_subscription' };
+    }
+
     const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
     const escrow = escrowRows.rows[0];
     if (!escrow || Number(txn.amount ?? 0) !== Number(escrow.amount_total ?? 0)) {
@@ -852,7 +896,7 @@ export async function paymentRoutes(app: FastifyInstance) {
     const rawPayload = (txn.raw_payload ?? {}) as Record<string, any>;
     const txKind = String(rawPayload.kind ?? '').toUpperCase();
 
-    if (txKind === 'WALLET_DEPOSIT') {
+    if (txKind === 'WALLET_DEPOSIT' || txKind === 'AMBASSADOR_SUBSCRIPTION') {
       if (String(rawPayload.user_id ?? '') !== authUser) {
         return { error: 'forbidden' } as const;
       }
@@ -996,10 +1040,12 @@ export async function paymentRoutes(app: FastifyInstance) {
           amount: Number(context.txn.amount ?? 0),
           phoneNumber,
           network: network as 'MTN' | 'AIRTEL' | 'M-PESA',
-          narrative:
-            String(context.rawPayload.kind ?? '').toUpperCase() === 'WALLET_DEPOSIT'
-              ? `Wallet deposit ${parsed.data.tx_ref}`
-              : `Campaign funding ${parsed.data.tx_ref}`,
+          narrative: (() => {
+            const k = String(context.rawPayload.kind ?? '').toUpperCase();
+            if (k === 'WALLET_DEPOSIT') return `Wallet deposit ${parsed.data.tx_ref}`;
+            if (k === 'AMBASSADOR_SUBSCRIPTION') return `Ambassador subscription ${parsed.data.tx_ref}`;
+            return `Campaign funding ${parsed.data.tx_ref}`;
+          })(),
           reference: parsed.data.tx_ref,
           providerReferenceText: `Prime ${parsed.data.tx_ref}`,
           nonBlocking: true,
@@ -1048,11 +1094,12 @@ export async function paymentRoutes(app: FastifyInstance) {
             'FAILED',
             chargeId ?? undefined
           );
-          if (String(context.rawPayload.kind ?? '').toUpperCase() === 'WALLET_DEPOSIT') {
+          const failedKind = String(context.rawPayload.kind ?? '').toUpperCase();
+          if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION') {
             smsJobs = await planPaymentOutcomeNotification(client, {
               userId: authUser,
               txRef: parsed.data.tx_ref,
-              kind: 'WALLET_DEPOSIT',
+              kind: failedKind,
               status: 'FAILED',
               amount: Number(context.txn.amount ?? 0),
             });
@@ -1071,9 +1118,7 @@ export async function paymentRoutes(app: FastifyInstance) {
             smsJobs = await planPaymentOutcomeNotification(client, {
               userId: String(campaign?.business_id ?? authUser),
               txRef: parsed.data.tx_ref,
-              kind: String(context.rawPayload.kind ?? 'CAMPAIGN_FUNDING')
-                .trim()
-                .toUpperCase(),
+              kind: failedKind || 'CAMPAIGN_FUNDING',
               status: 'FAILED',
               amount: Number(context.txn.amount ?? 0),
               campaignId: campaign?.id ? String(campaign.id) : null,
