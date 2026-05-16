@@ -126,7 +126,7 @@ const CreateBlockingNoticeSchema = z
     body: z.string().trim().min(6).max(4000),
     send_to_all: z.boolean().default(false),
     user_ids: z.array(z.string().trim().min(1).max(120)).max(500).default([]),
-    expires_in_minutes: z.number().int().positive().max(525600).optional(),
+    expires_in_seconds: z.number().int().positive().max(31536000).optional(),
     media_url: z.string().url().optional().nullable(),
     media_type: z.enum(['IMAGE', 'VIDEO']).optional().nullable(),
   })
@@ -3333,8 +3333,8 @@ export async function adminRoutes(app: FastifyInstance) {
       }
 
       const actorId = String((request.user as any).sub ?? '').trim();
-      const expiresAt = parsed.data.expires_in_minutes
-        ? new Date(Date.now() + parsed.data.expires_in_minutes * 60 * 1000).toISOString()
+      const expiresAt = parsed.data.expires_in_seconds
+        ? new Date(Date.now() + parsed.data.expires_in_seconds * 1000).toISOString()
         : null;
       const notice = await createBlockingNotice(
         client,
