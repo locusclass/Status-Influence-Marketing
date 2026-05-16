@@ -4620,7 +4620,6 @@ export async function campaignRoutes(app: FastifyInstance) {
         phone_country_code: checkoutProfile.phoneCountryCode,
         availability_notes: checkoutProfile.availabilityNotes,
         country: checkoutProfile.country,
-        redirect_url: callbackUrl,
         customer: {
           email: userEmail!,
           name: `${firstName} User`.trim(),
@@ -4879,7 +4878,6 @@ export async function campaignRoutes(app: FastifyInstance) {
         phone_country_code: checkoutProfile.phoneCountryCode,
         availability_notes: checkoutProfile.availabilityNotes,
         country: checkoutProfile.country,
-        redirect_url: callbackUrl,
         customer: {
           email: userEmail!,
           name: `${firstName} User`.trim(),
