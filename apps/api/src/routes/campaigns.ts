@@ -5763,78 +5763,23 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
   });
 
-  // POST /ambassador/subscription/pay — creates a pending record and returns checkout payload
+  // POST /ambassador/subscription/pay — reserves a pending subscription slot and returns the tx_ref
   app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string;
     if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
 
+    const periodStart = new Date().toISOString().slice(0, 10);
+    const txRef = uuid();
+
     return withTransaction(async (client) => {
-      // Fetch basic user info for the checkout customer object
-      const userRes = await client.query(
-        `SELECT email, phone FROM users WHERE id = $1`,
-        [authUser]
-      );
-      const userEmail: string = userRes.rows[0]?.email ?? '';
-      const userPhone: string | null = userRes.rows[0]?.phone ?? null;
-
-      const periodStart = new Date().toISOString().slice(0, 10);
-      const merchantReference = uuid();
-
-      // Upsert the pending subscription row keyed by (ambassador_id, period_start)
       await client.query(
         `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference)
          VALUES ($1, $2, 5000, 'UGX', $3)
          ON CONFLICT (ambassador_id, period_start)
-         DO UPDATE SET payment_reference = $3`,
-        [authUser, periodStart, merchantReference]
+         DO UPDATE SET payment_reference = EXCLUDED.payment_reference`,
+        [authUser, periodStart, txRef]
       );
-
-      // Best-effort: record a pesapal transaction for traceability (non-fatal if it fails)
-      try {
-        const paymentRepo = new PaymentRepo();
-        await paymentRepo.createPesaPalTransaction(client, {
-          type: 'FUNDING',
-          amount: 5000,
-          merchant_reference: merchantReference,
-          raw_payload: { kind: 'AMBASSADOR_SUBSCRIPTION', ambassador_id: authUser, period_start: periodStart },
-        });
-      } catch (_) { /* non-fatal */ }
-
-      // Build a checkout payload compatible with the existing PaymentCheckoutScreen.
-      // Uganda mobile money (MTN + Airtel) hardcoded — this is a UGX-only service.
-      const checkoutPayload = {
-        provider: 'YO_UGANDA',
-        mode: 'DIRECT_CHARGE',
-        tx_ref: merchantReference,
-        amount: 5000,
-        currency: 'UGX',
-        payment_options: 'MOBILE_MONEY',
-        supported_payment_methods: ['MOBILE_MONEY'],
-        mobile_money_networks: ['MTN', 'AIRTEL'],
-        phone_country_code: '+256',
-        availability_notes: null,
-        country: 'UG',
-        redirect_url: `${config.publicAppBaseUrl ?? 'https://primestatus.app'}/payment/callback`,
-        customer: {
-          email: userEmail,
-          name: 'Ambassador',
-          phone_number: userPhone,
-        },
-        meta: {
-          merchant_reference: merchantReference,
-          kind: 'AMBASSADOR_SUBSCRIPTION',
-          ambassador_id: authUser,
-          period_start: periodStart,
-        },
-      };
-
-      return {
-        checkout_payload: checkoutPayload,
-        tx_ref: merchantReference,
-        amount: 5000,
-        currency: 'UGX',
-        period_start: periodStart,
-      };
+      return { ok: true, tx_ref: txRef, amount: 5000, currency: 'UGX', period_start: periodStart };
     });
   });
 
