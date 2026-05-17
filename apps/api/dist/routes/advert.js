@@ -1702,6 +1702,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ listings: [], total: 0, page, limit });
             app.log.error(err, 'admin.advert.listings.list.error');
             return reply.code(500).send({ error: 'internal_server_error' });
         }
@@ -1901,12 +1903,12 @@ export async function advertRoutes(app) {
               (SELECT COUNT(*) FROM advert_offers) AS total_offers,
               (SELECT COUNT(*) FROM advert_offers WHERE status = 'PENDING') AS pending_offers,
               (SELECT COUNT(*) FROM advert_offers WHERE status = 'ACCEPTED') AS accepted_offers,
-              (SELECT COUNT(*) FROM advert_page_sessions WHERE created_at > now() - ($1::int * interval '1 day')) AS recent_sessions,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'WHATSAPP_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS whatsapp_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'PHONE_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS phone_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'EMAIL_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS email_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'OUTBOUND_TAP' AND created_at > now() - ($1::int * interval '1 day')) AS outbound_taps,
-              (SELECT COUNT(*) FROM advert_engagement_events WHERE created_at > now() - ($1::int * interval '1 day')) AS total_events,
+              (SELECT COUNT(*) FROM advert_page_sessions WHERE session_start > now() - ($1::int * interval '1 day')) AS recent_sessions,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'WHATSAPP_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS whatsapp_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'PHONE_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS phone_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'EMAIL_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS email_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE event_type = 'OUTBOUND_TAP' AND occurred_at > now() - ($1::int * interval '1 day')) AS outbound_taps,
+              (SELECT COUNT(*) FROM advert_engagement_events WHERE occurred_at > now() - ($1::int * interval '1 day')) AS total_events,
               (SELECT COUNT(*) FROM advert_media) AS total_media_assets,
               (SELECT COUNT(*) FROM advert_tracking_links) AS total_tracking_links
           `, [days]),
@@ -1929,7 +1931,7 @@ export async function advertRoutes(app) {
                     client.query(`
             SELECT event_type, COUNT(*) AS count
             FROM advert_engagement_events
-            WHERE created_at > now() - ($1::int * interval '1 day')
+            WHERE occurred_at > now() - ($1::int * interval '1 day')
             GROUP BY event_type ORDER BY count DESC
           `, [days]),
                     client.query(`
@@ -1956,6 +1958,23 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            // 42P01 = undefined_table — advert schema not yet migrated; return zeroed data
+            if (err?.code === '42P01') {
+                return reply.send({
+                    overview: {
+                        total_listings: 0, active_listings: 0, draft_listings: 0, expired_listings: 0,
+                        total_views: 0, total_unique_views: 0, total_offers: 0, pending_offers: 0,
+                        accepted_offers: 0, recent_sessions: 0, whatsapp_taps: 0, phone_taps: 0,
+                        email_taps: 0, outbound_taps: 0, total_events: 0, total_media_assets: 0,
+                        total_tracking_links: 0,
+                    },
+                    top_listings: [],
+                    category_breakdown: [],
+                    event_breakdown: [],
+                    offer_stats: { pending: 0, accepted: 0, rejected: 0, countered: 0, closed: 0, avg_offer_amount: '0.00' },
+                    period_days: days,
+                });
+            }
             app.log.error(err, 'admin.advert.analytics.error');
             return reply.code(500).send({ error: 'internal_server_error' });
         }
@@ -1983,12 +2002,12 @@ export async function advertRoutes(app) {
               COUNT(*) FILTER (WHERE device_type = 'desktop') AS desktop_sessions,
               COUNT(*) FILTER (WHERE device_type = 'tablet') AS tablet_sessions
             FROM advert_page_sessions
-            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+            WHERE listing_id = $1 AND session_start > now() - ($2::int * interval '1 day')
           `, [listingId, days]),
                     client.query(`
             SELECT event_type, COUNT(*) AS count
             FROM advert_engagement_events
-            WHERE listing_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+            WHERE listing_id = $1 AND occurred_at > now() - ($2::int * interval '1 day')
             GROUP BY event_type ORDER BY count DESC
           `, [listingId, days]),
                     client.query(`
@@ -2105,6 +2124,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ offers: [], total: 0, page, limit });
             app.log.error(err, 'admin.advert.offers.list.error');
             return reply.code(500).send({ error: 'internal_server_error' });
         }
@@ -2171,6 +2192,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ categories: [] });
             return reply.code(500).send({ error: 'internal_server_error' });
         }
     });
@@ -2271,6 +2294,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ subcategories: [] });
             return reply.code(500).send({ error: 'internal_server_error' });
         }
     });
@@ -2354,6 +2379,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ listing_types: [] });
             return reply.code(500).send({ error: 'internal_server_error' });
         }
     });
@@ -2432,6 +2459,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ field_definitions: [] });
             return reply.code(500).send({ error: 'internal_server_error' });
         }
     });
@@ -2568,6 +2597,8 @@ export async function advertRoutes(app) {
             return reply.send(result);
         }
         catch (err) {
+            if (err?.code === '42P01')
+                return reply.send({ tracking_links: [], total: 0, page, limit });
             app.log.error(err, 'admin.advert.tracking_links.error');
             return reply.code(500).send({ error: 'internal_server_error' });
         }

@@ -422,6 +422,119 @@ describe('Tenant admin architecture', () => {
     );
   });
 
+  it('records subscription waivers against the persisted admin account id', async () => {
+    const ug = await insertCountry('UG', 'Uganda');
+    const superAdmin = await insertUser({
+      email: 'super-admin-waiver@prime.test',
+      phone: '+256700000011',
+      admin_role: 'SUPER_ADMIN',
+      country: 'UG',
+      country_id: ug.id,
+    });
+    const superToken = app.jwt.sign(
+      buildAuthClaims({
+        ...superAdmin,
+        country_id: ug.id,
+      })
+    );
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/admin/admins',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        full_name: 'Subscription Admin',
+        email: 'subscription-admin@prime.test',
+        phone: '+256700000012',
+        password: 'AdminPass123!',
+        role: 'ADMIN',
+        module_keys: [],
+        country_ids: [ug.id],
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const createdBody = created.json() as {
+      admin: { id: string };
+    };
+
+    const createdUserRes = await pool!.query(
+      `
+      SELECT *
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [createdBody.admin.id]
+    );
+    const createdUser = createdUserRes.rows[0];
+    expect(createdUser).toBeTruthy();
+
+    const createdAdminRes = await pool!.query(
+      `
+      SELECT id
+      FROM admin_users
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [createdBody.admin.id]
+    );
+    const createdAdmin = createdAdminRes.rows[0];
+    expect(createdAdmin?.id).toBeTruthy();
+
+    const ambassador = await insertUser({
+      email: 'subscription-ambassador@prime.test',
+      phone: '+256700000013',
+      full_name: 'Subscription Ambassador',
+      role: 'AMBASSADOR',
+      active_role: 'AMBASSADOR',
+      admin_role: 'USER',
+      country: 'UG',
+      country_id: ug.id,
+    });
+
+    const adminToken = app.jwt.sign(
+      buildAuthClaims({
+        ...createdUser,
+        admin_role: 'ADMIN',
+        country_id: ug.id,
+      })
+    );
+
+    const waived = await app.inject({
+      method: 'POST',
+      url: `/admin/ambassador-subscriptions/${ambassador.id}/waive`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: {
+        period: '2026-05-01',
+        note: 'manager waiver',
+      },
+    });
+    expect(waived.statusCode).toBe(200);
+    expect(waived.json()).toMatchObject({ ok: true });
+
+    const storedRes = await pool!.query(
+      `
+      SELECT
+        ambassador_id,
+        period_start::text AS period_start,
+        is_waived,
+        waived_by_admin_id,
+        waived_note
+      FROM ambassador_subscriptions
+      WHERE ambassador_id = $1 AND period_start = $2
+      LIMIT 1
+      `,
+      [ambassador.id, '2026-05-01']
+    );
+    expect(storedRes.rows[0]).toMatchObject({
+      ambassador_id: ambassador.id,
+      period_start: '2026-05-01',
+      is_waived: true,
+      waived_by_admin_id: createdAdmin.id,
+      waived_note: 'manager waiver',
+    });
+  });
+
   it('returns a conflict when a super admin creates a managed admin with a duplicate identity', async () => {
     const ug = await insertCountry('UG', 'Uganda');
     const superAdmin = await insertUser({

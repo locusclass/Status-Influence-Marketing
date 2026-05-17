@@ -50,7 +50,7 @@ const CreateBlockingNoticeSchema = z
     body: z.string().trim().min(6).max(4000),
     send_to_all: z.boolean().default(false),
     user_ids: z.array(z.string().trim().min(1).max(120)).max(500).default([]),
-    expires_in_minutes: z.number().int().positive().max(525600).optional(),
+    expires_in_seconds: z.number().int().positive().max(31536000).optional(),
     media_url: z.string().url().optional().nullable(),
     media_type: z.enum(['IMAGE', 'VIDEO']).optional().nullable(),
 })
@@ -884,14 +884,52 @@ export async function adminRoutes(app) {
                 await ensureViewerVerificationSchema(client);
                 // Self-healing column migrations — safe to run on every cold-start
                 await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS is_observer BOOLEAN NOT NULL DEFAULT false`);
-                await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS access_state TEXT NOT NULL DEFAULT 'PUBLIC'`);
-                await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS is_promoted BOOLEAN NOT NULL DEFAULT false`);
-                await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS admin_action_note TEXT`);
-                await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS admin_action_at TIMESTAMPTZ`);
-                await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS admin_action_by_user_id UUID`);
+                await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS access_state TEXT NOT NULL DEFAULT 'PUBLIC'`);
+                await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS is_promoted BOOLEAN NOT NULL DEFAULT false`);
+                await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS admin_action_note TEXT`);
+                await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS admin_action_at TIMESTAMPTZ`);
+                await client.query(`ALTER TABLE IF EXISTS advert_listings ADD COLUMN IF NOT EXISTS admin_action_by_user_id UUID`);
                 await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`);
                 await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS media_url TEXT`);
                 await client.query(`ALTER TABLE admin_blocking_notices ADD COLUMN IF NOT EXISTS media_type TEXT`);
+                // Ops Room tables (self-healing)
+                await client.query(`
+          CREATE TABLE IF NOT EXISTS ops_messages (
+            id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            admin_id    TEXT        NOT NULL,
+            admin_name  TEXT        NOT NULL,
+            channel     TEXT        NOT NULL DEFAULT 'general',
+            content     TEXT        NOT NULL,
+            message_type TEXT       NOT NULL DEFAULT 'TEXT',
+            is_pinned   BOOLEAN     NOT NULL DEFAULT false,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+        `);
+                await client.query(`CREATE INDEX IF NOT EXISTS idx_ops_msgs_channel ON ops_messages(channel, created_at DESC)`);
+                await client.query(`
+          CREATE TABLE IF NOT EXISTS ops_tasks (
+            id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            title            TEXT        NOT NULL,
+            description      TEXT        NOT NULL DEFAULT '',
+            status           TEXT        NOT NULL DEFAULT 'TODO',
+            priority         TEXT        NOT NULL DEFAULT 'MEDIUM',
+            channel          TEXT        NOT NULL DEFAULT 'general',
+            assigned_to_name TEXT        NOT NULL DEFAULT '',
+            created_by_name  TEXT        NOT NULL DEFAULT '',
+            due_at           TIMESTAMPTZ,
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+        `);
+                await client.query(`
+          CREATE TABLE IF NOT EXISTS ops_presence (
+            admin_id   TEXT PRIMARY KEY,
+            admin_name TEXT NOT NULL,
+            channel    TEXT NOT NULL DEFAULT 'general',
+            status     TEXT NOT NULL DEFAULT 'ONLINE',
+            last_seen  TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+        `);
             }).catch((error) => {
                 schemaReadyPromise = null;
                 throw error;
@@ -2656,8 +2694,8 @@ export async function adminRoutes(app) {
                 return { error: 'notice_target_not_found' };
             }
             const actorId = String(request.user.sub ?? '').trim();
-            const expiresAt = parsed.data.expires_in_minutes
-                ? new Date(Date.now() + parsed.data.expires_in_minutes * 60 * 1000).toISOString()
+            const expiresAt = parsed.data.expires_in_seconds
+                ? new Date(Date.now() + parsed.data.expires_in_seconds * 1000).toISOString()
                 : null;
             const notice = await createBlockingNotice(client, targetUsers.map((row) => row.id), {
                 title: parsed.data.title,
@@ -4530,4 +4568,247 @@ export async function adminRoutes(app) {
         app.get(`${routeBase}/webhooks`, { preHandler: [app.adminOnly] }, listYoUgandaWebhooks);
         app.post(`${routeBase}/webhooks/:eventId/replay`, { preHandler: [app.adminOnly] }, replayYoUgandaWebhook);
     }
+    // ── ADMIN: AMBASSADOR SUBSCRIPTIONS ─────────────────────────────────────────
+    // GET /admin/ambassador-subscriptions
+    app.get('/admin/ambassador-subscriptions', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const query = request.query;
+        const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '100', 10)));
+        const offset = Math.max(0, parseInt(query.offset ?? '0', 10));
+        const now = new Date();
+        const defaultPeriod = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+            .toISOString().slice(0, 10);
+        const period = query.period ?? defaultPeriod;
+        try {
+            return withTransaction(async (client) => {
+                await getLiveDashboardAccess(client, request);
+                const rows = await client.query(`
+          SELECT
+            u.id AS ambassador_id,
+            u.full_name,
+            u.email,
+            u.phone,
+            u.country_id,
+            u.created_at AS joined_at,
+            sub.id AS subscription_id,
+            sub.period_start,
+            sub.amount,
+            sub.currency,
+            sub.paid_at,
+            sub.is_waived,
+            sub.waived_at,
+            sub.waived_note,
+            sub.payment_reference,
+            (SELECT COUNT(*) FROM contracts c WHERE c.distributor_id = u.id AND c.status = 'ACTIVE') AS active_contracts
+          FROM users u
+          LEFT JOIN ambassador_subscriptions sub
+            ON sub.ambassador_id = u.id AND sub.period_start = $2
+          WHERE u.role IN ('AMBASSADOR', 'DUAL_USER')
+            AND ($1::text IS NULL OR u.full_name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%' OR u.phone ILIKE '%' || $1 || '%')
+          ORDER BY u.full_name ASC
+          LIMIT $3 OFFSET $4
+        `, [query.q ?? null, period, limit, offset]);
+                const countRow = await client.query(`
+          SELECT COUNT(*) FROM users WHERE role IN ('AMBASSADOR', 'DUAL_USER')
+            AND ($1::text IS NULL OR full_name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR phone ILIKE '%' || $1 || '%')
+        `, [query.q ?? null]);
+                return {
+                    ambassadors: rows.rows,
+                    total: parseInt(countRow.rows[0]?.count ?? '0', 10),
+                    period,
+                    limit,
+                    offset,
+                };
+            });
+        }
+        catch (err) {
+            app.log.error(err, 'admin.ambassador_subscriptions.list.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // POST /admin/ambassador-subscriptions/:userId/waive
+    app.post('/admin/ambassador-subscriptions/:userId/waive', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const { userId } = request.params;
+        const body = request.body ?? {};
+        const note = String(body.note ?? '').trim() || null;
+        const period = String(body.period ?? '').trim();
+        if (!period)
+            return reply.code(400).send({ error: 'period_required' });
+        try {
+            return withTransaction(async (client) => {
+                const access = await getLiveDashboardAccess(client, request);
+                const adminId = access.admin_user_id ?? null;
+                await client.query(`
+          INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, is_waived, waived_by_admin_id, waived_at, waived_note)
+          VALUES ($1, $2, 5000, 'UGX', true, $3, now(), $4)
+          ON CONFLICT (ambassador_id, period_start)
+          DO UPDATE SET is_waived = true, waived_by_admin_id = $3, waived_at = now(), waived_note = $4
+        `, [userId, period, adminId, note]);
+                return { ok: true };
+            });
+        }
+        catch (err) {
+            if (err?.statusCode)
+                return reply.code(err.statusCode).send({ error: err.message });
+            app.log.error(err, 'admin.ambassador_subscriptions.waive.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // DELETE /admin/ambassador-subscriptions/:userId/waive
+    app.delete('/admin/ambassador-subscriptions/:userId/waive', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const { userId } = request.params;
+        const body = request.body ?? {};
+        const period = String(body.period ?? '').trim();
+        if (!period)
+            return reply.code(400).send({ error: 'period_required' });
+        try {
+            return withTransaction(async (client) => {
+                await getLiveDashboardAccess(client, request);
+                await client.query(`
+          UPDATE ambassador_subscriptions
+          SET is_waived = false, waived_by_admin_id = null, waived_at = null, waived_note = null
+          WHERE ambassador_id = $1 AND period_start = $2
+        `, [userId, period]);
+                return { ok: true };
+            });
+        }
+        catch (err) {
+            if (err?.statusCode)
+                return reply.code(err.statusCode).send({ error: err.message });
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // ── OPS ROOM ─────────────────────────────────────────────────────────────
+    // GET /admin/ops/messages
+    app.get('/admin/ops/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const q = request.query;
+        const channel = q.channel ?? 'general';
+        const limit = Math.min(100, Math.max(1, parseInt(q.limit ?? '60', 10)));
+        const since = q.since ? new Date(q.since) : null;
+        return withTransaction(async (client) => {
+            const rows = await client.query(`SELECT * FROM ops_messages
+         WHERE channel = $1 ${since ? 'AND created_at > $3' : ''}
+         ORDER BY created_at ASC
+         LIMIT $2`, since ? [channel, limit, since] : [channel, limit]);
+            return { messages: rows.rows };
+        });
+    });
+    // POST /admin/ops/messages
+    app.post('/admin/ops/messages', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const body = request.body ?? {};
+        const adminId = String(request.user?.sub ?? '');
+        const content = String(body.content ?? '').trim();
+        const adminName = String(body.admin_name ?? 'Admin').trim();
+        const channel = String(body.channel ?? 'general').trim();
+        const messageType = String(body.message_type ?? 'TEXT').trim();
+        if (!content)
+            return reply.code(400).send({ error: 'content_required' });
+        return withTransaction(async (client) => {
+            const row = await client.query(`INSERT INTO ops_messages (admin_id, admin_name, channel, content, message_type)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`, [adminId, adminName, channel, content, messageType]);
+            return { message: row.rows[0] };
+        });
+    });
+    // PATCH /admin/ops/messages/:id/pin
+    app.patch('/admin/ops/messages/:id/pin', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const { id } = request.params;
+        const body = request.body ?? {};
+        const pinned = body.is_pinned !== false;
+        return withTransaction(async (client) => {
+            await client.query(`UPDATE ops_messages SET is_pinned = $1 WHERE id = $2`, [pinned, id]);
+            return { ok: true };
+        });
+    });
+    // GET /admin/ops/tasks
+    app.get('/admin/ops/tasks', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const q = request.query;
+        const channel = q.channel ?? 'general';
+        return withTransaction(async (client) => {
+            const rows = await client.query(`SELECT * FROM ops_tasks WHERE channel = $1 ORDER BY
+           CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
+           created_at DESC`, [channel]);
+            return { tasks: rows.rows };
+        });
+    });
+    // POST /admin/ops/tasks
+    app.post('/admin/ops/tasks', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const body = request.body ?? {};
+        const title = String(body.title ?? '').trim();
+        if (!title)
+            return reply.code(400).send({ error: 'title_required' });
+        return withTransaction(async (client) => {
+            const row = await client.query(`INSERT INTO ops_tasks (title, description, status, priority, channel, assigned_to_name, created_by_name, due_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [
+                title,
+                String(body.description ?? '').trim(),
+                String(body.status ?? 'TODO'),
+                String(body.priority ?? 'MEDIUM'),
+                String(body.channel ?? 'general'),
+                String(body.assigned_to_name ?? '').trim(),
+                String(body.created_by_name ?? 'Admin').trim(),
+                body.due_at ?? null,
+            ]);
+            return { task: row.rows[0] };
+        });
+    });
+    // PATCH /admin/ops/tasks/:id
+    app.patch('/admin/ops/tasks/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const { id } = request.params;
+        const body = request.body ?? {};
+        return withTransaction(async (client) => {
+            const row = await client.query(`UPDATE ops_tasks SET
+           title = COALESCE($2, title),
+           description = COALESCE($3, description),
+           status = COALESCE($4, status),
+           priority = COALESCE($5, priority),
+           assigned_to_name = COALESCE($6, assigned_to_name),
+           updated_at = now()
+         WHERE id = $1 RETURNING *`, [id, body.title ?? null, body.description ?? null, body.status ?? null,
+                body.priority ?? null, body.assigned_to_name ?? null]);
+            return { task: row.rows[0] };
+        });
+    });
+    // DELETE /admin/ops/tasks/:id
+    app.delete('/admin/ops/tasks/:id', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const { id } = request.params;
+        return withTransaction(async (client) => {
+            await client.query(`DELETE FROM ops_tasks WHERE id = $1`, [id]);
+            return { ok: true };
+        });
+    });
+    // POST /admin/ops/presence  (heartbeat)
+    app.post('/admin/ops/presence', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        const adminId = String(request.user?.sub ?? '');
+        const body = request.body ?? {};
+        const adminName = String(body.admin_name ?? 'Admin').trim();
+        const channel = String(body.channel ?? 'general').trim();
+        const status = String(body.status ?? 'ONLINE').trim();
+        return withTransaction(async (client) => {
+            await client.query(`INSERT INTO ops_presence (admin_id, admin_name, channel, status, last_seen)
+         VALUES ($1,$2,$3,$4,now())
+         ON CONFLICT (admin_id) DO UPDATE
+         SET admin_name=$2, channel=$3, status=$4, last_seen=now()`, [adminId, adminName, channel, status]);
+            return { ok: true };
+        });
+    });
+    // GET /admin/ops/presence
+    app.get('/admin/ops/presence', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        await ensureAdminRoutesSchema();
+        return withTransaction(async (client) => {
+            const rows = await client.query(`SELECT admin_id, admin_name, channel, status, last_seen
+         FROM ops_presence
+         WHERE last_seen > now() - interval '2 minutes'
+         ORDER BY admin_name`);
+            return { online: rows.rows };
+        });
+    });
 }

@@ -5831,9 +5831,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const period = String(body.period ?? '').trim();
     if (!period) return reply.code(400).send({ error: 'period_required' });
     try {
-      const adminId = ((request.user as any)?.sub as string) ?? null;
       return withTransaction(async (client) => {
-        await getLiveDashboardAccess(client, request);
+        const access = await getLiveDashboardAccess(client, request);
+        const adminId = access.admin_user_id ?? null;
         await client.query(`
           INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, is_waived, waived_by_admin_id, waived_at, waived_note)
           VALUES ($1, $2, 5000, 'UGX', true, $3, now(), $4)

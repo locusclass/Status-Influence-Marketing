@@ -1882,6 +1882,16 @@ export async function campaignRoutes(app) {
     });
     const campaignRepo = new CampaignRepo();
     const paymentRepo = new PaymentRepo();
+    async function ambassadorHasSubscription(client, ambassadorId) {
+        const now = new Date();
+        const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+            .toISOString().slice(0, 10); // e.g. '2026-05-01'
+        const res = await client.query(`SELECT id FROM ambassador_subscriptions
+       WHERE ambassador_id = $1 AND period_start = $2
+         AND (is_waived = true OR paid_at IS NOT NULL)
+       LIMIT 1`, [ambassadorId, periodStart]);
+        return res.rows.length > 0;
+    }
     const AcceptContractSchema = z.object({
         campaign_id: z.string().trim().min(3),
     });
@@ -3281,7 +3291,6 @@ export async function campaignRoutes(app) {
                 reply.code(400);
                 return { error: 'amount_mismatch' };
             }
-            // Campaign must have a product page (advert listing) and media before it can be funded
             const bundleListingCheck = await client.query(`SELECT al.id FROM advert_listings al
          JOIN campaigns c ON c.id = al.campaign_id
          WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
@@ -3289,23 +3298,7 @@ export async function campaignRoutes(app) {
          LIMIT 1`, [bundle.bundle_root_campaign_id ?? bundle.bundle_id]);
             if (!bundleListingCheck.rows.length) {
                 reply.code(400);
-                return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' };
-            }
-            const bundleMediaCheck = await client.query(`SELECT 1 FROM campaigns c
-         WHERE (c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1 OR c.id = $1)
-           AND (
-             c.media_url IS NOT NULL
-             OR (c.media_type = 'TEXT' AND c.media_text IS NOT NULL)
-             OR EXISTS (
-               SELECT 1 FROM advert_media am
-               JOIN advert_listings al ON al.id = am.listing_id
-               WHERE al.campaign_id = c.id
-             )
-           )
-         LIMIT 1`, [bundle.bundle_root_campaign_id ?? bundle.bundle_id]);
-            if (!bundleMediaCheck.rows.length) {
-                reply.code(400);
-                return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' };
+                return { error: 'campaign_missing_product_listing', detail: 'Create a product page (My Listings) and attach it to this campaign before funding.' };
             }
             if (fundSource === 'WALLET') {
                 const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
@@ -3417,7 +3410,6 @@ export async function campaignRoutes(app) {
                 phone_country_code: checkoutProfile.phoneCountryCode,
                 availability_notes: checkoutProfile.availabilityNotes,
                 country: checkoutProfile.country,
-                redirect_url: callbackUrl,
                 customer: {
                     email: userEmail,
                     name: `${firstName} User`.trim(),
@@ -3497,24 +3489,6 @@ export async function campaignRoutes(app) {
                 reply.code(400);
                 return { error: 'campaign_pending_approval' };
             }
-            // Campaign must have a product page (advert listing) and media before it can be funded
-            const listingCheck = await client.query(`SELECT id FROM advert_listings WHERE campaign_id = $1 AND status != 'CANCELLED' LIMIT 1`, [campaign.id]);
-            if (!listingCheck.rows.length) {
-                reply.code(400);
-                return { error: 'campaign_missing_product_listing', detail: 'A product page (advert listing) must be attached to this campaign before it can be funded.' };
-            }
-            const hasCampaignMedia = (campaign.media_url && String(campaign.media_url).trim() !== '') ||
-                (campaign.media_type === 'TEXT' && campaign.media_text && String(campaign.media_text).trim() !== '');
-            if (!hasCampaignMedia) {
-                const listingMediaCheck = await client.query(`SELECT 1 FROM advert_media am
-           JOIN advert_listings al ON al.id = am.listing_id
-           WHERE al.campaign_id = $1
-           LIMIT 1`, [campaign.id]);
-                if (!listingMediaCheck.rows.length) {
-                    reply.code(400);
-                    return { error: 'campaign_missing_media', detail: 'Campaign media (image, video, or text creative) must be attached before funding.' };
-                }
-            }
             const bundleId = getCampaignBundleId(campaign);
             const escrowOwnerId = getEscrowCampaignId(campaign);
             const escrow = await paymentRepo.getEscrowByCampaign(client, escrowOwnerId);
@@ -3534,6 +3508,11 @@ export async function campaignRoutes(app) {
             if (body.amount !== escrow.amount_total) {
                 reply.code(400);
                 return { error: 'amount_mismatch' };
+            }
+            const listingCheck = await client.query(`SELECT id FROM advert_listings WHERE campaign_id = $1 AND status != 'CANCELLED' LIMIT 1`, [campaign.id]);
+            if (!listingCheck.rows.length) {
+                reply.code(400);
+                return { error: 'campaign_missing_product_listing', detail: 'Create a product page (My Listings) and attach it to this campaign before funding.' };
             }
             if (fundSource === 'WALLET') {
                 const wallet = await ensureWalletForUser(client, authUser, preferredCurrency);
@@ -3646,7 +3625,6 @@ export async function campaignRoutes(app) {
                 phone_country_code: checkoutProfile.phoneCountryCode,
                 availability_notes: checkoutProfile.availabilityNotes,
                 country: checkoutProfile.country,
-                redirect_url: callbackUrl,
                 customer: {
                     email: userEmail,
                     name: `${firstName} User`.trim(),
@@ -3688,6 +3666,11 @@ export async function campaignRoutes(app) {
             const restriction = await getUserAccountRestriction(client, authUser, 'ambassador');
             if (restriction) {
                 return restriction;
+            }
+            // Subscription gate: ambassador must have paid for the current month
+            const hasSubscription = await ambassadorHasSubscription(client, authUser);
+            if (!hasSubscription) {
+                return { error: 'subscription_required' };
             }
             const campaign = await campaignRepo.getCampaign(client, body.campaign_id);
             if (!campaign)
@@ -3774,6 +3757,9 @@ export async function campaignRoutes(app) {
         if (result?.error === 'account_restricted') {
             reply.code(403);
             return result;
+        }
+        if (result.error === 'subscription_required') {
+            return reply.code(402).send({ error: 'subscription_required', message: 'An active monthly subscription is required to accept campaign contracts.' });
         }
         if (result.error) {
             const error = result.error;
@@ -4256,6 +4242,155 @@ export async function campaignRoutes(app) {
                 targetType: 'campaign',
                 targetId: campaign.id,
             });
+            return { ok: true };
+        });
+    });
+    // ── AMBASSADOR SUBSCRIPTION ──────────────────────────────────────────────────
+    // GET /ambassador/subscription/status
+    // Returns the most recent active subscription (waived or paid within 30 days).
+    app.get('/ambassador/subscription/status', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        return withTransaction(async (client) => {
+            const row = await client.query(`SELECT id, amount, currency, is_waived, paid_at, period_start,
+                (paid_at + interval '30 days') AS valid_until
+         FROM ambassador_subscriptions
+         WHERE ambassador_id = $1
+           AND (is_waived = true OR paid_at IS NOT NULL)
+         ORDER BY COALESCE(paid_at, waived_at, created_at) DESC
+         LIMIT 1`, [authUser]);
+            const sub = row.rows[0] ?? null;
+            const isWaived = sub?.is_waived === true;
+            const validUntil = sub?.valid_until ? new Date(sub.valid_until) : null;
+            const isActive = isWaived || (sub?.paid_at != null && validUntil != null && validUntil > new Date());
+            return {
+                period_start: sub?.period_start ?? null,
+                valid_until: sub?.valid_until ?? null,
+                is_active: isActive,
+                is_waived: isWaived,
+                paid_at: sub?.paid_at ?? null,
+                amount: 5000,
+                currency: 'UGX',
+            };
+        });
+    });
+    // POST /ambassador/subscription/pay — reserves a subscription slot, creates a pesapal_transactions
+    // record, and returns a checkout_payload so the mobile client can open the payment screen.
+    app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        if (!hasYoClientCredentials()) {
+            reply.code(503);
+            return { error: 'yo_uganda_not_configured' };
+        }
+        const periodStart = new Date().toISOString().slice(0, 10);
+        const merchantReference = uuid();
+        return withTransaction(async (client) => {
+            // Look up user details for checkout payload customer info
+            const userRes = await client.query('SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1', [authUser]);
+            const user = userRes.rows[0];
+            const userCountry = user?.country ?? 'UG';
+            const userEmail = user?.email ?? '';
+            const userPhone = user?.phone ?? null;
+            const userName = user?.full_name ?? 'Ambassador';
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
+            const rawPayload = {
+                kind: 'AMBASSADOR_SUBSCRIPTION',
+                user_id: authUser,
+                amount: 5000,
+                currency: 'UGX',
+                country: checkoutProfile.country,
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
+                customer: {
+                    email: userEmail,
+                    name: userName,
+                    phone_number: userPhone,
+                },
+            };
+            // Reserve the subscription slot
+            await client.query(`INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference)
+         VALUES ($1, $2, 5000, 'UGX', $3)
+         ON CONFLICT (ambassador_id, period_start)
+         DO UPDATE SET payment_reference = EXCLUDED.payment_reference`, [authUser, periodStart, merchantReference]);
+            // Create the pesapal_transactions record so initiateYoUgandaPayment can find it
+            const paymentRepo = new PaymentRepo();
+            await paymentRepo.createPesaPalTransaction(client, {
+                escrow_id: undefined,
+                type: 'FUNDING',
+                amount: 5000,
+                merchant_reference: merchantReference,
+                raw_payload: rawPayload,
+            });
+            const checkoutPayload = {
+                provider: 'YO_UGANDA',
+                mode: 'DIRECT_CHARGE',
+                tx_ref: merchantReference,
+                amount: 5000,
+                currency: 'UGX',
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
+                country: checkoutProfile.country,
+                customer: {
+                    email: userEmail,
+                    name: userName,
+                    phone_number: userPhone,
+                },
+                meta: {
+                    merchant_reference: merchantReference,
+                    kind: 'AMBASSADOR_SUBSCRIPTION',
+                    user_id: authUser,
+                },
+            };
+            return {
+                ok: true,
+                tx_ref: merchantReference,
+                amount: 5000,
+                currency: 'UGX',
+                period_start: periodStart,
+                checkout_payload: checkoutPayload,
+            };
+        });
+    });
+    // POST /ambassador/subscription/confirm — marks subscription paid after checkout completes
+    app.post('/ambassador/subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        const body = request.body ?? {};
+        const paymentReference = String(body.payment_reference ?? '').trim();
+        if (!paymentReference)
+            return reply.code(400).send({ error: 'payment_reference_required' });
+        return withTransaction(async (client) => {
+            // Mark the subscription row that carries this payment reference as paid
+            const res = await client.query(`UPDATE ambassador_subscriptions
+         SET paid_at = now()
+         WHERE ambassador_id = $1 AND payment_reference = $2 AND paid_at IS NULL
+         RETURNING period_start`, [authUser, paymentReference]);
+            // Fallback: if the reference didn't match (e.g. timing edge case), mark the newest pending row
+            if ((res.rowCount ?? 0) === 0) {
+                await client.query(`UPDATE ambassador_subscriptions
+           SET paid_at = now(), payment_reference = $2
+           WHERE id = (
+             SELECT id FROM ambassador_subscriptions
+             WHERE ambassador_id = $1 AND paid_at IS NULL
+             ORDER BY created_at DESC LIMIT 1
+           )`, [authUser, paymentReference]);
+            }
+            // Mark the pesapal transaction completed
+            const paymentRepo = new PaymentRepo();
+            try {
+                await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+            }
+            catch (_) { /* non-fatal if record doesn't exist */ }
             return { ok: true };
         });
     });
