@@ -174,6 +174,30 @@ export function extractFirebaseObjectNameFromUrl(rawUrl) {
         return /^[a-zA-Z0-9._-]+$/.test(objectName) ? objectName : null;
     }
 }
+export async function getFirebaseObjectMetadata(objectName) {
+    try {
+        const accessToken = await getAccessToken();
+        const buckets = getBucketCandidates();
+        for (const bucketName of buckets) {
+            const response = await fetch(objectMetadataUrl(bucketName, objectName), {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (response.status === 404)
+                continue;
+            if (!response.ok)
+                continue;
+            const json = (await response.json());
+            return {
+                size: json.size != null ? Number(json.size) : null,
+                contentType: json.contentType ?? null,
+            };
+        }
+        return null;
+    }
+    catch {
+        return null;
+    }
+}
 export async function deleteFromFirebaseStorage(objectName) {
     const accessToken = await getAccessToken();
     const buckets = getBucketCandidates();
