@@ -1076,12 +1076,22 @@ export async function advertRoutes(app: FastifyInstance) {
                      mime_type, duration_secs, sort_order
               FROM advert_media WHERE listing_id = $1 ORDER BY media_pack, sort_order
             `, [listingId]),
-            client.query(`SELECT field_key, field_value FROM advert_listing_field_values WHERE listing_id = $1`, [listingId]),
+            client.query(`
+              SELECT fv.field_key, fv.field_value, fd.field_type
+              FROM advert_listing_field_values fv
+              LEFT JOIN advert_field_definitions fd
+                ON fd.listing_type_id = $2 AND fd.field_key = fv.field_key
+              WHERE fv.listing_id = $1
+            `, [listingId, listing.listing_type_id]),
           ]);
           const ambassadorMedia = mediaRows.rows.filter((m: any) => m.media_pack === 'AMBASSADOR_PACK');
           const galleryMedia = mediaRows.rows.filter((m: any) => m.media_pack === 'PRODUCT_GALLERY');
           const fieldValues: Record<string, string> = {};
-          for (const fv of fieldRows.rows) { fieldValues[fv.field_key] = fv.field_value; }
+          const fieldTypes: Record<string, string> = {};
+          for (const fv of fieldRows.rows) {
+            fieldValues[fv.field_key] = fv.field_value;
+            if (fv.field_type) fieldTypes[fv.field_key] = fv.field_type;
+          }
           return {
             gone: false, notFound: false,
             listing: {
@@ -1089,6 +1099,7 @@ export async function advertRoutes(app: FastifyInstance) {
               ambassador_media: ambassadorMedia,
               gallery_media: galleryMedia,
               field_values: fieldValues,
+              field_types: fieldTypes,
               time_remaining_secs: 0,
               business_id: undefined,
             },
@@ -1129,17 +1140,21 @@ export async function advertRoutes(app: FastifyInstance) {
             ORDER BY media_pack, sort_order
           `, [listingId]),
           client.query(`
-            SELECT field_key, field_value
-            FROM advert_listing_field_values
-            WHERE listing_id = $1
-          `, [listingId]),
+            SELECT fv.field_key, fv.field_value, fd.field_type
+            FROM advert_listing_field_values fv
+            LEFT JOIN advert_field_definitions fd
+              ON fd.listing_type_id = $2 AND fd.field_key = fv.field_key
+            WHERE fv.listing_id = $1
+          `, [listingId, listing.listing_type_id]),
         ]);
 
         const ambassadorMedia = mediaRows.rows.filter((m: any) => m.media_pack === 'AMBASSADOR_PACK');
         const galleryMedia = mediaRows.rows.filter((m: any) => m.media_pack === 'PRODUCT_GALLERY');
         const fieldValues: Record<string, string> = {};
+        const fieldTypes: Record<string, string> = {};
         for (const fv of fieldRows.rows) {
           fieldValues[fv.field_key] = fv.field_value;
+          if (fv.field_type) fieldTypes[fv.field_key] = fv.field_type;
         }
 
         return {
@@ -1150,6 +1165,7 @@ export async function advertRoutes(app: FastifyInstance) {
             ambassador_media: ambassadorMedia,
             gallery_media: galleryMedia,
             field_values: fieldValues,
+            field_types: fieldTypes,
             time_remaining_secs: Math.max(0, timeRemainingSecs),
             business_id: undefined,
           },
