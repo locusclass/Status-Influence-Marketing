@@ -213,6 +213,32 @@ export function extractFirebaseObjectNameFromUrl(rawUrl: string) {
   }
 }
 
+export async function getFirebaseObjectMetadata(objectName: string): Promise<{
+  size: number | null;
+  contentType: string | null;
+} | null> {
+  try {
+    const accessToken = await getAccessToken();
+    const buckets = getBucketCandidates();
+
+    for (const bucketName of buckets) {
+      const response = await fetch(objectMetadataUrl(bucketName, objectName), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (response.status === 404) continue;
+      if (!response.ok) continue;
+      const json = (await response.json()) as Record<string, any>;
+      return {
+        size: json.size != null ? Number(json.size) : null,
+        contentType: json.contentType ?? null,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function deleteFromFirebaseStorage(objectName: string) {
   const accessToken = await getAccessToken();
   const buckets = getBucketCandidates();

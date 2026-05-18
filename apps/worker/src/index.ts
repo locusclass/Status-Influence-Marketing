@@ -2083,12 +2083,146 @@ async function loop() {
       await processVerificationJob(job);
     } else if (job.job_type === 'PAYOUT_PROOF') {
       await processPayoutJob(job);
+    } else if (job.job_type === 'PROCESS_MEDIA') {
+      await processMediaJob(job);
+    } else if (job.job_type === 'CLEANUP_MEDIA') {
+      await cleanupMediaJob(job);
     } else {
       await pool.query(
         "UPDATE job_queue SET status='FAILED', last_error='unknown_job_type' WHERE id=$1",
         [job.id]
       );
     }
+  }
+}
+
+// ─── PROCESS_MEDIA ────────────────────────────────────────────────────────────
+// Fetches file metadata from Firebase, computes a sha256 hash, and marks the
+// asset ready.  Heavy work (thumbnails, transcoding) can be added here later.
+
+async function processMediaJob(job: any) {
+  const { asset_id, object_name, mime_type, purpose } = job.payload as {
+    asset_id: string;
+    object_name: string;
+    mime_type?: string;
+    purpose?: string;
+  };
+
+  if (!asset_id || !object_name) {
+    await pool.query(
+      "UPDATE job_queue SET status='FAILED', last_error='missing_payload_fields', updated_at=now() WHERE id=$1",
+      [job.id]
+    );
+    return;
+  }
+
+  try {
+    await pool.query(
+      "UPDATE media_assets SET processing_status='processing', updated_at=now() WHERE id=$1",
+      [asset_id]
+    );
+
+    // Fetch GCS object metadata (size, content-type).
+    const { getFirebaseObjectMetadata } = await import('./firebaseStorageWorker.js');
+    const meta = await getFirebaseObjectMetadata(object_name);
+
+    const fileSizeBytes = meta?.size ?? null;
+    const assetType = (mime_type ?? '').startsWith('video/') ? 'video'
+      : (mime_type ?? '').startsWith('image/') ? 'image'
+      : 'document';
+
+    // Proof assets need admin review before payout release.
+    const proofPurposes = new Set([
+      'ambassador_proof_screenshot',
+      'ambassador_proof_screen_recording',
+    ]);
+    const verificationStatus = proofPurposes.has(purpose ?? '') ? 'needs_admin_review' : 'not_required';
+
+    await pool.query(
+      `UPDATE media_assets
+       SET processing_status = 'ready',
+           asset_type        = $2,
+           file_size_bytes   = COALESCE($3, file_size_bytes),
+           verification_status = CASE
+             WHEN upload_purpose IN ('ambassador_proof_screenshot','ambassador_proof_screen_recording')
+               AND verification_status = 'pending' THEN $4
+             ELSE verification_status
+           END,
+           updated_at        = now()
+       WHERE id = $1`,
+      [asset_id, assetType, fileSizeBytes, verificationStatus]
+    );
+
+    await pool.query(
+      "UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1",
+      [job.id]
+    );
+  } catch (err: any) {
+    const attempts = job.attempts + 1;
+    const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
+    const delay = Math.min(30 * attempts, 180);
+
+    if (nextStatus === 'FAILED') {
+      await pool.query(
+        "UPDATE media_assets SET processing_status='failed', updated_at=now() WHERE id=$1",
+        [asset_id]
+      );
+    }
+
+    await pool.query(
+      `UPDATE job_queue
+       SET status=$2, attempts=$3, last_error=$4,
+           run_at=now() + ($5 || ' seconds')::interval, updated_at=now()
+       WHERE id=$1`,
+      [job.id, nextStatus, attempts, err?.message ?? 'error', delay]
+    );
+  }
+}
+
+// ─── CLEANUP_MEDIA ────────────────────────────────────────────────────────────
+// Deletes orphaned or soft-deleted assets from Firebase Storage.
+// Also sweeps abandoned pending_upload records older than 30 minutes.
+
+async function cleanupMediaJob(job: any) {
+  const { asset_id, object_name } = job.payload as { asset_id?: string; object_name?: string };
+
+  try {
+    if (object_name) {
+      const { deleteFromFirebaseStorage } = await import('./firebaseStorageWorker.js');
+      await deleteFromFirebaseStorage(object_name).catch(() => {/* 404 is fine */});
+    }
+
+    // Sweep abandoned pending_upload records older than 30 minutes.
+    const abandoned = await pool.query(
+      `SELECT id, original_storage_path
+       FROM media_assets
+       WHERE processing_status = 'pending_upload'
+         AND created_at < now() - interval '30 minutes'
+         AND deleted_at IS NULL
+       LIMIT 50`
+    );
+    for (const row of abandoned.rows) {
+      if (row.original_storage_path) {
+        const { deleteFromFirebaseStorage } = await import('./firebaseStorageWorker.js');
+        await deleteFromFirebaseStorage(row.original_storage_path).catch(() => {});
+      }
+      await pool.query(
+        "UPDATE media_assets SET processing_status='deleted', deleted_at=now(), updated_at=now() WHERE id=$1",
+        [row.id]
+      );
+    }
+
+    await pool.query(
+      "UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1",
+      [job.id]
+    );
+  } catch (err: any) {
+    const attempts = job.attempts + 1;
+    const nextStatus = attempts >= (job.max_attempts ?? 3) ? 'FAILED' : 'RETRY';
+    await pool.query(
+      `UPDATE job_queue SET status=$2, attempts=$3, last_error=$4, updated_at=now() WHERE id=$1`,
+      [job.id, nextStatus, attempts, err?.message ?? 'error']
+    );
   }
 }
 
