@@ -44,6 +44,24 @@ async function ensureAdvertSchema(client: any) {
   `);
 }
 
+async function ensureActiveListingType(client: any, listingTypeId: string) {
+  const typeRow = await client.query(
+    `
+      SELECT lt.id
+      FROM advert_listing_types lt
+      JOIN advert_subcategories s ON s.id = lt.subcategory_id
+      WHERE lt.id = $1
+        AND lt.is_active = TRUE
+        AND s.is_active = TRUE
+      LIMIT 1
+    `,
+    [listingTypeId]
+  );
+  if (!typeRow.rows[0]) {
+    throw Object.assign(new Error('invalid_listing_type'), { statusCode: 400 });
+  }
+}
+
 // ─────────────────────────────────────────────
 // QUALITY SCORE CALCULATOR
 // ─────────────────────────────────────────────
@@ -274,6 +292,8 @@ export async function advertRoutes(app: FastifyInstance) {
           throw Object.assign(new Error('forbidden'), { statusCode: 403 });
         }
 
+        await ensureActiveListingType(client, body.listing_type_id);
+
         // Derive the listing's live window from the campaign's duration
         const camp = campRow.rows[0];
         const keepHours: number = camp.terms_keep_hours ?? 12;
@@ -470,6 +490,8 @@ export async function advertRoutes(app: FastifyInstance) {
         if (parseInt(draftCount.rows[0].count, 10) >= 3) {
           throw Object.assign(new Error('draft_limit_reached'), { statusCode: 409 });
         }
+
+        await ensureActiveListingType(client, body.listing_type_id);
 
         let slug = generateListingSlug(body.title);
         const slugCheck = await client.query(`SELECT id FROM advert_listings WHERE slug = $1`, [slug]);
