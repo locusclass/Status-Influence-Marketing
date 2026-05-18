@@ -256,6 +256,97 @@ async function requireModuleAccess(client, request, reply, moduleKey) {
     }
     return access;
 }
+function resolveEscrowCampaignId(campaign) {
+    const executionMeta = campaign?.execution_meta && typeof campaign.execution_meta === 'object'
+        ? campaign.execution_meta
+        : null;
+    const contractReissue = executionMeta?.contract_reissue &&
+        typeof executionMeta.contract_reissue === 'object'
+        ? executionMeta.contract_reissue
+        : null;
+    const sourceEscrowCampaignId = String(contractReissue?.source_escrow_campaign_id ?? '').trim();
+    if (sourceEscrowCampaignId.length > 0) {
+        return sourceEscrowCampaignId;
+    }
+    return String(campaign?.bundle_root_campaign_id ??
+        campaign?.parent_campaign_id ??
+        campaign?.id ??
+        '').trim();
+}
+async function activateFundedCampaignListings(client, campaignId) {
+    await client.query(`
+    UPDATE advert_listings al
+    SET status = 'ACTIVE',
+        campaign_start_at = COALESCE(c.start_date, now()),
+        campaign_end_at = COALESCE(
+          c.end_date,
+          COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'
+        ),
+        expires_at = COALESCE(
+          c.end_date,
+          COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'
+        ),
+        updated_at = now()
+    FROM campaigns c
+    WHERE al.campaign_id = c.id
+      AND al.status = 'DRAFT'
+      AND (
+        c.id = $1
+        OR c.parent_campaign_id = $1
+        OR c.bundle_root_campaign_id = $1
+      )
+    `, [campaignId]);
+}
+async function planFundedAssignmentNotifications(client, campaignId, adminId) {
+    const assignedRes = await client.query(`SELECT c.assigned_ambassador_id, c.title
+     FROM campaigns c
+     WHERE (
+       c.id = $1
+       OR c.parent_campaign_id = $1
+       OR c.bundle_root_campaign_id = $1
+     )
+       AND c.assigned_ambassador_id IS NOT NULL
+       AND c.status != 'CANCELLED'`, [campaignId]);
+    if (!assignedRes.rows.length) {
+        return [];
+    }
+    const notices = new Map();
+    for (const row of assignedRes.rows) {
+        const userId = String(row.assigned_ambassador_id ?? '').trim();
+        if (!userId) {
+            continue;
+        }
+        const title = String(row.title ?? '').trim();
+        if (!notices.has(userId)) {
+            notices.set(userId, []);
+        }
+        notices.get(userId).push(title);
+    }
+    const smsJobs = [];
+    for (const [userId, titles] of notices.entries()) {
+        const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} campaigns`;
+        const body = `You have been assigned to ${subject} on Prime Status. Open the app to review and accept the contract.`;
+        const delivery = await createUserNotificationsWithSmsPlan(client, [userId], {
+            category: 'CAMPAIGN_ASSIGNMENT',
+            title: 'New campaign assignment',
+            body,
+            targetType: 'campaign',
+            targetId: campaignId,
+            meta: {
+                assigned_campaign_titles: titles,
+                event: 'SYSTEM_FUND',
+                admin_id: adminId,
+            },
+        }, {
+            sms: {
+                enabled: true,
+                message: body,
+            },
+        });
+        smsJobs.push(...delivery.smsJobs);
+    }
+    return smsJobs;
+}
 async function loadScopedUser(client, access, rawUserId) {
     const resolvedUserId = await resolveUserId(client, rawUserId);
     if (!resolvedUserId) {
@@ -4018,15 +4109,15 @@ export async function adminRoutes(app) {
         const params = request.params;
         const body = SystemFundSchema.parse(request.body ?? {});
         const adminId = String(request.user.sub ?? '');
-        return withTransaction(async (client) => {
+        const result = await withTransaction(async (client) => {
             const access = await requireModuleAccess(client, request, reply, ADMIN_MODULE_CAMPAIGNS);
             if (!access)
                 return { error: 'forbidden' };
-            // Load campaign with its escrow
+            // Load the selected campaign first, then resolve funding against the
+            // same escrow-owner scope used by the business funding flows.
             const campaignRes = await client.query(`SELECT c.id, c.title, c.country_id, c.division_id, c.status, c.budget_total,
-                e.id AS escrow_id, e.status AS escrow_status, e.amount_total AS escrow_amount
+                c.parent_campaign_id, c.bundle_root_campaign_id, c.execution_meta
          FROM campaigns c
-         LEFT JOIN escrow_ledger e ON e.campaign_id = c.id
          WHERE c.id = $1
          LIMIT 1`, [params.id]);
             const campaign = campaignRes.rows[0];
@@ -4038,22 +4129,43 @@ export async function adminRoutes(app) {
                 reply.code(403);
                 return { error: 'forbidden' };
             }
+            const escrowCampaignId = resolveEscrowCampaignId(campaign);
+            const escrowOwnerRes = escrowCampaignId === String(campaign.id)
+                ? { rows: [campaign] }
+                : await client.query(`
+              SELECT id, budget_total
+              FROM campaigns
+              WHERE id = $1
+              LIMIT 1
+              `, [escrowCampaignId]);
+            const escrowOwner = escrowOwnerRes.rows[0] ?? campaign;
+            const existingEscrow = await paymentRepo.getEscrowByCampaign(client, escrowCampaignId);
             // Reject if already funded
             const fundedStatuses = ['FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'];
-            if (campaign.escrow_status && fundedStatuses.includes(String(campaign.escrow_status))) {
+            if (existingEscrow?.status &&
+                fundedStatuses.includes(String(existingEscrow.status))) {
                 reply.code(400);
-                return { error: 'campaign_already_funded', detail: `Escrow is already ${campaign.escrow_status}.` };
+                return {
+                    error: 'campaign_already_funded',
+                    detail: `Escrow is already ${existingEscrow.status}.`,
+                };
             }
-            let escrowId = campaign.escrow_id;
-            let escrowAmount = Number(campaign.escrow_amount ?? campaign.budget_total ?? 0);
+            let escrowId = existingEscrow?.id ? String(existingEscrow.id) : null;
+            let escrowAmount = Number(existingEscrow?.amount_total ??
+                escrowOwner.budget_total ??
+                campaign.budget_total ??
+                0);
             // Create escrow if it doesn't exist
             if (!escrowId) {
-                const amount = body.amount ?? Number(campaign.budget_total ?? 0);
+                const amount = body.amount ?? Number(escrowOwner.budget_total ?? 0);
                 if (!amount || amount <= 0) {
                     reply.code(400);
-                    return { error: 'amount_required', detail: 'Campaign has no pending escrow. Provide a positive amount.' };
+                    return {
+                        error: 'amount_required',
+                        detail: 'Campaign has no pending escrow. Provide a positive amount.',
+                    };
                 }
-                const newEscrow = await paymentRepo.createEscrow(client, params.id, amount);
+                const newEscrow = await paymentRepo.createEscrow(client, escrowCampaignId, amount);
                 escrowId = newEscrow.id;
                 escrowAmount = amount;
             }
@@ -4075,39 +4187,28 @@ export async function adminRoutes(app) {
                     admin_note: body.note ?? null,
                     admin_id: adminId,
                     campaign_id: params.id,
+                    escrow_campaign_id: escrowCampaignId,
                 }),
             ]);
             const txn = txnRes.rows[0];
             // Mark escrow FUNDED, link the system-grant txn
-            await client.query(`UPDATE escrow_ledger SET status = 'FUNDED', pesapal_txn_id = $2 WHERE id = $1`, [escrowId, txn.id]);
+            await paymentRepo.markEscrowFunded(client, escrowId, txn.id);
+            await activateFundedCampaignListings(client, escrowCampaignId);
             // Audit
             await logAudit(client, adminId, 'SYSTEM_FUND_CAMPAIGN', 'campaign', params.id, {
                 escrow_id: escrowId,
+                escrow_campaign_id: escrowCampaignId,
                 amount: escrowAmount,
                 txn_id: txn.id,
                 note: body.note ?? null,
             });
+            let smsJobs = [];
             // Notify assigned ambassadors (best-effort)
             try {
-                const assignedRes = await client.query(`SELECT DISTINCT c.assigned_ambassador_id AS user_id, c.title
-           FROM campaigns c
-           WHERE (c.id = $1 OR c.parent_campaign_id = $1 OR c.bundle_root_campaign_id = $1)
-             AND c.assigned_ambassador_id IS NOT NULL`, [params.id]);
-                if (assignedRes.rows.length > 0) {
-                    const userIds = assignedRes.rows.map((r) => String(r.user_id));
-                    const campaignTitle = String(campaign.title ?? 'Your campaign');
-                    await createUserNotificationsWithSmsPlan(client, userIds, {
-                        category: 'CAMPAIGN_ASSIGNMENT',
-                        title: 'Campaign Funded',
-                        body: `"${campaignTitle}" has been funded and is now active. Open the app to view your contract.`,
-                        targetType: 'campaign',
-                        targetId: params.id,
-                        meta: { event: 'SYSTEM_FUND', admin_id: adminId },
-                    });
-                }
+                smsJobs = await planFundedAssignmentNotifications(client, params.id, adminId);
             }
-            catch (_) {
-                // Notifications are best-effort — funding itself succeeded
+            catch (error) {
+                request.log.warn({ error, campaignId: params.id, escrowCampaignId }, 'system_fund_assignment_notifications_failed');
             }
             return {
                 funded: true,
@@ -4115,8 +4216,15 @@ export async function adminRoutes(app) {
                 escrow_id: escrowId,
                 amount: escrowAmount,
                 txn_reference: merchantRef,
+                smsJobs,
             };
         });
+        if (result?.error) {
+            return result;
+        }
+        queueSmsDispatch(result.smsJobs ?? [], app.log, 'admin:campaign-system-fund');
+        const { smsJobs: _smsJobs, ...response } = result;
+        return response;
     });
     app.get('/admin/payout-requests', { preHandler: [app.adminOnly] }, async (request) => {
         const query = request.query;
