@@ -644,6 +644,18 @@ export async function paymentRoutes(app: FastifyInstance) {
         String(paymentEvent.transactionId)
       );
       await paymentRepo.markEscrowFunded(client, escrow.id, txn.id);
+      // Activate the campaign(s) so they appear in ambassador opportunities
+      await client.query(
+        `UPDATE campaigns
+         SET status = 'ACTIVE', updated_at = now()
+         WHERE (
+           id = $1
+           OR parent_campaign_id = $1
+           OR bundle_root_campaign_id = $1
+         )
+         AND status NOT IN ('ACTIVE', 'COMPLETED', 'CANCELLED')`,
+        [escrow.campaign_id]
+      );
       // Activate any DRAFT listing linked to the funded campaign(s)
       await client.query(
         `
@@ -656,7 +668,7 @@ export async function paymentRoutes(app: FastifyInstance) {
         FROM campaigns c
         WHERE al.campaign_id = c.id
           AND al.status = 'DRAFT'
-          AND (c.id = $1 OR c.campaign_bundle_id = $1 OR c.bundle_root_campaign_id = $1)
+          AND (c.id = $1 OR c.parent_campaign_id = $1 OR c.bundle_root_campaign_id = $1)
         `,
         [escrow.campaign_id]
       );
