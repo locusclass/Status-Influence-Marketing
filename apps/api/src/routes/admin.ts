@@ -4298,6 +4298,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const res = await client.query(
         `SELECT
            p.*,
+           c.id AS campaign_id,
            c.title AS campaign_title,
            s.script AS verification_script,
            p.meta->'verification_report' AS verification_report
