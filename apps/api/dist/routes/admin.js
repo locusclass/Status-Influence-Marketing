@@ -10,7 +10,7 @@ import { verifyTransaction } from '../services/yoUganda.js';
 import { buildCampaignStatusSummaries } from './campaigns.js';
 import { resolveCampaignId, resolveUserId, } from '../services/publicId.js';
 import { ACCOUNT_ROLE_ADMIN, ACCOUNT_ROLE_BUSINESS, ACCOUNT_ROLE_AMBASSADOR, ACCOUNT_ROLE_DUAL_USER, normalizeAccountRole, normalizeActiveRole, } from '../services/roles.js';
-import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, resolveLiveDashboardAccess, } from '../services/adminTenant.js';
+import { appendDashboardTenantScope, ensureAdminAccountRecord, grantAdminModuleAssignments, getRequestDashboardAccess, hasAdminModuleAccess, isSuperDashboardAccess as hasSuperDashboardAccess, loadDashboardAccessContext, matchesDashboardTenantScope, replaceAdminModuleAssignments, replaceAdminScopeAssignments, resolveLiveDashboardAccess, } from '../services/adminTenant.js';
 import { collectCampaignNotificationUserIds, createBlockingNotice, createUserNotifications, removeBlockingNotice, } from '../services/userSignals.js';
 import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { auditScopeFromAccess, recordAdminAudit } from '../services/adminAudit.js';
@@ -204,6 +204,270 @@ function isManagedAdminAccount(row) {
     const role = String(row?.role ?? '').trim().toUpperCase();
     const adminRole = String(row?.admin_role ?? '').trim().toUpperCase();
     return role === 'ADMIN' || adminRole !== 'USER';
+}
+const ClearDashboardTabSchema = z.object({
+    tab_key: z.enum([
+        'operations',
+        'publicCommunication',
+        'campaigns',
+        'campaignApprovals',
+        'campaignCompletions',
+        'drafts',
+        'proofs',
+        'ambassadorVerifications',
+        'ambassadorSubscriptions',
+        'sessions',
+        'risk',
+        'wallets',
+        'withdrawals',
+        'finance',
+        'payoutRequests',
+        'managerPayouts',
+        'escrows',
+        'contracts',
+        'jobs',
+        'pesapal',
+        'audit',
+        'advertListings',
+        'advertAnalytics',
+        'advertOffers',
+        'advertTaxonomy',
+        'advertTracking',
+    ]),
+});
+async function truncateTables(client, tables) {
+    if (!tables.length)
+        return [];
+    const quoted = tables.map((table) => `"${table}"`).join(', ');
+    await client.query(`TRUNCATE TABLE ${quoted} RESTART IDENTITY CASCADE`);
+    return [...tables];
+}
+async function selectIdStrings(client, query, params = []) {
+    const res = await client.query(query, params);
+    return res.rows
+        .map((row) => String(row.id ?? '').trim())
+        .filter((value) => value.length > 0);
+}
+async function clearAdvertListingsByIds(client, listingIds) {
+    if (!listingIds.length)
+        return [];
+    await client.query(`DELETE FROM advert_media_interactions
+     WHERE listing_id = ANY($1::uuid[])
+        OR session_id IN (
+          SELECT id FROM advert_page_sessions WHERE listing_id = ANY($1::uuid[])
+        )`, [listingIds]);
+    await client.query(`DELETE FROM advert_offer_messages
+     WHERE offer_id IN (
+       SELECT id FROM advert_offers WHERE listing_id = ANY($1::uuid[])
+     )`, [listingIds]);
+    await client.query(`DELETE FROM advert_analytics_rollups WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_engagement_events WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_listing_field_values WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_offers WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_tracking_links WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_media WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_page_sessions WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_web_listing_meta WHERE listing_id = ANY($1::uuid[])`, [listingIds]);
+    await client.query(`DELETE FROM advert_listings WHERE id = ANY($1::uuid[])`, [listingIds]);
+    return [
+        'advert_media_interactions',
+        'advert_offer_messages',
+        'advert_analytics_rollups',
+        'advert_engagement_events',
+        'advert_listing_field_values',
+        'advert_offers',
+        'advert_tracking_links',
+        'advert_media',
+        'advert_page_sessions',
+        'advert_web_listing_meta',
+        'advert_listings',
+    ];
+}
+async function clearProofsByIds(client, proofIds) {
+    if (!proofIds.length)
+        return [];
+    await client.query(`DELETE FROM payout_requests WHERE proof_id = ANY($1::uuid[])`, [proofIds]);
+    await client.query(`DELETE FROM media_assets WHERE proof_id = ANY($1::uuid[])`, [proofIds]);
+    await client.query(`DELETE FROM proofs WHERE id = ANY($1::uuid[])`, [proofIds]);
+    return ['payout_requests', 'media_assets', 'proofs'];
+}
+async function clearVerificationSessionsByIds(client, sessionIds) {
+    if (!sessionIds.length)
+        return [];
+    const proofIds = await selectIdStrings(client, `SELECT id FROM proofs WHERE session_id = ANY($1::uuid[])`, [sessionIds]);
+    const cleared = new Set(await clearProofsByIds(client, proofIds));
+    await client.query(`DELETE FROM verification_sessions WHERE id = ANY($1::uuid[])`, [sessionIds]);
+    cleared.add('verification_sessions');
+    return [...cleared];
+}
+async function clearContractsByIds(client, contractIds) {
+    if (!contractIds.length)
+        return [];
+    await client.query(`DELETE FROM ambassador_profile_reviews WHERE contract_id = ANY($1::uuid[])`, [contractIds]);
+    await client.query(`DELETE FROM promoter_profile_reviews WHERE contract_id = ANY($1::uuid[])`, [contractIds]);
+    await client.query(`DELETE FROM contracts WHERE id = ANY($1::uuid[])`, [
+        contractIds,
+    ]);
+    return [
+        'ambassador_profile_reviews',
+        'promoter_profile_reviews',
+        'contracts',
+    ];
+}
+async function clearEscrowsByIds(client, escrowIds) {
+    if (!escrowIds.length)
+        return [];
+    await client.query(`DELETE FROM pesapal_transactions WHERE escrow_id = ANY($1::uuid[])`, [escrowIds]);
+    await client.query(`DELETE FROM escrow_ledger WHERE id = ANY($1::uuid[])`, [
+        escrowIds,
+    ]);
+    return ['pesapal_transactions', 'escrow_ledger'];
+}
+async function clearCampaignsByIds(client, rootCampaignIds) {
+    if (!rootCampaignIds.length)
+        return [];
+    const campaignIds = await selectIdStrings(client, `SELECT id
+     FROM campaigns
+     WHERE id = ANY($1::uuid[])
+        OR bundle_root_campaign_id = ANY($1::uuid[])
+        OR parent_campaign_id = ANY($1::uuid[])`, [rootCampaignIds]);
+    if (!campaignIds.length)
+        return [];
+    const listingIds = await selectIdStrings(client, `SELECT id FROM advert_listings WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+    const sessionIds = await selectIdStrings(client, `SELECT id FROM verification_sessions WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+    const contractIds = await selectIdStrings(client, `SELECT id FROM contracts WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+    const escrowIds = await selectIdStrings(client, `SELECT id FROM escrow_ledger WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+    const cleared = new Set();
+    for (const table of await clearAdvertListingsByIds(client, listingIds)) {
+        cleared.add(table);
+    }
+    for (const table of await clearVerificationSessionsByIds(client, sessionIds)) {
+        cleared.add(table);
+    }
+    for (const table of await clearContractsByIds(client, contractIds)) {
+        cleared.add(table);
+    }
+    for (const table of await clearEscrowsByIds(client, escrowIds)) {
+        cleared.add(table);
+    }
+    await client.query(`DELETE FROM media_assets WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+    cleared.add('media_assets');
+    await client.query(`DELETE FROM earnings_ledger WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
+    cleared.add('earnings_ledger');
+    await client.query(`DELETE FROM campaigns WHERE id = ANY($1::uuid[])`, [
+        campaignIds,
+    ]);
+    cleared.add('campaigns');
+    return [...cleared];
+}
+async function clearDashboardTabData(client, tabKey) {
+    switch (tabKey) {
+        case 'operations':
+            return truncateTables(client, [
+                'admin_operation_messages',
+                'admin_operation_task_states',
+                'ops_messages',
+                'ops_presence',
+                'ops_tasks',
+            ]);
+        case 'publicCommunication':
+            return truncateTables(client, [
+                'admin_blocking_notice_targets',
+                'admin_blocking_notices',
+                'user_notifications',
+            ]);
+        case 'campaigns':
+            return clearCampaignsByIds(client, await selectIdStrings(client, `SELECT id FROM campaigns`));
+        case 'campaignApprovals':
+            return clearCampaignsByIds(client, await selectIdStrings(client, `SELECT id FROM campaigns WHERE approval_status = 'PENDING_APPROVAL'`));
+        case 'campaignCompletions':
+        case 'proofs':
+            return clearProofsByIds(client, await selectIdStrings(client, `SELECT id FROM proofs`));
+        case 'drafts':
+            return truncateTables(client, ['campaign_creation_drafts']);
+        case 'ambassadorVerifications':
+            return truncateTables(client, [
+                'ambassador_verification_recordings',
+                'promoter_verification_recordings',
+            ]);
+        case 'ambassadorSubscriptions':
+            return truncateTables(client, ['ambassador_subscriptions']);
+        case 'sessions':
+            return clearVerificationSessionsByIds(client, await selectIdStrings(client, `SELECT id FROM verification_sessions`));
+        case 'risk':
+            return truncateTables(client, [
+                'ambassador_profile_reviews',
+                'device_fingerprints',
+                'promoter_profile_reviews',
+                'trust_events',
+                'trust_scores',
+            ]);
+        case 'wallets':
+            return truncateTables(client, [
+                'wallet_txns',
+                'wallet_withdrawals',
+                'wallets',
+            ]);
+        case 'withdrawals':
+            return truncateTables(client, ['wallet_withdrawals']);
+        case 'finance':
+            return truncateTables(client, [
+                'pesapal_transactions',
+                'pesapal_webhook_events',
+                'wallet_txns',
+                'wallet_withdrawals',
+                'payout_requests',
+                'payouts',
+                'earnings_ledger',
+                'escrow_ledger',
+            ]);
+        case 'payoutRequests':
+            return truncateTables(client, ['payout_requests']);
+        case 'managerPayouts':
+            return truncateTables(client, ['payouts']);
+        case 'escrows':
+            return clearEscrowsByIds(client, await selectIdStrings(client, `SELECT id FROM escrow_ledger`));
+        case 'contracts':
+            return clearContractsByIds(client, await selectIdStrings(client, `SELECT id FROM contracts`));
+        case 'jobs':
+            return truncateTables(client, ['job_queue']);
+        case 'pesapal':
+            return truncateTables(client, [
+                'pesapal_transactions',
+                'pesapal_webhook_events',
+            ]);
+        case 'audit':
+            return truncateTables(client, ['admin_audit_logs']);
+        case 'advertListings':
+            return clearAdvertListingsByIds(client, await selectIdStrings(client, `SELECT id FROM advert_listings`));
+        case 'advertAnalytics':
+            return truncateTables(client, [
+                'advert_media_interactions',
+                'advert_engagement_events',
+                'advert_page_sessions',
+                'advert_analytics_rollups',
+            ]);
+        case 'advertOffers':
+            return truncateTables(client, [
+                'advert_offer_messages',
+                'advert_offers',
+            ]);
+        case 'advertTaxonomy': {
+            const cleared = new Set(await clearAdvertListingsByIds(client, await selectIdStrings(client, `SELECT id FROM advert_listings`)));
+            for (const table of await truncateTables(client, [
+                'advert_field_options',
+                'advert_field_definitions',
+                'advert_listing_types',
+                'advert_subcategories',
+                'advert_categories',
+            ])) {
+                cleared.add(table);
+            }
+            return [...cleared];
+        }
+        case 'advertTracking':
+            return truncateTables(client, ['advert_tracking_links']);
+    }
 }
 async function getLiveDashboardAccess(client, request) {
     const attached = (request.adminAccess ?? null);
@@ -3531,6 +3795,44 @@ export async function adminRoutes(app) {
                 settings[row.key] = row.value;
             return { settings };
         });
+    });
+    app.post('/admin/tabs/clear', { preHandler: [app.adminOnly] }, async (request, reply) => {
+        const access = getRequestDashboardAccess(request);
+        if (!isSuperDashboardAccess(access)) {
+            return reply.code(403).send({ error: 'super_admin_only' });
+        }
+        const body = ClearDashboardTabSchema.safeParse(request.body ?? {});
+        if (!body.success) {
+            return reply.code(400).send({ error: 'validation_error' });
+        }
+        try {
+            const clearedTables = await withTransaction(async (client) => {
+                const tables = await clearDashboardTabData(client, body.data.tab_key);
+                if (body.data.tab_key !== 'audit') {
+                    await recordAdminAudit(client, {
+                        actorId: access.user_id,
+                        action: 'CLEAR_DASHBOARD_TAB',
+                        targetType: 'dashboard_tab',
+                        targetId: body.data.tab_key,
+                        meta: { cleared_tables: tables },
+                        ...auditScopeFromAccess(access),
+                    });
+                }
+                return tables;
+            });
+            if (body.data.tab_key === 'audit') {
+                request.log.warn({ actorId: access.user_id, tabKey: body.data.tab_key, clearedTables }, 'admin.audit.tab.cleared');
+            }
+            return reply.send({
+                ok: true,
+                tab_key: body.data.tab_key,
+                cleared_tables: clearedTables,
+            });
+        }
+        catch (error) {
+            request.log.error({ err: error, tabKey: body.data.tab_key }, 'admin.clear_tab.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
     });
     // ── Campaign approval workflow ───────────────────────────────────────────────
     app.get('/admin/campaigns/pending-approval', { preHandler: [app.adminOnly] }, async (request) => {
