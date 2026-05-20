@@ -282,20 +282,6 @@ export async function verificationRoutes(app: FastifyInstance) {
       );
       if (!contract && role !== 'ADMIN') return { error: 'contract_required' } as any;
 
-      const activeSessionRes = await client.query(
-        `SELECT id
-         FROM verification_sessions
-         WHERE campaign_id=$1
-           AND user_id=$2
-           AND expires_at > now()
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [body.campaign_id, authUser]
-      );
-      if (activeSessionRes.rows[0]) {
-        return { error: 'session_active_exists' } as any;
-      }
-
       return verificationRepo.createSession(client, {
         user_id: resolvedUserId,
         campaign_id: campaign.id,
@@ -359,26 +345,12 @@ export async function verificationRoutes(app: FastifyInstance) {
         'SELECT id FROM proofs WHERE session_id=$1 LIMIT 1',
         [body.session_id]
       );
-      if (existingForSession.rows[0]) return { error: 'proof_already_submitted' } as any;
-
       const contract = await getActiveAmbassadorContract(
         client,
         session.campaign_id,
         authUser
       );
       if (!contract) return { error: 'contract_not_active' } as any;
-
-      const priorProof = await client.query(
-        `SELECT p.id
-         FROM proofs p
-         JOIN verification_sessions s ON s.id = p.session_id
-         WHERE s.campaign_id=$1
-           AND p.user_id=$2
-           AND p.status IN ('PENDING','MANUAL_REVIEW','VERIFIED')
-         LIMIT 1`,
-        [session.campaign_id, authUser]
-      );
-      if (priorProof.rows[0]) return { error: 'duplicate_campaign_proof' } as any;
 
       const fingerprintHash = hashFingerprint(body.device_fingerprint);
       const fingerprintConflict = await client.query(
