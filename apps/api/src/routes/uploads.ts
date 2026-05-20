@@ -49,7 +49,7 @@ const ALLOWED_MIMES: Record<string, string[]> = {
   campaign_video:                    ['video/'],
   landing_page_media:                ['image/', 'video/'],
   ambassador_proof_screenshot:       ['image/'],
-  ambassador_proof_screen_recording: ['video/mp4'],
+  ambassador_proof_screen_recording: ['video/'],
   user_avatar:                       ['image/'],
   business_logo:                     ['image/'],
   admin_attachment:                  ['image/', 'video/', 'application/pdf'],
@@ -152,9 +152,16 @@ export async function uploadRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'missing_fields', detail: 'file_name and mime_type are required' });
     }
 
-    const purpose = (upload_purpose ?? 'campaign_gallery').trim();
+    let purpose = (upload_purpose ?? 'campaign_gallery').trim();
     if (!VALID_PURPOSES.has(purpose)) {
       return reply.code(400).send({ error: 'invalid_purpose', detail: `upload_purpose must be one of: ${[...VALID_PURPOSES].join(', ')}` });
+    }
+
+    // If a video is sent with the generic campaign_gallery purpose (older clients
+    // or cached web builds that don't pass an explicit purpose), upgrade it to
+    // campaign_video so the MIME check passes correctly.
+    if (purpose === 'campaign_gallery' && mime_type.startsWith('video/')) {
+      purpose = 'campaign_video';
     }
 
     if (!isMimeAllowed(mime_type, purpose)) {
