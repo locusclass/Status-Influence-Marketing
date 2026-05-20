@@ -281,12 +281,6 @@ export async function verificationRoutes(app: FastifyInstance) {
         authUser
       );
       if (!contract && role !== 'ADMIN') return { error: 'contract_required' } as any;
-      if (contract && hasDeadlinePassed(contract.contract_deadline_at)) {
-        return { error: 'contract_not_active' } as any;
-      }
-      if (contract && hasDeadlinePassed(contract.post_deadline_at)) {
-        return { error: 'post_deadline_passed' } as any;
-      }
 
       const activeSessionRes = await client.query(
         `SELECT id
@@ -373,12 +367,6 @@ export async function verificationRoutes(app: FastifyInstance) {
         authUser
       );
       if (!contract) return { error: 'contract_not_active' } as any;
-      if (hasDeadlinePassed(contract.contract_deadline_at)) {
-        return { error: 'contract_not_active' } as any;
-      }
-      if (hasDeadlinePassed(contract.post_deadline_at)) {
-        return { error: 'post_deadline_passed' } as any;
-      }
 
       const priorProof = await client.query(
         `SELECT p.id
