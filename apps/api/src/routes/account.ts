@@ -2022,6 +2022,7 @@ export async function accountRoutes(app: FastifyInstance) {
         receiverName: payout.receiverName,
         receiverPhone: payout.receiverPhone,
         receiverNetwork: payout.receiverNetwork,
+        nonBlocking: true,
       });
 
       const payoutStatus = String(
