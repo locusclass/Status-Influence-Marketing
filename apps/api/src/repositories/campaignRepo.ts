@@ -14,7 +14,7 @@ export class CampaignRepo {
       title: string;
       platform: string;
       delivery_model?: 'DETERMINISTIC' | 'PROBABILISTIC';
-      execution_mode?: 'PRIVATE_CONTRACT';
+      execution_mode?: 'PRIVATE_CONTRACT' | 'PUBLIC_ADVERT';
       visibility?: 'PRIVATE';
       payout_amount: number;
       budget_total: number;

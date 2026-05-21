@@ -1839,10 +1839,10 @@ function deriveCampaignBudget(
 
 function resolveExecutionMode(
   platform: string,
-  requestedMode?: 'PRIVATE_CONTRACT'
-): 'PRIVATE_CONTRACT' {
+  requestedMode?: 'PRIVATE_CONTRACT' | 'PUBLIC_ADVERT'
+): 'PRIVATE_CONTRACT' | 'PUBLIC_ADVERT' {
   void platform;
-  void requestedMode;
+  if (requestedMode === 'PUBLIC_ADVERT') return 'PUBLIC_ADVERT';
   return 'PRIVATE_CONTRACT';
 }
 
@@ -3389,6 +3389,26 @@ export async function campaignRoutes(app: FastifyInstance) {
     return summary;
   });
 
+  app.get('/campaigns/system-viewership', { preHandler: [app.authenticate] }, async () => {
+    const PUBLIC_AD_RATE = 50;
+    return withTransaction(async (client) => {
+      const res = await client.query(
+        `SELECT
+           COUNT(*)::int AS ambassador_count,
+           COALESCE(SUM(COALESCE(NULLIF(max_status_viewers_12h, 0), 50)), 0)::int AS total_viewership
+         FROM users
+         WHERE status = 'ACTIVE'
+           AND role = ANY($1::text[])`,
+        [PUBLIC_CONTRACT_ELIGIBLE_ROLES]
+      );
+      return {
+        ambassador_count: Number(res.rows[0]?.ambassador_count ?? 0),
+        total_viewership: Number(res.rows[0]?.total_viewership ?? 0),
+        rate_per_view_ugx: PUBLIC_AD_RATE,
+      };
+    });
+  });
+
   app.post('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
     const parsedBody = CreateCampaignSchema.safeParse(request.body);
     if (!parsedBody.success) {
@@ -3529,6 +3549,20 @@ export async function campaignRoutes(app: FastifyInstance) {
             visibility = 'PRIVATE';
             platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
             privateBeneficiaryMeta = buildPrivateBeneficiaryMeta(privateShares);
+          } else if (executionMode === 'PUBLIC_ADVERT') {
+            const PUBLIC_AD_RATE = 50;
+            const viewerTarget = Math.max(
+              1,
+              Number((item as any).public_ad_viewer_target ?? item.impression_target ?? 50)
+            );
+            resolvedBudgetTotal = viewerTarget * PUBLIC_AD_RATE;
+            distributableBudget = resolvedBudgetTotal;
+            resolvedRootPayout = resolvedBudgetTotal;
+            resolvedImpressionTarget = viewerTarget;
+            estimatedAllocationCount = 1;
+            perAllocationTarget = viewerTarget;
+            visibility = 'PRIVATE';
+            platformFeePercent = PRIVATE_PLATFORM_FEE_PERCENT;
           } else {
             const publicBudget = deriveCampaignBudget(
               item.platform,
@@ -3669,6 +3703,67 @@ export async function campaignRoutes(app: FastifyInstance) {
               collectAssignmentNotice(
                 assignmentNotices,
                 share.ambassador.id,
+                String(item.title ?? body.title)
+              );
+            }
+          } else if (executionMode === 'PUBLIC_ADVERT') {
+            const PUBLIC_AD_RATE = 50;
+            const viewerTarget = Math.max(
+              1,
+              Number((item as any).public_ad_viewer_target ?? item.impression_target ?? 50)
+            );
+            // Update root campaign with viewer target
+            await client.query(
+              `UPDATE campaigns SET public_ad_viewer_target=$2, public_ad_rate_per_view=$3 WHERE id=$1`,
+              [root.id, viewerTarget, PUBLIC_AD_RATE]
+            );
+            // Query all active ambassadors sorted by viewership descending
+            const ambRes = await client.query(
+              `SELECT id, phone,
+                COALESCE(NULLIF(max_status_viewers_12h, 0), 50)::int AS effective_viewers
+               FROM users
+               WHERE status = 'ACTIVE'
+                 AND role = ANY($1::text[])
+               ORDER BY max_status_viewers_12h DESC NULLS LAST`,
+              [PUBLIC_CONTRACT_ELIGIBLE_ROLES]
+            );
+            let remaining = viewerTarget;
+            for (const amb of ambRes.rows) {
+              if (remaining <= 0) break;
+              const ambViewers = Math.min(Number(amb.effective_viewers), remaining);
+              const ambPayout = ambViewers * PUBLIC_AD_RATE;
+              remaining -= ambViewers;
+              await campaignRepo.createCampaign(client, {
+                business_id: authUser,
+                campaign_bundle_id: bundleId,
+                bundle_root_campaign_id: bundleRootCampaignId,
+                parent_campaign_id: root.id,
+                assigned_ambassador_id: amb.id,
+                assigned_phone: amb.phone,
+                title: String(item.title ?? body.title),
+                platform: item.platform,
+                delivery_model: deliveryModel,
+                execution_mode: 'PUBLIC_ADVERT',
+                visibility: 'PRIVATE',
+                payout_amount: ambPayout,
+                budget_total: ambPayout,
+                impression_target: ambViewers,
+                platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
+                business_wallet_mode: 'CAMPAIGN_ONLY',
+                media_type: item.media_type,
+                media_text: item.media_text,
+                media_url: resolvedMediaUrl ?? undefined,
+                execution_meta: executionMeta,
+                campaign_burst_mode: campaignBurstMode,
+                terms_keep_hours: 12,
+                terms_min_views: null,
+                terms_requirement: 'DURATION',
+                start_date: item.start_date,
+                end_date: item.end_date,
+              });
+              collectAssignmentNotice(
+                assignmentNotices,
+                amb.id,
                 String(item.title ?? body.title)
               );
             }
@@ -3841,7 +3936,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
     const requestedExecutionMode = resolveExecutionMode(
       platformKey,
-      body.execution_mode as 'PRIVATE_CONTRACT' | undefined
+      body.execution_mode as 'PRIVATE_CONTRACT' | 'PUBLIC_ADVERT' | undefined
     );
 
     try {
@@ -3948,7 +4043,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         } else {
           const publicBudget = deriveCampaignBudget(
             platformKey,
-            executionMode,
+            executionMode as 'PRIVATE_CONTRACT',
             Number(body.budget_total),
             body.payout_amount == null ? null : Number(body.payout_amount),
             body.impression_target == null

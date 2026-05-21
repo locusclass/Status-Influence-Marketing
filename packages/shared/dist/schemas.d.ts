@@ -38,7 +38,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     delivery_model: z.ZodOptional<z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>>;
     payout_amount: z.ZodNumber;
     budget_total: z.ZodNumber;
-    execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT"]>>;
+    execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT", "PUBLIC_ADVERT"]>>;
     visibility: z.ZodOptional<z.ZodEnum<["PRIVATE"]>>;
     counterparty_contact: z.ZodOptional<z.ZodString>;
     beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -65,6 +65,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     }>, "many">>;
     start_date: z.ZodString;
     end_date: z.ZodString;
+    public_ad_viewer_target: z.ZodOptional<z.ZodNumber>;
     media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
     media_url: z.ZodOptional<z.ZodString>;
     media_urls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -86,7 +87,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -99,6 +100,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
         impression_target?: number | undefined;
         pricing_reference_engagements_24h?: number | undefined;
     }[] | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -118,7 +120,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -131,6 +133,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
         impression_target?: number | undefined;
         pricing_reference_engagements_24h?: number | undefined;
     }[] | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -150,7 +153,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -163,6 +166,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
         impression_target?: number | undefined;
         pricing_reference_engagements_24h?: number | undefined;
     }[] | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -182,7 +186,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -195,6 +199,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
         impression_target?: number | undefined;
         pricing_reference_engagements_24h?: number | undefined;
     }[] | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -215,7 +220,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model: z.ZodOptional<z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>>;
         payout_amount: z.ZodNumber;
         budget_total: z.ZodNumber;
-        execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT"]>>;
+        execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT", "PUBLIC_ADVERT"]>>;
         visibility: z.ZodOptional<z.ZodEnum<["PRIVATE"]>>;
         counterparty_contact: z.ZodOptional<z.ZodString>;
         beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -242,6 +247,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         }>, "many">>;
         start_date: z.ZodString;
         end_date: z.ZodString;
+        public_ad_viewer_target: z.ZodOptional<z.ZodNumber>;
         media_type: z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>;
         media_url: z.ZodOptional<z.ZodString>;
         media_urls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -263,7 +269,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -276,6 +282,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -295,7 +302,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -308,6 +315,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -327,7 +335,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -340,6 +348,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -359,7 +368,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -372,6 +381,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -385,7 +395,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     delivery_model: z.ZodOptional<z.ZodEnum<["DETERMINISTIC", "PROBABILISTIC"]>>;
     payout_amount: z.ZodOptional<z.ZodNumber>;
     budget_total: z.ZodOptional<z.ZodNumber>;
-    execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT"]>>;
+    execution_mode: z.ZodOptional<z.ZodEnum<["PRIVATE_CONTRACT", "PUBLIC_ADVERT"]>>;
     visibility: z.ZodOptional<z.ZodEnum<["PRIVATE"]>>;
     counterparty_contact: z.ZodOptional<z.ZodString>;
     beneficiary_contacts: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -412,6 +422,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }>, "many">>;
     start_date: z.ZodOptional<z.ZodString>;
     end_date: z.ZodOptional<z.ZodString>;
+    public_ad_viewer_target: z.ZodOptional<z.ZodNumber>;
     media_type: z.ZodOptional<z.ZodEnum<["IMAGE", "VIDEO", "TEXT"]>>;
     media_url: z.ZodOptional<z.ZodString>;
     media_urls: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -430,7 +441,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -445,6 +456,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
@@ -466,7 +478,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -479,6 +491,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -496,7 +509,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -511,6 +524,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
@@ -532,7 +546,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -545,6 +559,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -562,7 +577,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -577,6 +592,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
@@ -598,7 +614,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -611,6 +627,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
@@ -628,7 +645,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     title?: string | undefined;
     payout_amount?: number | undefined;
     budget_total?: number | undefined;
-    execution_mode?: "PRIVATE_CONTRACT" | undefined;
+    execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
     visibility?: "PRIVATE" | undefined;
     counterparty_contact?: string | undefined;
     beneficiary_contacts?: string[] | undefined;
@@ -643,6 +660,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     }[] | undefined;
     start_date?: string | undefined;
     end_date?: string | undefined;
+    public_ad_viewer_target?: number | undefined;
     media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
@@ -664,7 +682,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
-        execution_mode?: "PRIVATE_CONTRACT" | undefined;
+        execution_mode?: "PRIVATE_CONTRACT" | "PUBLIC_ADVERT" | undefined;
         visibility?: "PRIVATE" | undefined;
         counterparty_contact?: string | undefined;
         beneficiary_contacts?: string[] | undefined;
@@ -677,6 +695,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
             impression_target?: number | undefined;
             pricing_reference_engagements_24h?: number | undefined;
         }[] | undefined;
+        public_ad_viewer_target?: number | undefined;
         media_url?: string | undefined;
         media_urls?: string[] | undefined;
         media_text?: string | undefined;
