@@ -33,6 +33,10 @@ export class CampaignRepo {
       terms_requirement?: 'DURATION' | 'VIEWS' | 'BOTH';
       start_date: string;
       end_date: string;
+      // Public advert distribution fields
+      public_distribution_round?: number;
+      public_allocation_expires_at?: Date | null;
+      status?: 'ACTIVE' | 'PENDING';
     }
   ) {
     await ensurePublicIdColumns(client);
@@ -40,8 +44,8 @@ export class CampaignRepo {
       input.execution_meta == null ? null : JSON.stringify(input.execution_meta);
     const res = await client.query(
       `INSERT INTO campaigns
-      (business_id, campaign_bundle_id, bundle_root_campaign_id, parent_campaign_id, assigned_ambassador_id, assigned_phone, title, platform, delivery_model, execution_mode, visibility, payout_amount, budget_total, impression_target, platform_fee_percent, business_wallet_mode, last_allocated_at, allocation_round, media_type, media_text, media_url, execution_meta, campaign_burst_mode, terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23,$24,$25,$26,$27,$28,$29)
+      (business_id, campaign_bundle_id, bundle_root_campaign_id, parent_campaign_id, assigned_ambassador_id, assigned_phone, title, platform, delivery_model, execution_mode, visibility, payout_amount, budget_total, impression_target, platform_fee_percent, business_wallet_mode, last_allocated_at, allocation_round, media_type, media_text, media_url, execution_meta, campaign_burst_mode, terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date, public_distribution_round, public_allocation_expires_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23,$24,$25,$26,$27,$28,$29,$30,$31)
       RETURNING *`,
       [
         input.business_id,
@@ -70,9 +74,11 @@ export class CampaignRepo {
         input.terms_keep_hours ?? 12,
         input.terms_min_views ?? null,
         input.terms_requirement ?? 'DURATION',
-        'ACTIVE',
+        input.status ?? 'ACTIVE',
         input.start_date,
         input.end_date,
+        input.public_distribution_round ?? 1,
+        input.public_allocation_expires_at ?? null,
       ]
     );
     return res.rows[0];

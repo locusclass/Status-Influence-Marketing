@@ -41,6 +41,7 @@ const verifier =
     : new MockVerifier();
 let lastContractExpirySweepAt = 0;
 let lastOpenAllocatorSweepAt = 0;
+let lastPublicAdvertReallocatorSweepAt = 0;
 let lastMonthlyPayoutSweepAt = 0;
 let lastAdvertRollupSweepAt = 0;
 
@@ -1931,6 +1932,171 @@ async function expireOverdueContractsIfDue() {
   });
 }
 
+async function reallocateExpiredPublicAdvertContracts(client: any) {
+  const PUBLIC_AD_ELIGIBLE_ROLES = ['ADMIN', 'AMBASSADOR', 'DUAL_USER'];
+  const PUBLIC_AD_RATE = 50;
+
+  // Find expired pending PUBLIC_ADVERT contracts
+  const expiredRes = await client.query(
+    `SELECT c.*
+     FROM campaigns c
+     WHERE c.parent_campaign_id IS NOT NULL
+       AND c.execution_mode = 'PUBLIC_ADVERT'
+       AND c.status = 'ACTIVE'
+       AND c.public_allocation_expires_at IS NOT NULL
+       AND c.public_allocation_expires_at < NOW()
+       AND NOT EXISTS (
+         SELECT 1 FROM verification_sessions vs
+         WHERE vs.campaign_id = c.id AND vs.status IN ('ACTIVE', 'COMPLETED')
+       )
+     ORDER BY c.public_allocation_expires_at ASC
+     LIMIT 50`
+  );
+
+  if (expiredRes.rows.length === 0) return;
+
+  for (const expired of expiredRes.rows as any[]) {
+    const rootId = expired.parent_campaign_id;
+
+    // Get root campaign budget info
+    const rootRes = await client.query(
+      `SELECT *, public_ad_viewer_target, public_ad_rate_per_view FROM campaigns WHERE id=$1 LIMIT 1`,
+      [rootId]
+    );
+    const root = rootRes.rows[0];
+    if (!root) continue;
+
+    // Count allocations per ambassador for this root (non-expired, non-cancelled)
+    const allocCountRes = await client.query(
+      `SELECT assigned_ambassador_id, COUNT(*)::int AS contract_count,
+              MAX(last_allocated_at) AS last_allocated
+       FROM campaigns
+       WHERE parent_campaign_id = $1
+         AND execution_mode = 'PUBLIC_ADVERT'
+         AND id != $2
+       GROUP BY assigned_ambassador_id`,
+      [rootId, expired.id]
+    );
+    const countByAmbassador = new Map<string, { count: number; last: Date }>();
+    for (const row of allocCountRes.rows as any[]) {
+      countByAmbassador.set(row.assigned_ambassador_id, {
+        count: Number(row.contract_count),
+        last: new Date(row.last_allocated),
+      });
+    }
+
+    // Get all ambassadors
+    const ambRes = await client.query(
+      `SELECT id, phone, COALESCE(NULLIF(max_status_viewers_12h, 0), 50)::int AS effective_viewers
+       FROM users
+       WHERE status = 'ACTIVE' AND role = ANY($1::text[])`,
+      [PUBLIC_AD_ELIGIBLE_ROLES]
+    );
+    const ambassadors = ambRes.rows as any[];
+    if (ambassadors.length === 0) continue;
+
+    // Determine the minimum contract count in the pool (excluding the expired one's ambassador)
+    const allCounts = ambassadors.map((a: any) => countByAmbassador.get(a.id)?.count ?? 0);
+    const minCount = Math.min(...allCounts);
+
+    // Priority: ambassadors with minCount contracts, sorted by least-recently allocated
+    const candidates = ambassadors
+      .filter((a: any) => a.id !== expired.assigned_ambassador_id)
+      .map((a: any) => ({
+        ...a,
+        count: countByAmbassador.get(a.id)?.count ?? 0,
+        last: countByAmbassador.get(a.id)?.last ?? new Date(0),
+      }))
+      .filter((a: any) => a.count === minCount)
+      .sort((x: any, y: any) => x.last.getTime() - y.last.getTime());
+
+    // If no minCount candidates, widen to all not already at max
+    const finalCandidates =
+      candidates.length > 0
+        ? candidates
+        : ambassadors
+            .filter((a: any) => a.id !== expired.assigned_ambassador_id)
+            .map((a: any) => ({
+              ...a,
+              count: countByAmbassador.get(a.id)?.count ?? 0,
+              last: countByAmbassador.get(a.id)?.last ?? new Date(0),
+            }))
+            .sort((x: any, y: any) => x.last.getTime() - y.last.getTime());
+
+    if (finalCandidates.length === 0) continue;
+
+    const next = finalCandidates[0];
+    const ambPayout = Number(next.effective_viewers) * PUBLIC_AD_RATE;
+    const newExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // +1 hour
+
+    // Mark old contract as cancelled
+    await client.query(
+      `UPDATE campaigns SET status='CANCELLED' WHERE id=$1`,
+      [expired.id]
+    );
+
+    // Create new contract for next ambassador
+    const metaJson = root.execution_meta == null ? null : JSON.stringify(root.execution_meta);
+    await client.query(
+      `INSERT INTO campaigns (
+         business_id, campaign_bundle_id, bundle_root_campaign_id, parent_campaign_id,
+         assigned_ambassador_id, assigned_phone, title, platform, delivery_model,
+         execution_mode, visibility, payout_amount, budget_total, impression_target,
+         platform_fee_percent, business_wallet_mode, last_allocated_at, allocation_round,
+         media_type, media_text, media_url, execution_meta, campaign_burst_mode,
+         terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date,
+         public_distribution_round, public_allocation_expires_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,'PUBLIC_ADVERT','PRIVATE',$10,$11,$12,$13,$14,NOW(),$15,
+         $16,$17,$18,$19::jsonb,$20,$21,$22,$23,'ACTIVE',$24,$25,$26,$27
+       )`,
+      [
+        root.business_id,
+        root.campaign_bundle_id ?? null,
+        root.bundle_root_campaign_id ?? rootId,
+        rootId,
+        next.id,
+        next.phone,
+        root.title,
+        root.platform,
+        root.delivery_model ?? 'DETERMINISTIC',
+        ambPayout,
+        ambPayout,
+        Number(next.effective_viewers),
+        root.platform_fee_percent ?? 0,
+        root.business_wallet_mode ?? 'CAMPAIGN_ONLY',
+        expired.public_distribution_round ?? 1,
+        root.media_type,
+        root.media_text ?? null,
+        root.media_url ?? null,
+        metaJson,
+        root.campaign_burst_mode ?? false,
+        root.terms_keep_hours ?? 12,
+        root.terms_min_views ?? null,
+        root.terms_requirement ?? 'DURATION',
+        root.start_date,
+        root.end_date,
+        (expired.public_distribution_round ?? 1),
+        newExpiresAt,
+      ]
+    );
+
+    console.info(
+      `[PUBLIC_ADVERT] Reallocated expired contract ${expired.id} (was: ${expired.assigned_ambassador_id}) → new: ${next.id}`
+    );
+  }
+}
+
+async function runPublicAdvertReallocatorIfDue() {
+  const now = Date.now();
+  if (now - lastPublicAdvertReallocatorSweepAt < 60_000) return; // every 60 seconds
+  lastPublicAdvertReallocatorSweepAt = now;
+
+  await withTransaction(async (client) => {
+    await reallocateExpiredPublicAdvertContracts(client);
+  });
+}
+
 async function runOpenContractAllocatorIfDue() {
   const now = Date.now();
   if (now - lastOpenAllocatorSweepAt < 30_000) return;
@@ -2052,6 +2218,12 @@ async function loop() {
       await runOpenContractAllocatorIfDue();
     } catch (err) {
       console.error('open_contract_allocator_failed', err);
+    }
+
+    try {
+      await runPublicAdvertReallocatorIfDue();
+    } catch (err) {
+      console.error('public_advert_reallocator_failed', err);
     }
 
     try {

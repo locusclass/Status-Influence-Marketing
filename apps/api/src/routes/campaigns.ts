@@ -1846,6 +1846,122 @@ function resolveExecutionMode(
   return 'PRIVATE_CONTRACT';
 }
 
+function shuffleArray<T>(arr: T[]): T[] {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j] as T, out[i] as T];
+  }
+  return out;
+}
+
+async function distributePublicAdvertContracts(
+  client: any,
+  repo: CampaignRepo,
+  opts: {
+    rootCampaign: any;
+    authUser: string;
+    bundleId: string | null;
+    bundleRootCampaignId: string | null;
+    item: any;
+    deliveryModel: string;
+    executionMeta: any;
+    campaignBurstMode: boolean;
+    resolvedMediaUrl: string | null | undefined;
+    viewerTarget: number;
+    publicAdRate: number;
+    assignmentNotices: Map<string, string[]>;
+  }
+) {
+  const {
+    rootCampaign, authUser, bundleId, bundleRootCampaignId,
+    item, deliveryModel, executionMeta, campaignBurstMode, resolvedMediaUrl,
+    viewerTarget, publicAdRate, assignmentNotices,
+  } = opts;
+  const campaignRepo = repo;
+
+  const allocationExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+  // Get all active ambassadors with their effective viewership
+  const ambRes = await client.query(
+    `SELECT id, phone,
+       COALESCE(NULLIF(max_status_viewers_12h, 0), 50)::int AS effective_viewers
+     FROM users
+     WHERE status = 'ACTIVE' AND role = ANY($1::text[])`,
+    [PUBLIC_CONTRACT_ELIGIBLE_ROLES]
+  );
+  const ambassadors: { id: string; phone: string; effective_viewers: number }[] =
+    shuffleArray(ambRes.rows).map((a: any) => ({
+      id: a.id,
+      phone: a.phone,
+      effective_viewers: Number(a.effective_viewers),
+    }));
+
+  if (ambassadors.length === 0) return;
+
+  // Equal round-robin: all ambassadors finish round N before any starts round N+1
+  const costPerRound = ambassadors.reduce((s, a) => s + a.effective_viewers * publicAdRate, 0);
+  const budget = viewerTarget * publicAdRate;
+  const fullRounds = costPerRound > 0 ? Math.floor(budget / costPerRound) : 0;
+  const partialBudget = budget - fullRounds * costPerRound;
+
+  // Build allocation list: full rounds first, then partial
+  const allocations: { amb: typeof ambassadors[0]; round: number }[] = [];
+  for (let r = 1; r <= fullRounds; r++) {
+    for (const amb of ambassadors) {
+      allocations.push({ amb, round: r });
+    }
+  }
+  // Partial round: shuffle again and pick until budget exhausted
+  const partialOrder = shuffleArray(ambassadors);
+  let partialRemaining = partialBudget;
+  const partialRound = fullRounds + 1;
+  for (const amb of partialOrder) {
+    const cost = amb.effective_viewers * publicAdRate;
+    if (cost > partialRemaining) continue;
+    allocations.push({ amb, round: partialRound });
+    partialRemaining -= cost;
+    if (partialRemaining <= 0) break;
+  }
+
+  // Create one contract per allocation
+  for (const { amb, round } of allocations) {
+    const ambPayout = amb.effective_viewers * publicAdRate;
+    await campaignRepo.createCampaign(client, {
+      business_id: authUser,
+      campaign_bundle_id: bundleId,
+      bundle_root_campaign_id: bundleRootCampaignId,
+      parent_campaign_id: rootCampaign.id,
+      assigned_ambassador_id: amb.id,
+      assigned_phone: amb.phone,
+      title: String(item.title ?? ''),
+      platform: item.platform,
+      delivery_model: deliveryModel as 'DETERMINISTIC' | 'PROBABILISTIC' | undefined,
+      execution_mode: 'PUBLIC_ADVERT' as const,
+      visibility: 'PRIVATE' as const,
+      payout_amount: ambPayout,
+      budget_total: ambPayout,
+      impression_target: amb.effective_viewers,
+      platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
+      business_wallet_mode: 'CAMPAIGN_ONLY' as const,
+      media_type: item.media_type,
+      media_text: item.media_text,
+      media_url: resolvedMediaUrl ?? undefined,
+      execution_meta: executionMeta,
+      campaign_burst_mode: campaignBurstMode,
+      terms_keep_hours: 12,
+      terms_min_views: null,
+      terms_requirement: 'DURATION' as const,
+      start_date: item.start_date,
+      end_date: item.end_date,
+      public_distribution_round: round,
+      public_allocation_expires_at: allocationExpiresAt,
+      status: 'ACTIVE' as const,
+    });
+    collectAssignmentNotice(assignmentNotices, amb.id, String(item.title ?? ''));
+  }
+}
+
 function buildCampaignExecutionMeta(
   platform: string,
   rawMeta: unknown,
@@ -3409,6 +3525,110 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
   });
 
+  // ─── Public campaign analytics: aggregate + per-ambassador breakdown ─────────
+  app.get('/campaigns/:id/public-analytics', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const authSub = (request.user as any)?.sub as string | undefined;
+    const authUser = authSub === 'ariaka-access' ? '00000000-0000-0000-0000-000000000000' : authSub;
+    if (!authUser) { reply.code(401); return { error: 'unauthorized' }; }
+
+    return withTransaction(async (client) => {
+      // Load root campaign
+      const rootRes = await client.query(
+        `SELECT * FROM campaigns WHERE (id::text=$1 OR public_id=$1) AND execution_mode='PUBLIC_ADVERT' LIMIT 1`,
+        [params.id]
+      );
+      const root = rootRes.rows[0];
+      if (!root) { reply.code(404); return { error: 'campaign_not_found' }; }
+      if (root.business_id !== authUser) { reply.code(403); return { error: 'forbidden' }; }
+
+      // Load all child contracts with ambassador info and proof data
+      const childRes = await client.query(
+        `SELECT
+           c.id, c.assigned_ambassador_id, c.payout_amount, c.impression_target,
+           c.status, c.public_distribution_round, c.public_allocation_expires_at,
+           c.last_allocated_at, c.budget_total,
+           u.full_name, u.phone AS ambassador_phone, u.email AS ambassador_email,
+           u.max_status_viewers_12h,
+           p.id AS proof_id, p.status AS proof_status, p.created_at AS proof_submitted_at,
+           p.verified_at AS proof_verified_at,
+           vs.verified_metric AS verified_views
+         FROM campaigns c
+         LEFT JOIN users u ON u.id = c.assigned_ambassador_id
+         LEFT JOIN verification_sessions vs ON vs.campaign_id = c.id AND vs.status = 'COMPLETED'
+         LEFT JOIN proofs p ON p.session_id = vs.id AND p.status IN ('VERIFIED', 'PENDING', 'MANUAL_REVIEW')
+         WHERE c.parent_campaign_id = $1
+         ORDER BY c.public_distribution_round ASC, c.last_allocated_at ASC`,
+        [root.id]
+      );
+
+      const ambassadors = childRes.rows;
+
+      // Aggregate stats
+      const totalContracts = ambassadors.length;
+      const acceptedContracts = ambassadors.filter((a: any) => a.status === 'ACTIVE' || a.status === 'COMPLETED').length;
+      const completedContracts = ambassadors.filter((a: any) => a.status === 'COMPLETED').length;
+      const totalTargetViews = ambassadors.reduce((s: number, a: any) => s + Number(a.impression_target ?? 0), 0);
+      const totalVerifiedViews = ambassadors.reduce((s: number, a: any) => s + Number(a.verified_views ?? 0), 0);
+      const totalPayout = ambassadors.reduce((s: number, a: any) => s + Number(a.payout_amount ?? 0), 0);
+      const totalBudget = Number(root.budget_total ?? 0);
+      const proofsPending = ambassadors.filter((a: any) => a.proof_status === 'PENDING' || a.proof_status === 'MANUAL_REVIEW').length;
+      const proofsVerified = ambassadors.filter((a: any) => a.proof_status === 'VERIFIED').length;
+
+      return {
+        campaign: {
+          id: root.id,
+          public_id: root.public_id,
+          title: root.title,
+          status: root.status,
+          budget_total: totalBudget,
+          viewer_target: root.public_ad_viewer_target ?? totalTargetViews,
+          rate_per_view_ugx: root.public_ad_rate_per_view ?? 50,
+          start_date: root.start_date,
+          end_date: root.end_date,
+        },
+        aggregate: {
+          total_contracts: totalContracts,
+          accepted_contracts: acceptedContracts,
+          completed_contracts: completedContracts,
+          total_target_views: totalTargetViews,
+          total_verified_views: totalVerifiedViews,
+          total_budget_ugx: totalBudget,
+          total_payout_ugx: totalPayout,
+          proofs_pending: proofsPending,
+          proofs_verified: proofsVerified,
+          acceptance_rate: totalContracts > 0
+            ? Math.round((acceptedContracts / totalContracts) * 100)
+            : 0,
+          completion_rate: totalContracts > 0
+            ? Math.round((completedContracts / totalContracts) * 100)
+            : 0,
+          verification_rate: totalTargetViews > 0
+            ? Math.round((totalVerifiedViews / totalTargetViews) * 100)
+            : 0,
+        },
+        ambassadors: ambassadors.map((a: any) => ({
+          contract_id: a.id,
+          ambassador_id: a.assigned_ambassador_id,
+          name: a.full_name ?? 'Unknown',
+          phone: a.ambassador_phone,
+          email: a.ambassador_email,
+          viewer_count: Number(a.max_status_viewers_12h ?? 50),
+          impression_target: Number(a.impression_target ?? 0),
+          payout_amount: Number(a.payout_amount ?? 0),
+          contract_status: a.status,
+          distribution_round: a.public_distribution_round ?? 1,
+          allocation_expires_at: a.public_allocation_expires_at,
+          proof_id: a.proof_id ?? null,
+          proof_status: a.proof_status ?? null,
+          proof_submitted_at: a.proof_submitted_at ?? null,
+          proof_verified_at: a.proof_verified_at ?? null,
+          verified_views: Number(a.verified_views ?? 0),
+        })),
+      };
+    });
+  });
+
   app.post('/campaigns', { preHandler: [app.authenticate] }, async (request, reply) => {
     const parsedBody = CreateCampaignSchema.safeParse(request.body);
     if (!parsedBody.success) {
@@ -3712,61 +3932,24 @@ export async function campaignRoutes(app: FastifyInstance) {
               1,
               Number((item as any).public_ad_viewer_target ?? item.impression_target ?? 50)
             );
-            // Update root campaign with viewer target
             await client.query(
               `UPDATE campaigns SET public_ad_viewer_target=$2, public_ad_rate_per_view=$3 WHERE id=$1`,
               [root.id, viewerTarget, PUBLIC_AD_RATE]
             );
-            // Query all active ambassadors sorted by viewership descending
-            const ambRes = await client.query(
-              `SELECT id, phone,
-                COALESCE(NULLIF(max_status_viewers_12h, 0), 50)::int AS effective_viewers
-               FROM users
-               WHERE status = 'ACTIVE'
-                 AND role = ANY($1::text[])
-               ORDER BY max_status_viewers_12h DESC NULLS LAST`,
-              [PUBLIC_CONTRACT_ELIGIBLE_ROLES]
-            );
-            let remaining = viewerTarget;
-            for (const amb of ambRes.rows) {
-              if (remaining <= 0) break;
-              const ambViewers = Math.min(Number(amb.effective_viewers), remaining);
-              const ambPayout = ambViewers * PUBLIC_AD_RATE;
-              remaining -= ambViewers;
-              await campaignRepo.createCampaign(client, {
-                business_id: authUser,
-                campaign_bundle_id: bundleId,
-                bundle_root_campaign_id: bundleRootCampaignId,
-                parent_campaign_id: root.id,
-                assigned_ambassador_id: amb.id,
-                assigned_phone: amb.phone,
-                title: String(item.title ?? body.title),
-                platform: item.platform,
-                delivery_model: deliveryModel,
-                execution_mode: 'PUBLIC_ADVERT',
-                visibility: 'PRIVATE',
-                payout_amount: ambPayout,
-                budget_total: ambPayout,
-                impression_target: ambViewers,
-                platform_fee_percent: PRIVATE_PLATFORM_FEE_PERCENT,
-                business_wallet_mode: 'CAMPAIGN_ONLY',
-                media_type: item.media_type,
-                media_text: item.media_text,
-                media_url: resolvedMediaUrl ?? undefined,
-                execution_meta: executionMeta,
-                campaign_burst_mode: campaignBurstMode,
-                terms_keep_hours: 12,
-                terms_min_views: null,
-                terms_requirement: 'DURATION',
-                start_date: item.start_date,
-                end_date: item.end_date,
-              });
-              collectAssignmentNotice(
-                assignmentNotices,
-                amb.id,
-                String(item.title ?? body.title)
-              );
-            }
+            await distributePublicAdvertContracts(client, campaignRepo, {
+              rootCampaign: { ...root, budget_total: resolvedBudgetTotal },
+              authUser,
+              bundleId,
+              bundleRootCampaignId,
+              item,
+              deliveryModel,
+              executionMeta,
+              campaignBurstMode,
+              resolvedMediaUrl,
+              viewerTarget,
+              publicAdRate: PUBLIC_AD_RATE,
+              assignmentNotices,
+            });
           }
 
           createdRootCampaigns.push(withCampaignMediaUrls({
