@@ -2929,4 +2929,538 @@ export async function advertRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
+
+  // ── Live bid / price-negotiation system ───────────────────────────────────
+
+  // POST /advert/listings/:slug/bids/session  — buyer opens a negotiation
+  app.post('/advert/listings/:slug/bids/session', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { opening_offer } = request.body as { opening_offer: number };
+    if (!opening_offer || Number(opening_offer) <= 0)
+      return reply.code(400).send({ error: 'opening_offer must be a positive number' });
+
+    return withTransaction(async (client) => {
+      const lr = await client.query(
+        `SELECT id, title, price, currency, is_negotiable, status, access_state
+         FROM advert_listings WHERE slug=$1 AND access_state='PUBLIC'`, [slug]);
+      if (!lr.rows[0]) return reply.code(404).send({ error: 'listing_not_found' });
+      const l = lr.rows[0];
+      if (!l.is_negotiable) return reply.code(400).send({ error: 'listing_not_negotiable' });
+      if (l.status !== 'ACTIVE') return reply.code(400).send({ error: 'listing_not_active' });
+
+      const token = uuid().replace(/-/g,'') + uuid().replace(/-/g,'').slice(0,16);
+      const sr = await client.query(
+        `INSERT INTO listing_bid_sessions (listing_id, buyer_token, listing_price, currency)
+         VALUES ($1,$2,$3,$4)
+         RETURNING id, buyer_token, status, listing_price, currency, expires_at, created_at`,
+        [l.id, token, l.price, l.currency || 'UGX']);
+      const session = sr.rows[0];
+
+      await client.query(
+        `INSERT INTO listing_bids (session_id, party, amount) VALUES ($1,'buyer',$2)`,
+        [session.id, Number(opening_offer)]);
+      await client.query(
+        `UPDATE listing_bid_sessions SET last_activity_at=NOW() WHERE id=$1`, [session.id]);
+
+      return reply.code(201).send({
+        session_token: session.buyer_token,
+        session_id:    session.id,
+        listing_price: parseFloat(session.listing_price ?? 0),
+        currency:      session.currency,
+        listing_title: l.title,
+        expires_at:    session.expires_at,
+      });
+    });
+  });
+
+  // GET /advert/listings/:slug/bids/session/:token  — poll session state
+  app.get('/advert/listings/:slug/bids/session/:token', async (request, reply) => {
+    const { slug, token } = request.params as { slug: string; token: string };
+
+    return withTransaction(async (client) => {
+      const sr = await client.query(
+        `SELECT lbs.*, al.title AS listing_title
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2`, [slug, token]);
+      if (!sr.rows[0]) return reply.code(404).send({ error: 'session_not_found' });
+      const s = sr.rows[0];
+
+      if (s.status === 'active' && new Date(s.expires_at) < new Date()) {
+        await client.query(
+          `UPDATE listing_bid_sessions SET status='expired' WHERE id=$1`, [s.id]);
+        s.status = 'expired';
+      }
+
+      const br = await client.query(
+        `SELECT id, party, amount::float, is_accepted, created_at
+         FROM listing_bids WHERE session_id=$1 ORDER BY created_at ASC`, [s.id]);
+
+      let quotation = null;
+      if (s.status === 'agreed') {
+        const qr = await client.query(
+          `SELECT id, quote_number, agreed_price::float, currency, buyer_name,
+                  buyer_phone, buyer_email, bid_count, valid_until, created_at
+           FROM listing_quotations WHERE session_id=$1`, [s.id]);
+        quotation = qr.rows[0] ?? null;
+      }
+
+      return reply.send({
+        session: {
+          id: s.id, status: s.status,
+          listing_price: parseFloat(s.listing_price ?? 0),
+          agreed_price:  s.agreed_price ? parseFloat(s.agreed_price) : null,
+          currency: s.currency, listing_title: s.listing_title,
+          expires_at: s.expires_at, last_activity_at: s.last_activity_at,
+        },
+        bids: br.rows,
+        quotation,
+      });
+    });
+  });
+
+  // POST /advert/listings/:slug/bids/offer  — buyer counter-offer
+  app.post('/advert/listings/:slug/bids/offer', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { session_token, amount } = request.body as { session_token: string; amount: number };
+    if (!amount || Number(amount) <= 0)
+      return reply.code(400).send({ error: 'amount must be positive' });
+
+    return withTransaction(async (client) => {
+      const sr = await client.query(
+        `SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='active'`,
+        [slug, session_token]);
+      if (!sr.rows[0]) return reply.code(404).send({ error: 'session_not_found_or_closed' });
+      const s = sr.rows[0];
+
+      const br = await client.query(
+        `INSERT INTO listing_bids (session_id, party, amount) VALUES ($1,'buyer',$2)
+         RETURNING id, party, amount::float, is_accepted, created_at`,
+        [s.id, Number(amount)]);
+      await client.query(
+        `UPDATE listing_bid_sessions SET last_activity_at=NOW() WHERE id=$1`, [s.id]);
+
+      return reply.code(201).send({ bid: br.rows[0] });
+    });
+  });
+
+  // POST /advert/listings/:slug/bids/accept  — buyer accepts latest bid
+  app.post('/advert/listings/:slug/bids/accept', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { session_token } = request.body as { session_token: string };
+
+    return withTransaction(async (client) => {
+      const sr = await client.query(
+        `SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='active'`,
+        [slug, session_token]);
+      if (!sr.rows[0]) return reply.code(404).send({ error: 'session_not_found_or_closed' });
+      const s = sr.rows[0];
+
+      const lb = await client.query(
+        `SELECT * FROM listing_bids WHERE session_id=$1 ORDER BY created_at DESC LIMIT 1`,
+        [s.id]);
+      if (!lb.rows[0]) return reply.code(400).send({ error: 'no_bids' });
+      const bid = lb.rows[0];
+
+      await client.query(`UPDATE listing_bids SET is_accepted=TRUE WHERE id=$1`, [bid.id]);
+      await client.query(
+        `UPDATE listing_bid_sessions SET status='agreed', agreed_price=$2, last_activity_at=NOW()
+         WHERE id=$1`, [s.id, bid.amount]);
+
+      return reply.send({ agreed: true, agreed_price: parseFloat(bid.amount), currency: s.currency });
+    });
+  });
+
+  // POST /advert/listings/:slug/bids/withdraw  — buyer withdraws
+  app.post('/advert/listings/:slug/bids/withdraw', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { session_token } = request.body as { session_token: string };
+
+    return withTransaction(async (client) => {
+      const r = await client.query(
+        `UPDATE listing_bid_sessions lbs SET status='withdrawn'
+         FROM advert_listings al
+         WHERE al.id=lbs.listing_id AND al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='active'
+         RETURNING lbs.id`,
+        [slug, session_token]);
+      if (!r.rows[0]) return reply.code(404).send({ error: 'session_not_found_or_closed' });
+      return reply.send({ ok: true });
+    });
+  });
+
+  // POST /advert/listings/:slug/bids/quote  — generate quotation after agreement
+  app.post('/advert/listings/:slug/bids/quote', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { session_token, buyer_name, buyer_phone, buyer_email } = request.body as {
+      session_token: string; buyer_name: string; buyer_phone: string; buyer_email?: string;
+    };
+    if (!buyer_name?.trim()) return reply.code(400).send({ error: 'buyer_name required' });
+    if (!buyer_phone?.trim()) return reply.code(400).send({ error: 'buyer_phone required' });
+
+    return withTransaction(async (client) => {
+      const sr = await client.query(
+        `SELECT lbs.*, al.title, al.cta_phone, al.cta_whatsapp, al.cta_email,
+                al.location_text, al.category_name,
+                u.full_name AS seller_name
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         LEFT JOIN campaigns c ON c.id=al.campaign_id
+         LEFT JOIN users u ON u.id=c.user_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='agreed'`,
+        [slug, session_token]);
+      if (!sr.rows[0]) return reply.code(400).send({ error: 'session_not_agreed_or_not_found' });
+      const s = sr.rows[0];
+
+      const existing = await client.query(
+        `SELECT * FROM listing_quotations WHERE session_id=$1`, [s.id]);
+      if (existing.rows[0]) {
+        return reply.send({
+          quotation: existing.rows[0],
+          seller_contacts: { phone: s.cta_phone, whatsapp: s.cta_whatsapp, email: s.cta_email, name: s.seller_name },
+        });
+      }
+
+      const countR = await client.query(
+        `SELECT COUNT(*)::int AS c FROM listing_bids WHERE session_id=$1`, [s.id]);
+      const bidCount = countR.rows[0]?.c ?? 0;
+
+      const now = new Date();
+      const ymd = now.toISOString().slice(2,10).replace(/-/g,'');
+      const rand = Math.random().toString(36).toUpperCase().slice(2,6);
+      const quoteNumber = `PSQ-${ymd}-${rand}`;
+
+      const qr = await client.query(
+        `INSERT INTO listing_quotations
+           (session_id, listing_id, quote_number, agreed_price, currency,
+            buyer_name, buyer_phone, buyer_email, bid_count)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING *`,
+        [s.id, s.listing_id, quoteNumber, s.agreed_price, s.currency,
+         buyer_name.trim(), buyer_phone.trim(), buyer_email?.trim() ?? null, bidCount]);
+
+      return reply.code(201).send({
+        quotation: qr.rows[0],
+        seller_contacts: { phone: s.cta_phone, whatsapp: s.cta_whatsapp, email: s.cta_email, name: s.seller_name },
+      });
+    });
+  });
+
+  // GET /advert/listings/:slug/bids/quote/:quoteId  — retrieve quotation (shareable)
+  app.get('/advert/listings/:slug/bids/quote/:quoteId', async (request, reply) => {
+    const { slug, quoteId } = request.params as { slug: string; quoteId: string };
+
+    return withTransaction(async (client) => {
+      const r = await client.query(
+        `SELECT lq.*, al.title AS listing_title, al.location_text,
+                al.cta_phone, al.cta_whatsapp, al.cta_email,
+                lbs.listing_price::float,
+                u.full_name AS seller_name
+         FROM listing_quotations lq
+         JOIN advert_listings al ON al.id=lq.listing_id
+         JOIN listing_bid_sessions lbs ON lbs.id=lq.session_id
+         LEFT JOIN campaigns c ON c.id=al.campaign_id
+         LEFT JOIN users u ON u.id=c.user_id
+         WHERE al.slug=$1 AND lq.id=$2`,
+        [slug, quoteId]);
+      if (!r.rows[0]) return reply.code(404).send({ error: 'quotation_not_found' });
+      const q = r.rows[0];
+      return reply.send({
+        quotation: q,
+        listing: { title: q.listing_title, location: q.location_text },
+        seller_contacts: { phone: q.cta_phone, whatsapp: q.cta_whatsapp, email: q.cta_email, name: q.seller_name },
+      });
+    });
+  });
+
+  // GET /advert/listings/:slug/bids/incoming  — seller: view active sessions
+  app.get('/advert/listings/:slug/bids/incoming', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+
+    return withTransaction(async (client) => {
+      const r = await client.query(
+        `SELECT lbs.id, lbs.status,
+                lbs.listing_price::float, lbs.agreed_price::float,
+                lbs.currency, lbs.last_activity_at, lbs.expires_at, lbs.created_at,
+                (SELECT amount::float FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_amount,
+                (SELECT party        FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_party,
+                (SELECT COUNT(*)::int FROM listing_bids WHERE session_id=lbs.id) AS bid_count
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND c.user_id=$2 AND lbs.status='active'
+         ORDER BY lbs.last_activity_at DESC`,
+        [slug, userId]);
+      return reply.send({ sessions: r.rows });
+    });
+  });
+
+  // POST /advert/listings/:slug/bids/seller-offer  — seller counter-offer
+  app.post('/advert/listings/:slug/bids/seller-offer', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { session_id, amount } = request.body as { session_id: string; amount: number };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!amount || Number(amount) <= 0)
+      return reply.code(400).send({ error: 'amount must be positive' });
+
+    return withTransaction(async (client) => {
+      const own = await client.query(
+        `SELECT lbs.id FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND lbs.id=$2 AND c.user_id=$3 AND lbs.status='active'`,
+        [slug, session_id, userId]);
+      if (!own.rows[0]) return reply.code(403).send({ error: 'forbidden_or_not_found' });
+
+      const br = await client.query(
+        `INSERT INTO listing_bids (session_id, party, amount) VALUES ($1,'seller',$2)
+         RETURNING id, party, amount::float, is_accepted, created_at`,
+        [session_id, Number(amount)]);
+      await client.query(
+        `UPDATE listing_bid_sessions SET last_activity_at=NOW() WHERE id=$1`, [session_id]);
+
+      return reply.code(201).send({ bid: br.rows[0] });
+    });
+  });
+
+  // ── Admin bid management ──────────────────────────────────────────────────
+
+  // GET /admin/advert/bids  — paginated list of all sessions across all listings
+  app.get('/admin/advert/bids', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const q = request.query as {
+      status?: string; search?: string; page?: string; limit?: string;
+    };
+    const page  = Math.max(1, parseInt(q.page  ?? '1',  10));
+    const limit = Math.min(100, Math.max(1, parseInt(q.limit ?? '40', 10)));
+    const offset = (page - 1) * limit;
+    const status = q.status && q.status !== 'all' ? q.status : null;
+    const search = q.search?.trim() || null;
+
+    return withTransaction(async (client) => {
+      const where = `
+        WHERE ($1::text IS NULL OR lbs.status = $1)
+          AND ($2::text IS NULL
+               OR al.title ILIKE '%' || $2 || '%'
+               OR al.slug  ILIKE '%' || $2 || '%'
+               OR lq.buyer_name  ILIKE '%' || $2 || '%'
+               OR lq.buyer_phone ILIKE '%' || $2 || '%')
+      `;
+      const params = [status, search];
+
+      const rows = await client.query(`
+        SELECT lbs.id, lbs.status, lbs.currency,
+               lbs.listing_price::float, lbs.agreed_price::float,
+               lbs.last_activity_at, lbs.expires_at, lbs.created_at,
+               al.title  AS listing_title,
+               al.slug   AS listing_slug,
+               u.full_name AS seller_name,
+               (SELECT COUNT(*)::int  FROM listing_bids WHERE session_id=lbs.id) AS bid_count,
+               (SELECT amount::float  FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_amount,
+               (SELECT party          FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_party,
+               lq.id           AS quote_id,
+               lq.quote_number,
+               lq.buyer_name,
+               lq.buyer_phone
+        FROM listing_bid_sessions lbs
+        JOIN advert_listings al ON al.id=lbs.listing_id
+        LEFT JOIN campaigns c ON c.id=al.campaign_id
+        LEFT JOIN users u ON u.id=c.user_id
+        LEFT JOIN listing_quotations lq ON lq.session_id=lbs.id
+        ${where}
+        ORDER BY lbs.last_activity_at DESC
+        LIMIT $3 OFFSET $4
+      `, [...params, limit, offset]);
+
+      const countRow = await client.query(`
+        SELECT COUNT(*)::int AS total
+        FROM listing_bid_sessions lbs
+        JOIN advert_listings al ON al.id=lbs.listing_id
+        LEFT JOIN listing_quotations lq ON lq.session_id=lbs.id
+        ${where}
+      `, params);
+
+      return reply.send({
+        sessions: rows.rows,
+        total: countRow.rows[0]?.total ?? 0,
+        page, limit,
+        has_next: offset + rows.rows.length < (countRow.rows[0]?.total ?? 0),
+      });
+    });
+  });
+
+  // GET /admin/advert/bids/stats  — aggregate statistics
+  app.get('/admin/advert/bids/stats', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    return withTransaction(async (client) => {
+      const r = await client.query(`
+        SELECT
+          COUNT(*)                                          AS total,
+          COUNT(*) FILTER (WHERE status='active')          AS active,
+          COUNT(*) FILTER (WHERE status='agreed')          AS agreed,
+          COUNT(*) FILTER (WHERE status='withdrawn')       AS withdrawn,
+          COUNT(*) FILTER (WHERE status='expired')         AS expired,
+          COALESCE(SUM(agreed_price) FILTER (WHERE status='agreed'), 0)::float AS total_agreed_value,
+          ROUND(AVG(sub.cnt)::numeric, 1)::float           AS avg_bid_rounds
+        FROM listing_bid_sessions lbs
+        LEFT JOIN (
+          SELECT session_id, COUNT(*)::int AS cnt FROM listing_bids GROUP BY session_id
+        ) sub ON sub.session_id=lbs.id
+      `);
+      return reply.send(r.rows[0] ?? {});
+    });
+  });
+
+  // GET /admin/advert/bids/:sessionId/thread  — full bid thread for any session
+  app.get('/admin/advert/bids/:sessionId/thread', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { sessionId } = request.params as { sessionId: string };
+    return withTransaction(async (client) => {
+      const sr = await client.query(
+        `SELECT lbs.*, al.title AS listing_title, al.slug AS listing_slug,
+                al.cta_phone, al.cta_whatsapp, al.cta_email,
+                u.full_name AS seller_name
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         LEFT JOIN campaigns c ON c.id=al.campaign_id
+         LEFT JOIN users u ON u.id=c.user_id
+         WHERE lbs.id=$1`, [sessionId]);
+      if (!sr.rows[0]) return reply.code(404).send({ error: 'session_not_found' });
+      const s = sr.rows[0];
+
+      const br = await client.query(
+        `SELECT id, party, amount::float, is_accepted, created_at
+         FROM listing_bids WHERE session_id=$1 ORDER BY created_at ASC`, [sessionId]);
+
+      const qr = await client.query(
+        `SELECT * FROM listing_quotations WHERE session_id=$1`, [sessionId]);
+
+      return reply.send({
+        session: {
+          id: s.id, status: s.status, currency: s.currency,
+          listing_price: parseFloat(s.listing_price ?? 0),
+          agreed_price: s.agreed_price ? parseFloat(s.agreed_price) : null,
+          listing_title: s.listing_title, listing_slug: s.listing_slug,
+          seller_name: s.seller_name,
+          cta_phone: s.cta_phone, cta_whatsapp: s.cta_whatsapp, cta_email: s.cta_email,
+          last_activity_at: s.last_activity_at, expires_at: s.expires_at, created_at: s.created_at,
+        },
+        bids: br.rows,
+        quotation: qr.rows[0] ?? null,
+      });
+    });
+  });
+
+  // PATCH /admin/advert/bids/:sessionId/close  — admin force-closes a session
+  app.patch('/admin/advert/bids/:sessionId/close', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { sessionId } = request.params as { sessionId: string };
+    return withTransaction(async (client) => {
+      const r = await client.query(
+        `UPDATE listing_bid_sessions SET status='expired', last_activity_at=NOW()
+         WHERE id=$1 AND status='active' RETURNING id`, [sessionId]);
+      if (!r.rows[0]) return reply.code(404).send({ error: 'session_not_active' });
+      return reply.send({ ok: true });
+    });
+  });
+
+  // GET /advert/my-listings-with-bids  — seller: all own listings + their active sessions
+  app.get('/advert/my-listings-with-bids', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    return withTransaction(async (client) => {
+      const lr = await client.query(
+        `SELECT al.id, al.slug, al.title, al.status
+         FROM advert_listings al
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE c.user_id=$1 AND al.is_draft=FALSE AND al.is_negotiable=TRUE
+         ORDER BY al.created_at DESC`,
+        [userId]);
+      const listings = await Promise.all(lr.rows.map(async (l: any) => {
+        const sr = await client.query(
+          `SELECT lbs.id, lbs.status, lbs.listing_price::float, lbs.agreed_price::float,
+                  lbs.currency, lbs.last_activity_at, lbs.expires_at, lbs.created_at,
+                  (SELECT amount::float FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_amount,
+                  (SELECT party        FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_party,
+                  (SELECT COUNT(*)::int FROM listing_bids WHERE session_id=lbs.id) AS bid_count
+           FROM listing_bid_sessions lbs WHERE lbs.listing_id=$1 AND lbs.status='active'
+           ORDER BY lbs.last_activity_at DESC`,
+          [l.id]);
+        return { ...l, bid_sessions: sr.rows };
+      }));
+      return reply.send({ listings });
+    });
+  });
+
+  // GET /advert/listings/:slug/bids/session-by-id/:sessionId  — seller fetch session by ID
+  app.get('/advert/listings/:slug/bids/session-by-id/:sessionId', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug, sessionId } = request.params as { slug: string; sessionId: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    return withTransaction(async (client) => {
+      const sr = await client.query(
+        `SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND lbs.id=$2 AND c.user_id=$3`,
+        [slug, sessionId, userId]);
+      if (!sr.rows[0]) return reply.code(404).send({ error: 'not_found' });
+      const s = sr.rows[0];
+      const br = await client.query(
+        `SELECT id, party, amount::float, is_accepted, created_at
+         FROM listing_bids WHERE session_id=$1 ORDER BY created_at ASC`, [s.id]);
+      return reply.send({
+        session: { id: s.id, status: s.status, currency: s.currency,
+                   listing_price: parseFloat(s.listing_price ?? 0),
+                   agreed_price: s.agreed_price ? parseFloat(s.agreed_price) : null },
+        bids: br.rows,
+      });
+    });
+  });
+
+  // POST /advert/listings/:slug/bids/seller-accept  — seller accepts buyer's latest bid
+  app.post('/advert/listings/:slug/bids/seller-accept', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const { session_id } = request.body as { session_id: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+
+    return withTransaction(async (client) => {
+      const own = await client.query(
+        `SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND lbs.id=$2 AND c.user_id=$3 AND lbs.status='active'`,
+        [slug, session_id, userId]);
+      if (!own.rows[0]) return reply.code(403).send({ error: 'forbidden_or_not_found' });
+
+      const lb = await client.query(
+        `SELECT * FROM listing_bids WHERE session_id=$1 ORDER BY created_at DESC LIMIT 1`,
+        [session_id]);
+      if (!lb.rows[0]) return reply.code(400).send({ error: 'no_bids' });
+      const bid = lb.rows[0];
+
+      await client.query(`UPDATE listing_bids SET is_accepted=TRUE WHERE id=$1`, [bid.id]);
+      await client.query(
+        `UPDATE listing_bid_sessions SET status='agreed', agreed_price=$2, last_activity_at=NOW()
+         WHERE id=$1`, [session_id, bid.amount]);
+
+      return reply.send({ agreed: true, agreed_price: parseFloat(bid.amount) });
+    });
+  });
 }
