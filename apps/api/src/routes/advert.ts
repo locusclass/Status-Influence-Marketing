@@ -1000,6 +1000,130 @@ export async function advertRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/advert/listings/browse — Public marketplace (no auth)
+  app.get('/advert/listings/browse', async (request, reply) => {
+    const q = request.query as Record<string, string>;
+    const page    = Math.max(1, parseInt(q.page  ?? '1',  10));
+    const limit   = Math.min(50, Math.max(1, parseInt(q.limit ?? '20', 10)));
+    const sort    = ['newest', 'trending', 'expiring'].includes(q.sort ?? '') ? q.sort : 'newest';
+    const search  = (q.search   ?? '').trim();
+    const catSlug = (q.category ?? '').trim();
+    const offset  = (page - 1) * limit;
+
+    try {
+      const conditions: string[] = [
+        `al.status = 'ACTIVE'`,
+        `c.status = 'ACTIVE'`,
+        `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())`,
+      ];
+      const filterParams: unknown[] = [];
+
+      if (search) {
+        filterParams.push(`%${search}%`);
+        const n = filterParams.length;
+        conditions.push(`(al.title ILIKE $${n} OR al.summary ILIKE $${n})`);
+      }
+      if (catSlug) {
+        filterParams.push(catSlug);
+        conditions.push(`ac.slug = $${filterParams.length}`);
+      }
+
+      const whereClause = conditions.map(c => `(${c})`).join(' AND ');
+      const orderBy =
+        sort === 'trending' ? 'al.views_total DESC NULLS LAST, al.created_at DESC' :
+        sort === 'expiring' ? 'al.campaign_end_at ASC NULLS LAST' :
+        'al.created_at DESC';
+
+      const dataParams = [...filterParams, limit, offset];
+      const limitN  = dataParams.length - 1;
+      const offsetN = dataParams.length;
+
+      const [dataRows, countRows, statsRows] = await Promise.all([
+        query(`
+          SELECT
+            al.id,
+            al.slug,
+            al.title,
+            al.summary,
+            al.price,
+            al.currency,
+            al.is_negotiable,
+            al.location_text,
+            COALESCE(al.views_total, 0) AS views_total,
+            al.listing_quality_score,
+            al.campaign_start_at,
+            al.campaign_end_at,
+            GREATEST(0, EXTRACT(EPOCH FROM (al.campaign_end_at - NOW()))::bigint) AS time_remaining_secs,
+            (
+              SELECT am.url FROM advert_media am
+              WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+              ORDER BY
+                CASE am.media_pack WHEN 'AMBASSADOR_PACK' THEN 0 ELSE 1 END,
+                am.sort_order ASC, am.created_at ASC
+              LIMIT 1
+            ) AS hero_url,
+            (
+              SELECT COALESCE(am.thumbnail_url, am.url) FROM advert_media am
+              WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+              ORDER BY
+                CASE am.media_pack WHEN 'AMBASSADOR_PACK' THEN 0 ELSE 1 END,
+                am.sort_order ASC, am.created_at ASC
+              LIMIT 1
+            ) AS hero_thumbnail_url,
+            ac.id     AS category_id,
+            ac.name   AS category_name,
+            ac.slug   AS category_slug,
+            ac.icon   AS category_icon
+          FROM advert_listings al
+          INNER JOIN campaigns c      ON c.id   = al.campaign_id
+          LEFT  JOIN advert_listing_types  lt  ON lt.id   = al.listing_type_id
+          LEFT  JOIN advert_subcategories  sub ON sub.id  = lt.subcategory_id
+          LEFT  JOIN advert_categories     ac  ON ac.id   = sub.category_id
+          WHERE ${whereClause}
+          ORDER BY ${orderBy}
+          LIMIT $${limitN} OFFSET $${offsetN}
+        `, dataParams),
+        query(`
+          SELECT COUNT(*)::int AS total
+          FROM advert_listings al
+          INNER JOIN campaigns c ON c.id = al.campaign_id
+          LEFT  JOIN advert_listing_types  lt  ON lt.id  = al.listing_type_id
+          LEFT  JOIN advert_subcategories  sub ON sub.id = lt.subcategory_id
+          LEFT  JOIN advert_categories     ac  ON ac.id  = sub.category_id
+          WHERE ${whereClause}
+        `, filterParams),
+        query(`
+          SELECT COUNT(*)::int AS live_count
+          FROM advert_listings al
+          INNER JOIN campaigns c ON c.id = al.campaign_id
+          WHERE al.status = 'ACTIVE'
+            AND c.status  = 'ACTIVE'
+            AND (al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())
+        `, []),
+      ]);
+
+      const total     = Number((countRows as any[])[0]?.total     ?? 0);
+      const liveCount = Number((statsRows as any[])[0]?.live_count ?? 0);
+
+      reply.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+      return {
+        listings: dataRows,
+        pagination: {
+          page,
+          limit,
+          total,
+          total_pages: Math.ceil(total / limit),
+          has_next: page * limit < total,
+        },
+        meta: { live_listing_count: liveCount },
+      };
+    } catch (err: any) {
+      app.log.error(err, 'advert.browse.error');
+      reply.code(500);
+      return { error: 'internal_server_error' };
+    }
+  });
+
   // GET /api/advert/listings/me — Business's own listings
   app.get('/advert/listings/me', {
     preHandler: [(app as any).authenticate],
