@@ -1229,9 +1229,9 @@ export async function advertRoutes(app: FastifyInstance) {
             c.name AS category_name, c.slug AS category_slug, c.icon AS category_icon,
             EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
           FROM advert_listings al
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories c ON c.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          LEFT JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          LEFT JOIN advert_categories c ON c.id = s.category_id
           WHERE al.slug = $1
         `, [slug]);
 
