@@ -322,6 +322,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
 
       return reply.code(201).send({
         ok: true,
+        id: listingId,
         slug,
         listing_url: '/product/' + slug,
       });
