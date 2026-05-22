@@ -329,7 +329,7 @@ describe('Admin system funding', () => {
 
     const listing = await pool!.query(
       `
-      SELECT status
+      SELECT status, campaign_end_at, expires_at
       FROM advert_listings
       WHERE campaign_id = $1
       LIMIT 1
@@ -339,6 +339,12 @@ describe('Admin system funding', () => {
     expect(listing.rows[0]).toMatchObject({
       status: 'ACTIVE',
     });
+    expect(new Date(listing.rows[0].campaign_end_at).toISOString()).toBe(
+      '2026-12-31T01:00:00.000Z'
+    );
+    expect(new Date(listing.rows[0].expires_at).toISOString()).toBe(
+      '2026-12-31T01:00:00.000Z'
+    );
 
     const childEscrow = await pool!.query(
       `

@@ -4805,8 +4805,8 @@ export async function campaignRoutes(app: FastifyInstance) {
           UPDATE advert_listings al
           SET status = 'ACTIVE',
               campaign_start_at = COALESCE(c.start_date, now()),
-              campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
-              expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+              campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour') + INTERVAL '1 hour',
+              expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour') + INTERVAL '1 hour',
               updated_at = now()
           FROM campaigns c
           WHERE al.campaign_id = c.id
@@ -5064,8 +5064,8 @@ export async function campaignRoutes(app: FastifyInstance) {
           UPDATE advert_listings al
           SET status = 'ACTIVE',
               campaign_start_at = COALESCE(c.start_date, now()),
-              campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
-              expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour'),
+              campaign_end_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour') + INTERVAL '1 hour',
+              expires_at = COALESCE(c.end_date, COALESCE(c.start_date, now()) + COALESCE(c.terms_keep_hours, 12) * INTERVAL '1 hour') + INTERVAL '1 hour',
               updated_at = now()
           FROM campaigns c
           WHERE al.campaign_id = c.id

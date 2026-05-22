@@ -4,6 +4,9 @@ import { z } from 'zod';
 import { withTransaction, query } from '../db.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
+const DEFAULT_LISTING_KEEP_HOURS = 12;
+const LISTING_LIFETIME_BUFFER_HOURS = 1;
+const MILLIS_PER_HOUR = 60 * 60 * 1000;
 // ─────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────
@@ -263,15 +266,16 @@ export async function advertRoutes(app) {
                 await ensureActiveListingType(client, body.listing_type_id);
                 // Derive the listing's live window from the campaign's duration
                 const camp = campRow.rows[0];
-                const keepHours = camp.terms_keep_hours ?? 12;
+                const keepHours = Number(camp.terms_keep_hours ?? DEFAULT_LISTING_KEEP_HOURS);
                 // campaign_start_at: use start_date if set, else now
                 const campaignStartAt = camp.start_date
                     ? new Date(camp.start_date)
                     : new Date();
-                // campaign_end_at: use explicit end_date, else start + keep_hours
-                const campaignEndAt = camp.end_date
+                const baseCampaignEndAt = camp.end_date
                     ? new Date(camp.end_date)
-                    : new Date(campaignStartAt.getTime() + keepHours * 60 * 60 * 1000);
+                    : new Date(campaignStartAt.getTime() + keepHours * MILLIS_PER_HOUR);
+                const campaignEndAt = new Date(baseCampaignEndAt.getTime() +
+                    LISTING_LIFETIME_BUFFER_HOURS * MILLIS_PER_HOUR);
                 // Check no existing listing for this campaign
                 const existingListing = await client.query(`SELECT id FROM advert_listings WHERE campaign_id = $1`, [body.campaign_id]);
                 if (existingListing.rows.length > 0) {
@@ -298,7 +302,8 @@ export async function advertRoutes(app) {
                     gallery_media_count: body.gallery_media.length,
                     field_values: body.field_values,
                 });
-                // Insert listing — expires_at is always derived from campaign duration
+                // Keep the public listing live for the full campaign plus a one-hour
+                // buffer, matching the beneficiary posting window.
                 const listingRow = await client.query(`
           INSERT INTO advert_listings (
             id, campaign_id, business_id, listing_type_id, slug,
@@ -319,9 +324,9 @@ export async function advertRoutes(app) {
                     body.latitude ?? null, body.longitude ?? null,
                     body.cta_whatsapp ?? null, body.cta_phone ?? null,
                     body.cta_email ?? null, body.cta_url ?? null,
-                    campaignEndAt, // expires_at = campaign end
+                    campaignEndAt, // expires_at = campaign end + buffer
                     campaignStartAt, // campaign_start_at
-                    campaignEndAt, // campaign_end_at
+                    campaignEndAt, // campaign_end_at (listing live-until)
                     qualityScore,
                 ]);
                 const listingId = listingRow.rows[0].id;
@@ -878,6 +883,122 @@ export async function advertRoutes(app) {
             return reply.code(500).send({ error: 'internal_server_error' });
         }
     });
+    // GET /api/advert/listings/browse — Public marketplace (no auth)
+    app.get('/advert/listings/browse', async (request, reply) => {
+        const q = request.query;
+        const page = Math.max(1, parseInt(q.page ?? '1', 10));
+        const limit = Math.min(50, Math.max(1, parseInt(q.limit ?? '20', 10)));
+        const sort = ['newest', 'trending', 'expiring'].includes(q.sort ?? '') ? q.sort : 'newest';
+        const search = (q.search ?? '').trim();
+        const catSlug = (q.category ?? '').trim();
+        const offset = (page - 1) * limit;
+        try {
+            const conditions = [
+                `al.status = 'ACTIVE'`,
+                `c.status = 'ACTIVE'`,
+                `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())`,
+            ];
+            const filterParams = [];
+            if (search) {
+                filterParams.push(`%${search}%`);
+                const n = filterParams.length;
+                conditions.push(`(al.title ILIKE $${n} OR al.summary ILIKE $${n})`);
+            }
+            if (catSlug) {
+                filterParams.push(catSlug);
+                conditions.push(`ac.slug = $${filterParams.length}`);
+            }
+            const whereClause = conditions.map(c => `(${c})`).join(' AND ');
+            const orderBy = sort === 'trending' ? 'al.views_total DESC NULLS LAST, al.created_at DESC' :
+                sort === 'expiring' ? 'al.campaign_end_at ASC NULLS LAST' :
+                    'al.created_at DESC';
+            const dataParams = [...filterParams, limit, offset];
+            const limitN = dataParams.length - 1;
+            const offsetN = dataParams.length;
+            const [dataRows, countRows, statsRows] = await Promise.all([
+                query(`
+          SELECT
+            al.id,
+            al.slug,
+            al.title,
+            al.summary,
+            al.price,
+            al.currency,
+            al.is_negotiable,
+            al.location_text,
+            COALESCE(al.views_total, 0) AS views_total,
+            al.listing_quality_score,
+            al.campaign_start_at,
+            al.campaign_end_at,
+            GREATEST(0, EXTRACT(EPOCH FROM (al.campaign_end_at - NOW()))::bigint) AS time_remaining_secs,
+            (
+              SELECT am.url FROM advert_media am
+              WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+              ORDER BY
+                CASE am.media_pack WHEN 'AMBASSADOR_PACK' THEN 0 ELSE 1 END,
+                am.sort_order ASC, am.created_at ASC
+              LIMIT 1
+            ) AS hero_url,
+            (
+              SELECT COALESCE(am.thumbnail_url, am.url) FROM advert_media am
+              WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+              ORDER BY
+                CASE am.media_pack WHEN 'AMBASSADOR_PACK' THEN 0 ELSE 1 END,
+                am.sort_order ASC, am.created_at ASC
+              LIMIT 1
+            ) AS hero_thumbnail_url,
+            ac.id     AS category_id,
+            ac.name   AS category_name,
+            ac.slug   AS category_slug,
+            ac.icon   AS category_icon
+          FROM advert_listings al
+          INNER JOIN campaigns c      ON c.id   = al.campaign_id
+          LEFT  JOIN advert_listing_types  lt  ON lt.id   = al.listing_type_id
+          LEFT  JOIN advert_subcategories  sub ON sub.id  = lt.subcategory_id
+          LEFT  JOIN advert_categories     ac  ON ac.id   = sub.category_id
+          WHERE ${whereClause}
+          ORDER BY ${orderBy}
+          LIMIT $${limitN} OFFSET $${offsetN}
+        `, dataParams),
+                query(`
+          SELECT COUNT(*)::int AS total
+          FROM advert_listings al
+          INNER JOIN campaigns c ON c.id = al.campaign_id
+          LEFT  JOIN advert_listing_types  lt  ON lt.id  = al.listing_type_id
+          LEFT  JOIN advert_subcategories  sub ON sub.id = lt.subcategory_id
+          LEFT  JOIN advert_categories     ac  ON ac.id  = sub.category_id
+          WHERE ${whereClause}
+        `, filterParams),
+                query(`
+          SELECT COUNT(*)::int AS live_count
+          FROM advert_listings al
+          INNER JOIN campaigns c ON c.id = al.campaign_id
+          WHERE al.status = 'ACTIVE'
+            AND c.status  = 'ACTIVE'
+            AND (al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())
+        `, []),
+            ]);
+            const total = Number(countRows[0]?.total ?? 0);
+            const liveCount = Number(statsRows[0]?.live_count ?? 0);
+            reply.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+            return {
+                listings: dataRows,
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    total_pages: Math.ceil(total / limit),
+                    has_next: page * limit < total,
+                },
+                meta: { live_listing_count: liveCount },
+            };
+        }
+        catch (err) {
+            app.log.error(err, 'advert.browse.error');
+            reply.code(500);
+            return { error: 'internal_server_error' };
+        }
+    });
     // GET /api/advert/listings/me — Business's own listings
     app.get('/advert/listings/me', {
         preHandler: [app.authenticate],
@@ -996,7 +1117,7 @@ export async function advertRoutes(app) {
                         },
                     };
                 }
-                // Enforce campaign-duration access control:
+                // Enforce the buffered campaign window:
                 // listing is inaccessible once campaign_end_at has passed,
                 // unless admin_keep_alive is set.
                 const timeRemainingSecs = Number(listing.time_remaining_secs ?? -1);
@@ -1687,9 +1808,13 @@ export async function advertRoutes(app) {
         const offset = (page - 1) * limit;
         try {
             const result = await withTransaction(async (client) => {
+                // 'DRAFT' is not a status value — drafts are identified by is_draft=TRUE
+                const isDraftFilter = query.status === 'DRAFT';
+                const statusParam = isDraftFilter ? null : (query.status ?? null);
                 const rows = await client.query(`
           SELECT
             al.id, al.slug, al.title, al.status, al.access_state,
+            al.is_draft,
             al.is_promoted, al.admin_keep_alive, al.admin_action_note, al.admin_action_at,
             al.views_total, al.views_unique, al.listing_quality_score,
             al.campaign_start_at, al.campaign_end_at,
@@ -1697,33 +1822,38 @@ export async function advertRoutes(app) {
             EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
             u.full_name AS business_name, u.email AS business_email,
             COALESCE(c.id, al.campaign_id) AS campaign_id,
-            lt.name AS listing_type_name,
-            s.name AS subcategory_name,
-            cat.name AS category_name,
+            COALESCE(lt.name, '—')  AS listing_type_name,
+            COALESCE(s.name,  '—')  AS subcategory_name,
+            COALESCE(cat.name,'—')  AS category_name,
             (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id AND o.status = 'PENDING') AS pending_offers
           FROM advert_listings al
           JOIN users u ON u.id = al.business_id
           LEFT JOIN campaigns c ON c.id = al.campaign_id
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories cat ON cat.id = s.category_id
-          WHERE ($3::text IS NULL OR al.status = $3)
-            AND ($4::text IS NULL OR
-                 al.title ILIKE '%' || $4 || '%' OR
-                 u.full_name ILIKE '%' || $4 || '%' OR
-                 al.slug ILIKE '%' || $4 || '%')
+          LEFT JOIN advert_listing_types lt  ON lt.id  = al.listing_type_id
+          LEFT JOIN advert_subcategories s   ON s.id   = lt.subcategory_id
+          LEFT JOIN advert_categories cat    ON cat.id = s.category_id
+          WHERE ($3::boolean IS NULL OR al.is_draft = $3)
+            AND ($4::text IS NULL OR al.status = $4)
+            AND ($5::text IS NULL OR
+                 al.title      ILIKE '%' || $5 || '%' OR
+                 u.full_name   ILIKE '%' || $5 || '%' OR
+                 al.slug       ILIKE '%' || $5 || '%')
           ORDER BY al.is_promoted DESC, al.created_at DESC
           LIMIT $1 OFFSET $2
-        `, [limit, offset, query.status ?? null, query.search ?? null]);
+        `, [limit, offset,
+                    isDraftFilter ? true : null,
+                    statusParam,
+                    query.search ?? null]);
                 const countRow = await client.query(`
           SELECT COUNT(*) FROM advert_listings al
           JOIN users u ON u.id = al.business_id
-          WHERE ($1::text IS NULL OR al.status = $1)
-            AND ($2::text IS NULL OR
-                 al.title ILIKE '%' || $2 || '%' OR
-                 u.full_name ILIKE '%' || $2 || '%' OR
-                 al.slug ILIKE '%' || $2 || '%')
-        `, [query.status ?? null, query.search ?? null]);
+          WHERE ($1::boolean IS NULL OR al.is_draft = $1)
+            AND ($2::text IS NULL OR al.status = $2)
+            AND ($3::text IS NULL OR
+                 al.title      ILIKE '%' || $3 || '%' OR
+                 u.full_name   ILIKE '%' || $3 || '%' OR
+                 al.slug       ILIKE '%' || $3 || '%')
+        `, [isDraftFilter ? true : null, statusParam, query.search ?? null]);
                 return {
                     listings: rows.rows,
                     total: parseInt(countRow.rows[0]?.count ?? '0', 10),
@@ -2634,5 +2764,443 @@ export async function advertRoutes(app) {
             app.log.error(err, 'admin.advert.tracking_links.error');
             return reply.code(500).send({ error: 'internal_server_error' });
         }
+    });
+    // ── Live bid / price-negotiation system ───────────────────────────────────
+    // POST /advert/listings/:slug/bids/session  — buyer opens a negotiation
+    app.post('/advert/listings/:slug/bids/session', async (request, reply) => {
+        const { slug } = request.params;
+        const { opening_offer } = request.body;
+        if (!opening_offer || Number(opening_offer) <= 0)
+            return reply.code(400).send({ error: 'opening_offer must be a positive number' });
+        return withTransaction(async (client) => {
+            const lr = await client.query(`SELECT id, title, price, currency, is_negotiable, status, access_state
+         FROM advert_listings WHERE slug=$1 AND access_state='PUBLIC'`, [slug]);
+            if (!lr.rows[0])
+                return reply.code(404).send({ error: 'listing_not_found' });
+            const l = lr.rows[0];
+            if (!l.is_negotiable)
+                return reply.code(400).send({ error: 'listing_not_negotiable' });
+            if (l.status !== 'ACTIVE')
+                return reply.code(400).send({ error: 'listing_not_active' });
+            const token = uuid().replace(/-/g, '') + uuid().replace(/-/g, '').slice(0, 16);
+            const sr = await client.query(`INSERT INTO listing_bid_sessions (listing_id, buyer_token, listing_price, currency)
+         VALUES ($1,$2,$3,$4)
+         RETURNING id, buyer_token, status, listing_price, currency, expires_at, created_at`, [l.id, token, l.price, l.currency || 'UGX']);
+            const session = sr.rows[0];
+            await client.query(`INSERT INTO listing_bids (session_id, party, amount) VALUES ($1,'buyer',$2)`, [session.id, Number(opening_offer)]);
+            await client.query(`UPDATE listing_bid_sessions SET last_activity_at=NOW() WHERE id=$1`, [session.id]);
+            return reply.code(201).send({
+                session_token: session.buyer_token,
+                session_id: session.id,
+                listing_price: parseFloat(session.listing_price ?? 0),
+                currency: session.currency,
+                listing_title: l.title,
+                expires_at: session.expires_at,
+            });
+        });
+    });
+    // GET /advert/listings/:slug/bids/session/:token  — poll session state
+    app.get('/advert/listings/:slug/bids/session/:token', async (request, reply) => {
+        const { slug, token } = request.params;
+        return withTransaction(async (client) => {
+            const sr = await client.query(`SELECT lbs.*, al.title AS listing_title
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2`, [slug, token]);
+            if (!sr.rows[0])
+                return reply.code(404).send({ error: 'session_not_found' });
+            const s = sr.rows[0];
+            if (s.status === 'active' && new Date(s.expires_at) < new Date()) {
+                await client.query(`UPDATE listing_bid_sessions SET status='expired' WHERE id=$1`, [s.id]);
+                s.status = 'expired';
+            }
+            const br = await client.query(`SELECT id, party, amount::float, is_accepted, created_at
+         FROM listing_bids WHERE session_id=$1 ORDER BY created_at ASC`, [s.id]);
+            let quotation = null;
+            if (s.status === 'agreed') {
+                const qr = await client.query(`SELECT id, quote_number, agreed_price::float, currency, buyer_name,
+                  buyer_phone, buyer_email, bid_count, valid_until, created_at
+           FROM listing_quotations WHERE session_id=$1`, [s.id]);
+                quotation = qr.rows[0] ?? null;
+            }
+            return reply.send({
+                session: {
+                    id: s.id, status: s.status,
+                    listing_price: parseFloat(s.listing_price ?? 0),
+                    agreed_price: s.agreed_price ? parseFloat(s.agreed_price) : null,
+                    currency: s.currency, listing_title: s.listing_title,
+                    expires_at: s.expires_at, last_activity_at: s.last_activity_at,
+                },
+                bids: br.rows,
+                quotation,
+            });
+        });
+    });
+    // POST /advert/listings/:slug/bids/offer  — buyer counter-offer
+    app.post('/advert/listings/:slug/bids/offer', async (request, reply) => {
+        const { slug } = request.params;
+        const { session_token, amount } = request.body;
+        if (!amount || Number(amount) <= 0)
+            return reply.code(400).send({ error: 'amount must be positive' });
+        return withTransaction(async (client) => {
+            const sr = await client.query(`SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='active'`, [slug, session_token]);
+            if (!sr.rows[0])
+                return reply.code(404).send({ error: 'session_not_found_or_closed' });
+            const s = sr.rows[0];
+            const br = await client.query(`INSERT INTO listing_bids (session_id, party, amount) VALUES ($1,'buyer',$2)
+         RETURNING id, party, amount::float, is_accepted, created_at`, [s.id, Number(amount)]);
+            await client.query(`UPDATE listing_bid_sessions SET last_activity_at=NOW() WHERE id=$1`, [s.id]);
+            return reply.code(201).send({ bid: br.rows[0] });
+        });
+    });
+    // POST /advert/listings/:slug/bids/accept  — buyer accepts latest bid
+    app.post('/advert/listings/:slug/bids/accept', async (request, reply) => {
+        const { slug } = request.params;
+        const { session_token } = request.body;
+        return withTransaction(async (client) => {
+            const sr = await client.query(`SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='active'`, [slug, session_token]);
+            if (!sr.rows[0])
+                return reply.code(404).send({ error: 'session_not_found_or_closed' });
+            const s = sr.rows[0];
+            const lb = await client.query(`SELECT * FROM listing_bids WHERE session_id=$1 ORDER BY created_at DESC LIMIT 1`, [s.id]);
+            if (!lb.rows[0])
+                return reply.code(400).send({ error: 'no_bids' });
+            const bid = lb.rows[0];
+            await client.query(`UPDATE listing_bids SET is_accepted=TRUE WHERE id=$1`, [bid.id]);
+            await client.query(`UPDATE listing_bid_sessions SET status='agreed', agreed_price=$2, last_activity_at=NOW()
+         WHERE id=$1`, [s.id, bid.amount]);
+            return reply.send({ agreed: true, agreed_price: parseFloat(bid.amount), currency: s.currency });
+        });
+    });
+    // POST /advert/listings/:slug/bids/withdraw  — buyer withdraws
+    app.post('/advert/listings/:slug/bids/withdraw', async (request, reply) => {
+        const { slug } = request.params;
+        const { session_token } = request.body;
+        return withTransaction(async (client) => {
+            const r = await client.query(`UPDATE listing_bid_sessions lbs SET status='withdrawn'
+         FROM advert_listings al
+         WHERE al.id=lbs.listing_id AND al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='active'
+         RETURNING lbs.id`, [slug, session_token]);
+            if (!r.rows[0])
+                return reply.code(404).send({ error: 'session_not_found_or_closed' });
+            return reply.send({ ok: true });
+        });
+    });
+    // POST /advert/listings/:slug/bids/quote  — generate quotation after agreement
+    app.post('/advert/listings/:slug/bids/quote', async (request, reply) => {
+        const { slug } = request.params;
+        const { session_token, buyer_name, buyer_phone, buyer_email } = request.body;
+        if (!buyer_name?.trim())
+            return reply.code(400).send({ error: 'buyer_name required' });
+        if (!buyer_phone?.trim())
+            return reply.code(400).send({ error: 'buyer_phone required' });
+        return withTransaction(async (client) => {
+            const sr = await client.query(`SELECT lbs.*, al.title, al.cta_phone, al.cta_whatsapp, al.cta_email,
+                al.location_text, al.category_name,
+                u.full_name AS seller_name
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         LEFT JOIN campaigns c ON c.id=al.campaign_id
+         LEFT JOIN users u ON u.id=c.user_id
+         WHERE al.slug=$1 AND lbs.buyer_token=$2 AND lbs.status='agreed'`, [slug, session_token]);
+            if (!sr.rows[0])
+                return reply.code(400).send({ error: 'session_not_agreed_or_not_found' });
+            const s = sr.rows[0];
+            const existing = await client.query(`SELECT * FROM listing_quotations WHERE session_id=$1`, [s.id]);
+            if (existing.rows[0]) {
+                return reply.send({
+                    quotation: existing.rows[0],
+                    seller_contacts: { phone: s.cta_phone, whatsapp: s.cta_whatsapp, email: s.cta_email, name: s.seller_name },
+                });
+            }
+            const countR = await client.query(`SELECT COUNT(*)::int AS c FROM listing_bids WHERE session_id=$1`, [s.id]);
+            const bidCount = countR.rows[0]?.c ?? 0;
+            const now = new Date();
+            const ymd = now.toISOString().slice(2, 10).replace(/-/g, '');
+            const rand = Math.random().toString(36).toUpperCase().slice(2, 6);
+            const quoteNumber = `PSQ-${ymd}-${rand}`;
+            const qr = await client.query(`INSERT INTO listing_quotations
+           (session_id, listing_id, quote_number, agreed_price, currency,
+            buyer_name, buyer_phone, buyer_email, bid_count)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING *`, [s.id, s.listing_id, quoteNumber, s.agreed_price, s.currency,
+                buyer_name.trim(), buyer_phone.trim(), buyer_email?.trim() ?? null, bidCount]);
+            return reply.code(201).send({
+                quotation: qr.rows[0],
+                seller_contacts: { phone: s.cta_phone, whatsapp: s.cta_whatsapp, email: s.cta_email, name: s.seller_name },
+            });
+        });
+    });
+    // GET /advert/listings/:slug/bids/quote/:quoteId  — retrieve quotation (shareable)
+    app.get('/advert/listings/:slug/bids/quote/:quoteId', async (request, reply) => {
+        const { slug, quoteId } = request.params;
+        return withTransaction(async (client) => {
+            const r = await client.query(`SELECT lq.*, al.title AS listing_title, al.location_text,
+                al.cta_phone, al.cta_whatsapp, al.cta_email,
+                lbs.listing_price::float,
+                u.full_name AS seller_name
+         FROM listing_quotations lq
+         JOIN advert_listings al ON al.id=lq.listing_id
+         JOIN listing_bid_sessions lbs ON lbs.id=lq.session_id
+         LEFT JOIN campaigns c ON c.id=al.campaign_id
+         LEFT JOIN users u ON u.id=c.user_id
+         WHERE al.slug=$1 AND lq.id=$2`, [slug, quoteId]);
+            if (!r.rows[0])
+                return reply.code(404).send({ error: 'quotation_not_found' });
+            const q = r.rows[0];
+            return reply.send({
+                quotation: q,
+                listing: { title: q.listing_title, location: q.location_text },
+                seller_contacts: { phone: q.cta_phone, whatsapp: q.cta_whatsapp, email: q.cta_email, name: q.seller_name },
+            });
+        });
+    });
+    // GET /advert/listings/:slug/bids/incoming  — seller: view active sessions
+    app.get('/advert/listings/:slug/bids/incoming', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug } = request.params;
+        const userId = String(request.user?.sub ?? '').trim();
+        return withTransaction(async (client) => {
+            const r = await client.query(`SELECT lbs.id, lbs.status,
+                lbs.listing_price::float, lbs.agreed_price::float,
+                lbs.currency, lbs.last_activity_at, lbs.expires_at, lbs.created_at,
+                (SELECT amount::float FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_amount,
+                (SELECT party        FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_party,
+                (SELECT COUNT(*)::int FROM listing_bids WHERE session_id=lbs.id) AS bid_count
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND c.user_id=$2 AND lbs.status='active'
+         ORDER BY lbs.last_activity_at DESC`, [slug, userId]);
+            return reply.send({ sessions: r.rows });
+        });
+    });
+    // POST /advert/listings/:slug/bids/seller-offer  — seller counter-offer
+    app.post('/advert/listings/:slug/bids/seller-offer', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug } = request.params;
+        const { session_id, amount } = request.body;
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!amount || Number(amount) <= 0)
+            return reply.code(400).send({ error: 'amount must be positive' });
+        return withTransaction(async (client) => {
+            const own = await client.query(`SELECT lbs.id FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND lbs.id=$2 AND c.user_id=$3 AND lbs.status='active'`, [slug, session_id, userId]);
+            if (!own.rows[0])
+                return reply.code(403).send({ error: 'forbidden_or_not_found' });
+            const br = await client.query(`INSERT INTO listing_bids (session_id, party, amount) VALUES ($1,'seller',$2)
+         RETURNING id, party, amount::float, is_accepted, created_at`, [session_id, Number(amount)]);
+            await client.query(`UPDATE listing_bid_sessions SET last_activity_at=NOW() WHERE id=$1`, [session_id]);
+            return reply.code(201).send({ bid: br.rows[0] });
+        });
+    });
+    // ── Admin bid management ──────────────────────────────────────────────────
+    // GET /admin/advert/bids  — paginated list of all sessions across all listings
+    app.get('/admin/advert/bids', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const q = request.query;
+        const page = Math.max(1, parseInt(q.page ?? '1', 10));
+        const limit = Math.min(100, Math.max(1, parseInt(q.limit ?? '40', 10)));
+        const offset = (page - 1) * limit;
+        const status = q.status && q.status !== 'all' ? q.status : null;
+        const search = q.search?.trim() || null;
+        return withTransaction(async (client) => {
+            const where = `
+        WHERE ($1::text IS NULL OR lbs.status = $1)
+          AND ($2::text IS NULL
+               OR al.title ILIKE '%' || $2 || '%'
+               OR al.slug  ILIKE '%' || $2 || '%'
+               OR lq.buyer_name  ILIKE '%' || $2 || '%'
+               OR lq.buyer_phone ILIKE '%' || $2 || '%')
+      `;
+            const params = [status, search];
+            const rows = await client.query(`
+        SELECT lbs.id, lbs.status, lbs.currency,
+               lbs.listing_price::float, lbs.agreed_price::float,
+               lbs.last_activity_at, lbs.expires_at, lbs.created_at,
+               al.title  AS listing_title,
+               al.slug   AS listing_slug,
+               u.full_name AS seller_name,
+               (SELECT COUNT(*)::int  FROM listing_bids WHERE session_id=lbs.id) AS bid_count,
+               (SELECT amount::float  FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_amount,
+               (SELECT party          FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_party,
+               lq.id           AS quote_id,
+               lq.quote_number,
+               lq.buyer_name,
+               lq.buyer_phone
+        FROM listing_bid_sessions lbs
+        JOIN advert_listings al ON al.id=lbs.listing_id
+        LEFT JOIN campaigns c ON c.id=al.campaign_id
+        LEFT JOIN users u ON u.id=c.user_id
+        LEFT JOIN listing_quotations lq ON lq.session_id=lbs.id
+        ${where}
+        ORDER BY lbs.last_activity_at DESC
+        LIMIT $3 OFFSET $4
+      `, [...params, limit, offset]);
+            const countRow = await client.query(`
+        SELECT COUNT(*)::int AS total
+        FROM listing_bid_sessions lbs
+        JOIN advert_listings al ON al.id=lbs.listing_id
+        LEFT JOIN listing_quotations lq ON lq.session_id=lbs.id
+        ${where}
+      `, params);
+            return reply.send({
+                sessions: rows.rows,
+                total: countRow.rows[0]?.total ?? 0,
+                page, limit,
+                has_next: offset + rows.rows.length < (countRow.rows[0]?.total ?? 0),
+            });
+        });
+    });
+    // GET /admin/advert/bids/stats  — aggregate statistics
+    app.get('/admin/advert/bids/stats', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        return withTransaction(async (client) => {
+            const r = await client.query(`
+        SELECT
+          COUNT(*)                                          AS total,
+          COUNT(*) FILTER (WHERE status='active')          AS active,
+          COUNT(*) FILTER (WHERE status='agreed')          AS agreed,
+          COUNT(*) FILTER (WHERE status='withdrawn')       AS withdrawn,
+          COUNT(*) FILTER (WHERE status='expired')         AS expired,
+          COALESCE(SUM(agreed_price) FILTER (WHERE status='agreed'), 0)::float AS total_agreed_value,
+          ROUND(AVG(sub.cnt)::numeric, 1)::float           AS avg_bid_rounds
+        FROM listing_bid_sessions lbs
+        LEFT JOIN (
+          SELECT session_id, COUNT(*)::int AS cnt FROM listing_bids GROUP BY session_id
+        ) sub ON sub.session_id=lbs.id
+      `);
+            return reply.send(r.rows[0] ?? {});
+        });
+    });
+    // GET /admin/advert/bids/:sessionId/thread  — full bid thread for any session
+    app.get('/admin/advert/bids/:sessionId/thread', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { sessionId } = request.params;
+        return withTransaction(async (client) => {
+            const sr = await client.query(`SELECT lbs.*, al.title AS listing_title, al.slug AS listing_slug,
+                al.cta_phone, al.cta_whatsapp, al.cta_email,
+                u.full_name AS seller_name
+         FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         LEFT JOIN campaigns c ON c.id=al.campaign_id
+         LEFT JOIN users u ON u.id=c.user_id
+         WHERE lbs.id=$1`, [sessionId]);
+            if (!sr.rows[0])
+                return reply.code(404).send({ error: 'session_not_found' });
+            const s = sr.rows[0];
+            const br = await client.query(`SELECT id, party, amount::float, is_accepted, created_at
+         FROM listing_bids WHERE session_id=$1 ORDER BY created_at ASC`, [sessionId]);
+            const qr = await client.query(`SELECT * FROM listing_quotations WHERE session_id=$1`, [sessionId]);
+            return reply.send({
+                session: {
+                    id: s.id, status: s.status, currency: s.currency,
+                    listing_price: parseFloat(s.listing_price ?? 0),
+                    agreed_price: s.agreed_price ? parseFloat(s.agreed_price) : null,
+                    listing_title: s.listing_title, listing_slug: s.listing_slug,
+                    seller_name: s.seller_name,
+                    cta_phone: s.cta_phone, cta_whatsapp: s.cta_whatsapp, cta_email: s.cta_email,
+                    last_activity_at: s.last_activity_at, expires_at: s.expires_at, created_at: s.created_at,
+                },
+                bids: br.rows,
+                quotation: qr.rows[0] ?? null,
+            });
+        });
+    });
+    // PATCH /admin/advert/bids/:sessionId/close  — admin force-closes a session
+    app.patch('/admin/advert/bids/:sessionId/close', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { sessionId } = request.params;
+        return withTransaction(async (client) => {
+            const r = await client.query(`UPDATE listing_bid_sessions SET status='expired', last_activity_at=NOW()
+         WHERE id=$1 AND status='active' RETURNING id`, [sessionId]);
+            if (!r.rows[0])
+                return reply.code(404).send({ error: 'session_not_active' });
+            return reply.send({ ok: true });
+        });
+    });
+    // GET /advert/my-listings-with-bids  — seller: all own listings + their active sessions
+    app.get('/advert/my-listings-with-bids', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const userId = String(request.user?.sub ?? '').trim();
+        return withTransaction(async (client) => {
+            const lr = await client.query(`SELECT al.id, al.slug, al.title, al.status
+         FROM advert_listings al
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE c.user_id=$1 AND al.is_draft=FALSE AND al.is_negotiable=TRUE
+         ORDER BY al.created_at DESC`, [userId]);
+            const listings = await Promise.all(lr.rows.map(async (l) => {
+                const sr = await client.query(`SELECT lbs.id, lbs.status, lbs.listing_price::float, lbs.agreed_price::float,
+                  lbs.currency, lbs.last_activity_at, lbs.expires_at, lbs.created_at,
+                  (SELECT amount::float FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_amount,
+                  (SELECT party        FROM listing_bids WHERE session_id=lbs.id ORDER BY created_at DESC LIMIT 1) AS latest_party,
+                  (SELECT COUNT(*)::int FROM listing_bids WHERE session_id=lbs.id) AS bid_count
+           FROM listing_bid_sessions lbs WHERE lbs.listing_id=$1 AND lbs.status='active'
+           ORDER BY lbs.last_activity_at DESC`, [l.id]);
+                return { ...l, bid_sessions: sr.rows };
+            }));
+            return reply.send({ listings });
+        });
+    });
+    // GET /advert/listings/:slug/bids/session-by-id/:sessionId  — seller fetch session by ID
+    app.get('/advert/listings/:slug/bids/session-by-id/:sessionId', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug, sessionId } = request.params;
+        const userId = String(request.user?.sub ?? '').trim();
+        return withTransaction(async (client) => {
+            const sr = await client.query(`SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND lbs.id=$2 AND c.user_id=$3`, [slug, sessionId, userId]);
+            if (!sr.rows[0])
+                return reply.code(404).send({ error: 'not_found' });
+            const s = sr.rows[0];
+            const br = await client.query(`SELECT id, party, amount::float, is_accepted, created_at
+         FROM listing_bids WHERE session_id=$1 ORDER BY created_at ASC`, [s.id]);
+            return reply.send({
+                session: { id: s.id, status: s.status, currency: s.currency,
+                    listing_price: parseFloat(s.listing_price ?? 0),
+                    agreed_price: s.agreed_price ? parseFloat(s.agreed_price) : null },
+                bids: br.rows,
+            });
+        });
+    });
+    // POST /advert/listings/:slug/bids/seller-accept  — seller accepts buyer's latest bid
+    app.post('/advert/listings/:slug/bids/seller-accept', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug } = request.params;
+        const { session_id } = request.body;
+        const userId = String(request.user?.sub ?? '').trim();
+        return withTransaction(async (client) => {
+            const own = await client.query(`SELECT lbs.* FROM listing_bid_sessions lbs
+         JOIN advert_listings al ON al.id=lbs.listing_id
+         JOIN campaigns c ON c.id=al.campaign_id
+         WHERE al.slug=$1 AND lbs.id=$2 AND c.user_id=$3 AND lbs.status='active'`, [slug, session_id, userId]);
+            if (!own.rows[0])
+                return reply.code(403).send({ error: 'forbidden_or_not_found' });
+            const lb = await client.query(`SELECT * FROM listing_bids WHERE session_id=$1 ORDER BY created_at DESC LIMIT 1`, [session_id]);
+            if (!lb.rows[0])
+                return reply.code(400).send({ error: 'no_bids' });
+            const bid = lb.rows[0];
+            await client.query(`UPDATE listing_bids SET is_accepted=TRUE WHERE id=$1`, [bid.id]);
+            await client.query(`UPDATE listing_bid_sessions SET status='agreed', agreed_price=$2, last_activity_at=NOW()
+         WHERE id=$1`, [session_id, bid.amount]);
+            return reply.send({ agreed: true, agreed_price: parseFloat(bid.amount) });
+        });
     });
 }

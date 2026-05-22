@@ -7,6 +7,10 @@ import { withTransaction, query } from '../db.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
 
+const DEFAULT_LISTING_KEEP_HOURS = 12;
+const LISTING_LIFETIME_BUFFER_HOURS = 1;
+const MILLIS_PER_HOUR = 60 * 60 * 1000;
+
 // ─────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────
@@ -296,15 +300,18 @@ export async function advertRoutes(app: FastifyInstance) {
 
         // Derive the listing's live window from the campaign's duration
         const camp = campRow.rows[0];
-        const keepHours: number = camp.terms_keep_hours ?? 12;
+        const keepHours: number = Number(camp.terms_keep_hours ?? DEFAULT_LISTING_KEEP_HOURS);
         // campaign_start_at: use start_date if set, else now
         const campaignStartAt: Date = camp.start_date
           ? new Date(camp.start_date)
           : new Date();
-        // campaign_end_at: use explicit end_date, else start + keep_hours
-        const campaignEndAt: Date = camp.end_date
+        const baseCampaignEndAt: Date = camp.end_date
           ? new Date(camp.end_date)
-          : new Date(campaignStartAt.getTime() + keepHours * 60 * 60 * 1000);
+          : new Date(campaignStartAt.getTime() + keepHours * MILLIS_PER_HOUR);
+        const campaignEndAt = new Date(
+          baseCampaignEndAt.getTime() +
+              LISTING_LIFETIME_BUFFER_HOURS * MILLIS_PER_HOUR
+        );
 
         // Check no existing listing for this campaign
         const existingListing = await client.query(
@@ -340,7 +347,8 @@ export async function advertRoutes(app: FastifyInstance) {
           field_values: body.field_values,
         });
 
-        // Insert listing — expires_at is always derived from campaign duration
+        // Keep the public listing live for the full campaign plus a one-hour
+        // buffer, matching the beneficiary posting window.
         const listingRow = await client.query(`
           INSERT INTO advert_listings (
             id, campaign_id, business_id, listing_type_id, slug,
@@ -361,9 +369,9 @@ export async function advertRoutes(app: FastifyInstance) {
           body.latitude ?? null, body.longitude ?? null,
           body.cta_whatsapp ?? null, body.cta_phone ?? null,
           body.cta_email ?? null, body.cta_url ?? null,
-          campaignEndAt,      // expires_at = campaign end
+          campaignEndAt,      // expires_at = campaign end + buffer
           campaignStartAt,    // campaign_start_at
-          campaignEndAt,      // campaign_end_at
+          campaignEndAt,      // campaign_end_at (listing live-until)
           qualityScore,
         ]);
 
@@ -1252,7 +1260,7 @@ export async function advertRoutes(app: FastifyInstance) {
           };
         }
 
-        // Enforce campaign-duration access control:
+        // Enforce the buffered campaign window:
         // listing is inaccessible once campaign_end_at has passed,
         // unless admin_keep_alive is set.
         const timeRemainingSecs = Number(listing.time_remaining_secs ?? -1);
