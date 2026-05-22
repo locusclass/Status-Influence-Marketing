@@ -52,10 +52,10 @@ function calcQualityScore(data: {
 // ─────────────────────────────────────────────
 
 const createListingSchema = z.object({
-  listing_type_id: z.string().uuid(),
+  listing_type_id: z.string().uuid().optional(),
   title: z.string().min(5).max(150),
   summary: z.string().min(10).max(300),
-  description: z.string().min(20).max(5000),
+  description: z.string().min(10).max(5000),
   price: z.number().positive().optional().nullable(),
   currency: z.string().default('UGX'),
   is_negotiable: z.boolean().default(false),
@@ -71,7 +71,6 @@ const createListingSchema = z.object({
         media_type: z.literal('IMAGE').default('IMAGE'),
       })
     )
-    .max(10)
     .default([]),
   content_blocks: z.array(z.record(z.any())).optional().default([]),
 });
@@ -82,11 +81,12 @@ const patchListingSchema = createListingSchema.partial().omit({ listing_type_id:
 // ROUTE REGISTRATION
 // ─────────────────────────────────────────────
 
-let contentBlocksColumnEnsured = false;
+let schemaEnsured = false;
 async function ensureContentBlocksColumn(client: any) {
-  if (contentBlocksColumnEnsured) return;
+  if (schemaEnsured) return;
   await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS content_blocks JSONB`);
-  contentBlocksColumnEnsured = true;
+  await client.query(`ALTER TABLE advert_listings ALTER COLUMN listing_type_id DROP NOT NULL`);
+  schemaEnsured = true;
 }
 
 export async function marketplaceRoutes(app: FastifyInstance) {
@@ -260,17 +260,6 @@ export async function marketplaceRoutes(app: FastifyInstance) {
     const body = parsed.data;
 
     try {
-      // Verify listing type is active
-      const ltRows = await query<any>(
-        `SELECT lt.id FROM advert_listing_types lt
-         JOIN advert_subcategories s ON s.id = lt.subcategory_id
-         WHERE lt.id = $1 AND lt.is_active = TRUE AND s.is_active = TRUE LIMIT 1`,
-        [body.listing_type_id]
-      );
-      if (!ltRows[0]) {
-        return reply.code(400).send({ error: 'invalid_listing_type' });
-      }
-
       const qualityScore = calcQualityScore({
         title: body.title,
         summary: body.summary,
@@ -305,7 +294,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
             $16, $17
           )`,
           [
-            listingId, userId, body.listing_type_id, slug,
+            listingId, userId, body.listing_type_id ?? null, slug,
             body.title, body.summary, body.description,
             body.price ?? null, body.currency,
             body.is_negotiable, body.location_text ?? null,
