@@ -1187,9 +1187,9 @@ export async function advertRoutes(app: FastifyInstance) {
              ORDER BY sort_order LIMIT 1) AS hero_image,
             (SELECT COUNT(*) FROM advert_offers WHERE listing_id = al.id AND status = 'PENDING') AS pending_offers
           FROM advert_listings al
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories c ON c.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          LEFT JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          LEFT JOIN advert_categories c ON c.id = s.category_id
           WHERE al.business_id = $1
             AND ($4::text IS NULL OR al.status = $4)
           ORDER BY al.created_at DESC
@@ -1218,6 +1218,11 @@ export async function advertRoutes(app: FastifyInstance) {
   // GET /api/advert/listings/:slug — Public listing page
   app.get('/advert/listings/:slug', async (request, reply) => {
     const { slug } = request.params as { slug: string };
+    const query =
+      request.query as { preview_token?: string; preview?: string };
+    const previewToken = String(
+      query.preview_token ?? query.preview ?? ''
+    ).trim();
 
     try {
       const result = await withTransaction(async (client) => {
@@ -1252,6 +1257,15 @@ export async function advertRoutes(app: FastifyInstance) {
         }
 
         if (listing.status === 'DRAFT') {
+          const expectedPreviewToken = String(
+            listing.preview_token ?? ''
+          ).trim();
+          if (
+            !expectedPreviewToken ||
+            previewToken !== expectedPreviewToken
+          ) {
+            return { gone: false, notFound: true };
+          }
           const [mediaRows, fieldRows] = await Promise.all([
             client.query(`
               SELECT id, media_pack, media_type, url, thumbnail_url, file_name,
@@ -1385,11 +1399,17 @@ export async function advertRoutes(app: FastifyInstance) {
   // GET /api/advert/listings/:slug/time-status — Live time poll (lightweight, no session)
   app.get('/advert/listings/:slug/time-status', async (request, reply) => {
     const { slug } = request.params as { slug: string };
+    const query =
+      request.query as { preview_token?: string; preview?: string };
+    const previewToken = String(
+      query.preview_token ?? query.preview ?? ''
+    ).trim();
     try {
       const result = await withTransaction(async (client) => {
         const row = await client.query(`
           SELECT
             al.id, al.business_id, al.status, al.admin_keep_alive, al.access_state,
+            al.preview_token,
             al.campaign_start_at, al.campaign_end_at,
             EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
           FROM advert_listings al
@@ -1403,6 +1423,17 @@ export async function advertRoutes(app: FastifyInstance) {
         return { ...r, has_pro_subscription: hasProSub };
       });
       if (!result) return reply.code(404).send({ error: 'listing_not_found' });
+      if (String(result.status ?? '').toUpperCase() === 'DRAFT') {
+        const expectedPreviewToken = String(
+          result.preview_token ?? ''
+        ).trim();
+        if (
+          !expectedPreviewToken ||
+          previewToken !== expectedPreviewToken
+        ) {
+          return reply.code(404).send({ error: 'listing_not_found' });
+        }
+      }
       const accessState = String(result.access_state ?? 'PUBLIC').toUpperCase();
       const remaining = Number(result.time_remaining_secs ?? -1);
       const hasProSub = result.has_pro_subscription === true;
@@ -3444,7 +3475,7 @@ export async function advertRoutes(app: FastifyInstance) {
         `SELECT al.id, al.slug, al.title, al.status
          FROM advert_listings al
          JOIN campaigns c ON c.id=al.campaign_id
-         WHERE c.user_id=$1 AND al.is_draft=FALSE AND al.is_negotiable=TRUE
+         WHERE c.business_id=$1 AND al.status='ACTIVE' AND al.is_negotiable=TRUE
          ORDER BY al.created_at DESC`,
         [userId]);
       const listings = await Promise.all(lr.rows.map(async (l: any) => {

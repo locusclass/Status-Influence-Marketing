@@ -73,6 +73,7 @@ const createListingSchema = z.object({
     )
     .default([]),
   content_blocks: z.array(z.record(z.any())).optional().default([]),
+  draft_mode: z.boolean().optional().default(false),
 });
 
 const patchListingSchema = createListingSchema.partial().omit({ listing_type_id: true });
@@ -86,6 +87,14 @@ async function ensureContentBlocksColumn(client: any) {
   if (schemaEnsured) return;
   await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS content_blocks JSONB`);
   await client.query(`ALTER TABLE advert_listings ALTER COLUMN listing_type_id DROP NOT NULL`);
+  await client.query(
+    `ALTER TABLE advert_listings
+       ADD COLUMN IF NOT EXISTS preview_token UUID NOT NULL DEFAULT gen_random_uuid()`
+  );
+  await client.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_advert_listings_preview_token
+       ON advert_listings(preview_token)`
+  );
   schemaEnsured = true;
 }
 
@@ -234,8 +243,11 @@ export async function marketplaceRoutes(app: FastifyInstance) {
   app.post('/marketplace/listings', {
     preHandler: [(app as any).authenticate],
   }, async (request, reply) => {
-    const userId = (request.user as any)?.sub ?? (request.user as any)?.id;
+    const userId = String(
+      (request.user as any)?.sub ?? (request.user as any)?.id ?? ''
+    ).trim();
     if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+    let businessId = userId;
 
     try {
       // Check user role
@@ -248,6 +260,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       if (!canAccessBusinessFeatures(user.role)) {
         return reply.code(403).send({ error: 'business_account_required' });
       }
+      businessId = String(user.id ?? '').trim() || userId;
     } catch (err) {
       app.log.error(err, 'marketplace.listings.create.roleCheck.error');
       return reply.code(500).send({ error: 'internal_server_error' });
@@ -274,10 +287,12 @@ export async function marketplaceRoutes(app: FastifyInstance) {
 
       const listingId = uuid();
       const slug      = generateListingSlug(body.title);
+      const draftMode = body.draft_mode === true;
+      let createdListing: Record<string, unknown> | null = null;
 
       await withTransaction(async (client) => {
         await ensureContentBlocksColumn(client);
-        await client.query(
+        const inserted = await client.query(
           `INSERT INTO advert_listings (
             id, campaign_id, business_id, listing_type_id, slug,
             title, summary, description, price, currency,
@@ -290,20 +305,33 @@ export async function marketplaceRoutes(app: FastifyInstance) {
             $5, $6, $7, $8, $9,
             $10, $11,
             $12, $13, $14, $15,
-            'ACTIVE', 'PUBLIC', TRUE, NULL,
-            $16, $17
-          )`,
+            $16, 'PUBLIC', $17, NULL,
+            $18, $19
+          )
+          RETURNING *`,
           [
-            listingId, userId, body.listing_type_id ?? null, slug,
+            listingId, businessId, body.listing_type_id ?? null, slug,
             body.title, body.summary, body.description,
             body.price ?? null, body.currency,
             body.is_negotiable, body.location_text ?? null,
             body.cta_whatsapp ?? null, body.cta_phone ?? null,
             body.cta_email ?? null, body.cta_url ?? null,
+            draftMode ? 'DRAFT' : 'ACTIVE',
+            draftMode ? false : true,
             qualityScore,
             JSON.stringify(body.content_blocks),
           ]
         );
+        createdListing = inserted.rows[0] ?? null;
+
+        if (createdListing) {
+          createdListing = {
+            ...createdListing,
+            is_draft: draftMode,
+            preview_token: createdListing.preview_token ?? null,
+            content_blocks: body.content_blocks,
+          };
+        }
 
         if (body.images.length > 0) {
           const imgParams: any[] = [];
@@ -320,11 +348,25 @@ export async function marketplaceRoutes(app: FastifyInstance) {
         }
       });
 
+      const listing = createdListing == null
+        ? null
+        : {
+            ...(createdListing as Record<string, unknown>),
+            gallery_media: body.images.map((img, index) => ({
+              ...img,
+              sort_order: index,
+            })),
+            ambassador_media: [],
+            field_values: {},
+            field_types: {},
+          };
+
       return reply.code(201).send({
         ok: true,
         id: listingId,
         slug,
         listing_url: '/product/' + slug,
+        listing,
       });
     } catch (err) {
       app.log.error(err, 'marketplace.listings.create.error');
