@@ -2035,9 +2035,14 @@ export async function advertRoutes(app: FastifyInstance) {
 
     try {
       const result = await withTransaction(async (client) => {
+        // 'DRAFT' is not a status value — drafts are identified by is_draft=TRUE
+        const isDraftFilter = query.status === 'DRAFT';
+        const statusParam   = isDraftFilter ? null : (query.status ?? null);
+
         const rows = await client.query(`
           SELECT
             al.id, al.slug, al.title, al.status, al.access_state,
+            al.is_draft,
             al.is_promoted, al.admin_keep_alive, al.admin_action_note, al.admin_action_at,
             al.views_total, al.views_unique, al.listing_quality_score,
             al.campaign_start_at, al.campaign_end_at,
@@ -2045,34 +2050,39 @@ export async function advertRoutes(app: FastifyInstance) {
             EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
             u.full_name AS business_name, u.email AS business_email,
             COALESCE(c.id, al.campaign_id) AS campaign_id,
-            lt.name AS listing_type_name,
-            s.name AS subcategory_name,
-            cat.name AS category_name,
+            COALESCE(lt.name, '—')  AS listing_type_name,
+            COALESCE(s.name,  '—')  AS subcategory_name,
+            COALESCE(cat.name,'—')  AS category_name,
             (SELECT COUNT(*) FROM advert_offers o WHERE o.listing_id = al.id AND o.status = 'PENDING') AS pending_offers
           FROM advert_listings al
           JOIN users u ON u.id = al.business_id
           LEFT JOIN campaigns c ON c.id = al.campaign_id
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories cat ON cat.id = s.category_id
-          WHERE ($3::text IS NULL OR al.status = $3)
-            AND ($4::text IS NULL OR
-                 al.title ILIKE '%' || $4 || '%' OR
-                 u.full_name ILIKE '%' || $4 || '%' OR
-                 al.slug ILIKE '%' || $4 || '%')
+          LEFT JOIN advert_listing_types lt  ON lt.id  = al.listing_type_id
+          LEFT JOIN advert_subcategories s   ON s.id   = lt.subcategory_id
+          LEFT JOIN advert_categories cat    ON cat.id = s.category_id
+          WHERE ($3::boolean IS NULL OR al.is_draft = $3)
+            AND ($4::text IS NULL OR al.status = $4)
+            AND ($5::text IS NULL OR
+                 al.title      ILIKE '%' || $5 || '%' OR
+                 u.full_name   ILIKE '%' || $5 || '%' OR
+                 al.slug       ILIKE '%' || $5 || '%')
           ORDER BY al.is_promoted DESC, al.created_at DESC
           LIMIT $1 OFFSET $2
-        `, [limit, offset, query.status ?? null, query.search ?? null]);
+        `, [limit, offset,
+            isDraftFilter ? true : null,
+            statusParam,
+            query.search ?? null]);
 
         const countRow = await client.query(`
           SELECT COUNT(*) FROM advert_listings al
           JOIN users u ON u.id = al.business_id
-          WHERE ($1::text IS NULL OR al.status = $1)
-            AND ($2::text IS NULL OR
-                 al.title ILIKE '%' || $2 || '%' OR
-                 u.full_name ILIKE '%' || $2 || '%' OR
-                 al.slug ILIKE '%' || $2 || '%')
-        `, [query.status ?? null, query.search ?? null]);
+          WHERE ($1::boolean IS NULL OR al.is_draft = $1)
+            AND ($2::text IS NULL OR al.status = $2)
+            AND ($3::text IS NULL OR
+                 al.title      ILIKE '%' || $3 || '%' OR
+                 u.full_name   ILIKE '%' || $3 || '%' OR
+                 al.slug       ILIKE '%' || $3 || '%')
+        `, [isDraftFilter ? true : null, statusParam, query.search ?? null]);
 
         return {
           listings: rows.rows,
