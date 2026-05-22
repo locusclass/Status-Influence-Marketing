@@ -6,6 +6,31 @@ import { z } from 'zod';
 import { withTransaction, query } from '../db.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
+import { PaymentRepo } from '../repositories/paymentRepo.js';
+import {
+  hasYoClientCredentials,
+  hasYoEncryptionKey,
+} from '../config.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
+import {
+  buildListingBoostOptions,
+  resolveListingBoostPlan,
+  activateListingBoost,
+  ensureListingBoostSchema,
+} from '../services/listingBoosts.js';
+import {
+  hasActiveBusinessProSubscription,
+  ensureBusinessProSubscriptionSchema,
+  proKeepAliveConditionSql,
+} from '../services/businessSubscriptions.js';
+
+// Ensure Pro subscription table exists on first advert route use
+let proSchemaEnsured = false;
+async function ensureProSchemaOnce(client: any) {
+  if (proSchemaEnsured) return;
+  await ensureBusinessProSubscriptionSchema(client);
+  proSchemaEnsured = true;
+}
 
 const DEFAULT_LISTING_KEEP_HOURS = 12;
 const LISTING_LIFETIME_BUFFER_HOURS = 1;
@@ -1019,10 +1044,11 @@ export async function advertRoutes(app: FastifyInstance) {
     const offset  = (page - 1) * limit;
 
     try {
+      const proAlive = proKeepAliveConditionSql('c.user_id');
       const conditions: string[] = [
         `al.status = 'ACTIVE'`,
-        `c.status = 'ACTIVE'`,
-        `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())`,
+        `(c.status = 'ACTIVE' OR c.id IS NULL OR ${proAlive})`,
+        `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW() OR ${proAlive})`,
       ];
       const filterParams: unknown[] = [];
 
@@ -1083,7 +1109,7 @@ export async function advertRoutes(app: FastifyInstance) {
             ac.slug   AS category_slug,
             ac.icon   AS category_icon
           FROM advert_listings al
-          INNER JOIN campaigns c      ON c.id   = al.campaign_id
+          LEFT  JOIN campaigns c      ON c.id   = al.campaign_id
           LEFT  JOIN advert_listing_types  lt  ON lt.id   = al.listing_type_id
           LEFT  JOIN advert_subcategories  sub ON sub.id  = lt.subcategory_id
           LEFT  JOIN advert_categories     ac  ON ac.id   = sub.category_id
@@ -1094,7 +1120,7 @@ export async function advertRoutes(app: FastifyInstance) {
         query(`
           SELECT COUNT(*)::int AS total
           FROM advert_listings al
-          INNER JOIN campaigns c ON c.id = al.campaign_id
+          LEFT  JOIN campaigns c ON c.id = al.campaign_id
           LEFT  JOIN advert_listing_types  lt  ON lt.id  = al.listing_type_id
           LEFT  JOIN advert_subcategories  sub ON sub.id = lt.subcategory_id
           LEFT  JOIN advert_categories     ac  ON ac.id  = sub.category_id
@@ -1103,9 +1129,9 @@ export async function advertRoutes(app: FastifyInstance) {
         query(`
           SELECT COUNT(*)::int AS live_count
           FROM advert_listings al
-          INNER JOIN campaigns c ON c.id = al.campaign_id
+          LEFT  JOIN campaigns c ON c.id = al.campaign_id
           WHERE al.status = 'ACTIVE'
-            AND c.status  = 'ACTIVE'
+            AND (c.status = 'ACTIVE' OR c.id IS NULL)
             AND (al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())
         `, []),
       ]);
@@ -1193,17 +1219,21 @@ export async function advertRoutes(app: FastifyInstance) {
 
     try {
       const result = await withTransaction(async (client) => {
+        await ensureProSchemaOnce(client);
         const row = await client.query(`
           SELECT
             al.*,
             lt.name AS listing_type_name, lt.slug AS listing_type_slug,
             s.name AS subcategory_name, s.slug AS subcategory_slug,
-            c.name AS category_name, c.slug AS category_slug, c.icon AS category_icon,
-            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
+            cat.name AS category_name, cat.slug AS category_slug, cat.icon AS category_icon,
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
+            camp.user_id AS business_id,
+            ${proKeepAliveConditionSql('camp.user_id')} AS has_pro_subscription
           FROM advert_listings al
           JOIN advert_listing_types lt ON lt.id = al.listing_type_id
           JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories c ON c.id = s.category_id
+          JOIN advert_categories cat ON cat.id = s.category_id
+          LEFT JOIN campaigns camp ON camp.id = al.campaign_id
           WHERE al.slug = $1
         `, [slug]);
 
@@ -1262,9 +1292,10 @@ export async function advertRoutes(app: FastifyInstance) {
 
         // Enforce the buffered campaign window:
         // listing is inaccessible once campaign_end_at has passed,
-        // unless admin_keep_alive is set.
+        // unless admin_keep_alive is set or the business has an active Pro subscription.
         const timeRemainingSecs = Number(listing.time_remaining_secs ?? -1);
-        const isExpired = !listing.admin_keep_alive && timeRemainingSecs <= 0;
+        const hasProSubscription = listing.has_pro_subscription === true;
+        const isExpired = !listing.admin_keep_alive && !hasProSubscription && timeRemainingSecs <= 0;
 
         // Auto-expire in DB if needed
         if (isExpired && listing.status === 'ACTIVE') {
@@ -1320,8 +1351,10 @@ export async function advertRoutes(app: FastifyInstance) {
             gallery_media: galleryMedia,
             field_values: fieldValues,
             field_types: fieldTypes,
-            time_remaining_secs: Math.max(0, timeRemainingSecs),
+            // Pro subscribers have no countdown — return null so the client renders no timer
+            time_remaining_secs: hasProSubscription ? null : Math.max(0, timeRemainingSecs),
             business_id: undefined,
+            has_pro_subscription: undefined, // strip internal field from public response
           },
         };
       });
@@ -1355,26 +1388,33 @@ export async function advertRoutes(app: FastifyInstance) {
     const { slug } = request.params as { slug: string };
     try {
       const result = await withTransaction(async (client) => {
+        await ensureProSchemaOnce(client);
         const row = await client.query(`
           SELECT
-            id, status, admin_keep_alive, access_state,
-            campaign_start_at, campaign_end_at,
-            EXTRACT(EPOCH FROM (campaign_end_at - now()))::bigint AS time_remaining_secs
-          FROM advert_listings WHERE slug = $1
+            al.id, al.status, al.admin_keep_alive, al.access_state,
+            al.campaign_start_at, al.campaign_end_at,
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
+            ${proKeepAliveConditionSql('camp.user_id')} AS has_pro_subscription
+          FROM advert_listings al
+          LEFT JOIN campaigns camp ON camp.id = al.campaign_id
+          WHERE al.slug = $1
         `, [slug]);
         return row.rows[0] ?? null;
       });
       if (!result) return reply.code(404).send({ error: 'listing_not_found' });
       const accessState = String(result.access_state ?? 'PUBLIC').toUpperCase();
       const remaining = Number(result.time_remaining_secs ?? -1);
+      const hasProSub = result.has_pro_subscription === true;
       const isLive = accessState === 'PUBLIC' && (
         result.status === 'DRAFT' ||
         result.admin_keep_alive ||
+        hasProSub ||
         remaining > 0
       );
       return reply.send({
         is_live: isLive,
-        time_remaining_secs: Math.max(0, remaining),
+        // Pro subscribers have no countdown
+        time_remaining_secs: hasProSub ? null : Math.max(0, remaining),
         campaign_start_at: result.campaign_start_at,
         campaign_end_at: result.campaign_end_at,
         status: result.status,
@@ -3479,6 +3519,210 @@ export async function advertRoutes(app: FastifyInstance) {
          WHERE id=$1`, [session_id, bid.amount]);
 
       return reply.send({ agreed: true, agreed_price: parseFloat(bid.amount) });
+    });
+  });
+
+  // ── LISTING BOOSTS ────────────────────────────────────────────────────────
+
+  // GET /advert/listings/:slug/boost-options — returns available boost plans
+  app.get('/advert/listings/:slug/boost-options', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+
+    return withTransaction(async (client) => {
+      await ensureListingBoostSchema(client);
+      const listingRes = await client.query(
+        `SELECT al.id, al.status, al.access_state, al.boost_plan, al.boost_expires_at,
+                c.user_id AS business_id
+         FROM advert_listings al
+         JOIN campaigns c ON c.id = al.campaign_id
+         WHERE al.slug = $1
+         LIMIT 1`,
+        [slug]
+      );
+      const listing = listingRes.rows[0];
+      if (!listing) return reply.code(404).send({ error: 'listing_not_found' });
+      if (listing.business_id !== userId) return reply.code(403).send({ error: 'forbidden' });
+
+      const isPro = await hasActiveBusinessProSubscription(client, userId);
+      const options = buildListingBoostOptions(isPro);
+      const boostExpiresAt = listing.boost_expires_at ? new Date(listing.boost_expires_at) : null;
+      const isCurrentlyBoosted = boostExpiresAt != null && boostExpiresAt.getTime() > Date.now();
+
+      return {
+        is_pro: isPro,
+        is_currently_boosted: isCurrentlyBoosted,
+        boost_expires_at: listing.boost_expires_at ?? null,
+        current_boost_plan: listing.boost_plan ?? null,
+        options,
+      };
+    });
+  });
+
+  // POST /advert/listings/:slug/boost — initiates a boost payment
+  app.post('/advert/listings/:slug/boost', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+
+    if (!hasYoClientCredentials()) {
+      reply.code(503);
+      return { error: 'yo_uganda_not_configured' };
+    }
+
+    const body = (request.body as any) ?? {};
+    const planCode = String(body.plan_code ?? '').trim().toUpperCase();
+    const plan = resolveListingBoostPlan(planCode);
+    if (!plan) return reply.code(400).send({ error: 'invalid_boost_plan' });
+
+    const merchantReference = uuid();
+
+    return withTransaction(async (client) => {
+      const listingRes = await client.query(
+        `SELECT al.id, al.status, al.access_state, c.user_id AS business_id
+         FROM advert_listings al
+         JOIN campaigns c ON c.id = al.campaign_id
+         WHERE al.slug = $1
+         LIMIT 1`,
+        [slug]
+      );
+      const listing = listingRes.rows[0];
+      if (!listing) return reply.code(404).send({ error: 'listing_not_found' });
+      if (listing.business_id !== userId) return reply.code(403).send({ error: 'forbidden' });
+
+      const status = String(listing.status ?? '').trim().toUpperCase();
+      const accessState = String(listing.access_state ?? 'PUBLIC').trim().toUpperCase();
+      if (status !== 'ACTIVE' || accessState !== 'PUBLIC') {
+        return reply.code(400).send({ error: 'listing_boost_requires_active_listing' });
+      }
+
+      const isPro = await hasActiveBusinessProSubscription(client, userId);
+      const { amount_ugx: amountUgx } = resolveListingBoostPlan(planCode)!;
+      const discountedAmount = isPro
+        ? Math.max(0, Math.round(amountUgx * 0.8))
+        : amountUgx;
+
+      const userRes = await client.query(
+        'SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1',
+        [userId]
+      );
+      const user = userRes.rows[0];
+      const userCountry = (user?.country as string | undefined) ?? 'UG';
+      const userEmail = (user?.email as string | undefined) ?? '';
+      const userPhone = (user?.phone as string | undefined) ?? null;
+      const userName = (user?.full_name as string | undefined) ?? 'Business';
+
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
+        userCountry,
+        { cardEnabled: hasYoEncryptionKey() }
+      );
+
+      const rawPayload = {
+        kind: 'LISTING_BOOST',
+        user_id: userId,
+        listing_id: listing.id as string,
+        listing_slug: slug,
+        plan_code: planCode,
+        amount: discountedAmount,
+        currency: 'UGX',
+        is_pro_discounted: isPro,
+        country: checkoutProfile.country,
+        payment_options: checkoutProfile.paymentOptions,
+        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
+        customer: { email: userEmail, name: userName, phone_number: userPhone },
+      };
+
+      const paymentRepo = new PaymentRepo();
+      await paymentRepo.createPesaPalTransaction(client, {
+        escrow_id: undefined,
+        type: 'FUNDING',
+        amount: discountedAmount,
+        merchant_reference: merchantReference,
+        raw_payload: rawPayload,
+      });
+
+      const checkoutPayload = {
+        provider: 'YO_UGANDA',
+        mode: 'DIRECT_CHARGE',
+        tx_ref: merchantReference,
+        amount: discountedAmount,
+        currency: 'UGX',
+        payment_options: checkoutProfile.paymentOptions,
+        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+        phone_country_code: checkoutProfile.phoneCountryCode,
+        availability_notes: checkoutProfile.availabilityNotes,
+        country: checkoutProfile.country,
+        customer: { email: userEmail, name: userName, phone_number: userPhone },
+        meta: {
+          merchant_reference: merchantReference,
+          kind: 'LISTING_BOOST',
+          user_id: userId,
+          listing_id: listing.id as string,
+          plan_code: planCode,
+        },
+      };
+
+      return {
+        ok: true,
+        tx_ref: merchantReference,
+        amount: discountedAmount,
+        currency: 'UGX',
+        plan: plan,
+        is_pro_discounted: isPro,
+        checkout_payload: checkoutPayload,
+      };
+    });
+  });
+
+  // POST /advert/listings/:slug/boost/confirm — activates boost after payment
+  app.post('/advert/listings/:slug/boost/confirm', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+
+    const body = (request.body as any) ?? {};
+    const paymentReference = String(body.payment_reference ?? '').trim();
+    if (!paymentReference) return reply.code(400).send({ error: 'payment_reference_required' });
+
+    return withTransaction(async (client) => {
+      const txnRes = await client.query(
+        `SELECT raw_payload FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1`,
+        [paymentReference]
+      );
+      const rawPayload = (txnRes.rows[0]?.raw_payload ?? {}) as Record<string, unknown>;
+      const listingId = String(rawPayload.listing_id ?? '').trim();
+      const planCode = String(rawPayload.plan_code ?? '').trim();
+      const amountUgx = Number(rawPayload.amount ?? 0);
+
+      if (!listingId || !planCode) {
+        return reply.code(400).send({ error: 'invalid_payment_reference' });
+      }
+
+      const result = await activateListingBoost(client, {
+        listingId,
+        businessId: userId,
+        paymentReference,
+        planCode,
+        amountUgx,
+      });
+
+      const paymentRepo = new PaymentRepo();
+      try {
+        await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+      } catch (_) { /* non-fatal */ }
+
+      return { ok: true, boost: result };
     });
   });
 }

@@ -16,6 +16,8 @@ import {
 import { isDirectYoTaskUrl } from '@prime/shared';
 import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { queueSmsDispatch } from '../services/smsDispatch.js';
+import { markBusinessProSubscriptionPaid } from '../services/businessSubscriptions.js';
+import { activateListingBoost } from '../services/listingBoosts.js';
 
 const yoProviderReferenceInputKeys = [
   'transaction_id',
@@ -616,6 +618,95 @@ export async function paymentRoutes(app: FastifyInstance) {
       return { ok: true, pending: true, type: 'ambassador_subscription' };
     }
 
+    if (txKind === 'BUSINESS_PRO_SUBSCRIPTION') {
+      if (txn.status === 'COMPLETED') {
+        return { ok: true, duplicate: true, type: 'business_pro_subscription' };
+      }
+
+      if (statusSuccess.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'COMPLETED',
+          String(paymentEvent.transactionId)
+        );
+        const userId = String(txnPayload.user_id ?? '');
+        if (userId) {
+          await markBusinessProSubscriptionPaid(client, userId, String(paymentEvent.reference));
+        }
+        return { ok: true, type: 'business_pro_subscription', smsJobs: [] };
+      }
+
+      if (statusFailure.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'FAILED',
+          String(paymentEvent.transactionId)
+        );
+        return { ok: true, type: 'business_pro_subscription', smsJobs: [] };
+      }
+
+      await paymentRepo.updatePesaPalTxnStatus(
+        client,
+        String(paymentEvent.reference),
+        'PENDING',
+        String(paymentEvent.transactionId)
+      );
+      return { ok: true, pending: true, type: 'business_pro_subscription' };
+    }
+
+    if (txKind === 'LISTING_BOOST') {
+      if (txn.status === 'COMPLETED') {
+        return { ok: true, duplicate: true, type: 'listing_boost' };
+      }
+
+      if (statusSuccess.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'COMPLETED',
+          String(paymentEvent.transactionId)
+        );
+        const listingId = String(txnPayload.listing_id ?? '');
+        const businessId = String(txnPayload.user_id ?? '');
+        const planCode = String(txnPayload.plan_code ?? '');
+        const amountUgx = Number(txnPayload.amount ?? 0);
+        if (listingId && businessId && planCode) {
+          try {
+            await activateListingBoost(client, {
+              listingId,
+              businessId,
+              paymentReference: String(paymentEvent.reference),
+              planCode,
+              amountUgx,
+            });
+          } catch (e) {
+            // Log but don't block — listing may have expired; boost record is still recorded
+          }
+        }
+        return { ok: true, type: 'listing_boost', smsJobs: [] };
+      }
+
+      if (statusFailure.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'FAILED',
+          String(paymentEvent.transactionId)
+        );
+        return { ok: true, type: 'listing_boost', smsJobs: [] };
+      }
+
+      await paymentRepo.updatePesaPalTxnStatus(
+        client,
+        String(paymentEvent.reference),
+        'PENDING',
+        String(paymentEvent.transactionId)
+      );
+      return { ok: true, pending: true, type: 'listing_boost' };
+    }
+
     const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
     const escrow = escrowRows.rows[0];
     if (!escrow || Number(txn.amount ?? 0) !== Number(escrow.amount_total ?? 0)) {
@@ -1056,6 +1147,8 @@ export async function paymentRoutes(app: FastifyInstance) {
             const k = String(context.rawPayload.kind ?? '').toUpperCase();
             if (k === 'WALLET_DEPOSIT') return `Wallet deposit ${parsed.data.tx_ref}`;
             if (k === 'AMBASSADOR_SUBSCRIPTION') return `Ambassador subscription ${parsed.data.tx_ref}`;
+            if (k === 'BUSINESS_PRO_SUBSCRIPTION') return `Pro Prime subscription ${parsed.data.tx_ref}`;
+            if (k === 'LISTING_BOOST') return `Listing boost ${parsed.data.tx_ref}`;
             return `Campaign funding ${parsed.data.tx_ref}`;
           })(),
           reference: parsed.data.tx_ref,
@@ -1107,7 +1200,7 @@ export async function paymentRoutes(app: FastifyInstance) {
             chargeId ?? undefined
           );
           const failedKind = String(context.rawPayload.kind ?? '').toUpperCase();
-          if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION') {
+          if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION' || failedKind === 'BUSINESS_PRO_SUBSCRIPTION' || failedKind === 'LISTING_BOOST') {
             smsJobs = await planPaymentOutcomeNotification(client, {
               userId: authUser,
               txRef: parsed.data.tx_ref,

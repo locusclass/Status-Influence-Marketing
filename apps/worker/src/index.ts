@@ -2140,12 +2140,20 @@ async function expireEndedAdvertListingsIfDue() {
   (expireEndedAdvertListingsIfDue as any).__lastAt = Date.now();
 
   const { rowCount } = await pool.query(`
-    UPDATE advert_listings
+    UPDATE advert_listings al
     SET status = 'EXPIRED', updated_at = now()
-    WHERE status = 'ACTIVE'
-      AND admin_keep_alive = FALSE
-      AND campaign_end_at IS NOT NULL
-      AND campaign_end_at < now()
+    WHERE al.status = 'ACTIVE'
+      AND al.admin_keep_alive = FALSE
+      AND al.campaign_end_at IS NOT NULL
+      AND al.campaign_end_at < now()
+      AND NOT EXISTS (
+        SELECT 1
+        FROM campaigns c
+        JOIN business_pro_subscriptions bps ON bps.business_id = c.user_id
+        WHERE c.id = al.campaign_id
+          AND bps.valid_until > now()
+          AND (bps.is_waived = TRUE OR bps.paid_at IS NOT NULL)
+      )
   `);
 
   if ((rowCount ?? 0) > 0) {

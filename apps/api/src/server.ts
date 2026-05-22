@@ -52,6 +52,7 @@ import {
   tenantAdminRoutes,
   advertRoutes,
 } from './routes/index.js';
+import { marketplaceRoutes } from './routes/marketplace.js';
 import {
   ensureUserSignalSchema,
   touchUserPresence,
@@ -420,6 +421,7 @@ export function buildServer() {
     instance.register(adminRoutes);
     instance.register(tenantAdminRoutes);
     instance.register(advertRoutes);
+    instance.register(marketplaceRoutes);
   };
 
   // Routes
