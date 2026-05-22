@@ -1044,15 +1044,13 @@ export async function advertRoutes(app: FastifyInstance) {
     const offset  = (page - 1) * limit;
 
     try {
-      // Ensure business_pro_subscriptions table exists before we reference it in the WHERE clause.
-      // proSchemaEnsured is a module-level flag, so this round-trip only happens once per process.
-      await withTransaction(async (client) => { await ensureProSchemaOnce(client); });
-
-      const proAlive = proKeepAliveConditionSql('c.user_id');
       const conditions: string[] = [
         `al.status = 'ACTIVE'`,
-        `(c.status = 'ACTIVE' OR c.id IS NULL OR ${proAlive})`,
-        `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW() OR ${proAlive})`,
+        `al.access_state = 'PUBLIC'`,
+        // Direct listings (no campaign) and admin/Pro-kept-alive listings always pass.
+        `(c.status = 'ACTIVE' OR c.id IS NULL OR al.admin_keep_alive = TRUE)`,
+        // Show listing if campaign window is open, OR there is no end date, OR it's kept alive.
+        `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW() OR al.admin_keep_alive = TRUE)`,
       ];
       const filterParams: unknown[] = [];
 
