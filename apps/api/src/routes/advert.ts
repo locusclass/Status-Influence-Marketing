@@ -1221,21 +1221,17 @@ export async function advertRoutes(app: FastifyInstance) {
 
     try {
       const result = await withTransaction(async (client) => {
-        await ensureProSchemaOnce(client);
         const row = await client.query(`
           SELECT
             al.*,
             lt.name AS listing_type_name, lt.slug AS listing_type_slug,
             s.name AS subcategory_name, s.slug AS subcategory_slug,
-            cat.name AS category_name, cat.slug AS category_slug, cat.icon AS category_icon,
-            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
-            camp.user_id AS business_id,
-            ${proKeepAliveConditionSql('camp.user_id')} AS has_pro_subscription
+            c.name AS category_name, c.slug AS category_slug, c.icon AS category_icon,
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
           FROM advert_listings al
           JOIN advert_listing_types lt ON lt.id = al.listing_type_id
           JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories cat ON cat.id = s.category_id
-          LEFT JOIN campaigns camp ON camp.id = al.campaign_id
+          JOIN advert_categories c ON c.id = s.category_id
           WHERE al.slug = $1
         `, [slug]);
 
@@ -1296,7 +1292,9 @@ export async function advertRoutes(app: FastifyInstance) {
         // listing is inaccessible once campaign_end_at has passed,
         // unless admin_keep_alive is set or the business has an active Pro subscription.
         const timeRemainingSecs = Number(listing.time_remaining_secs ?? -1);
-        const hasProSubscription = listing.has_pro_subscription === true;
+        const hasProSubscription = listing.business_id
+          ? await hasActiveBusinessProSubscription(client, String(listing.business_id))
+          : false;
         const isExpired = !listing.admin_keep_alive && !hasProSubscription && timeRemainingSecs <= 0;
 
         // Auto-expire in DB if needed
@@ -1356,7 +1354,6 @@ export async function advertRoutes(app: FastifyInstance) {
             // Pro subscribers have no countdown — return null so the client renders no timer
             time_remaining_secs: hasProSubscription ? null : Math.max(0, timeRemainingSecs),
             business_id: undefined,
-            has_pro_subscription: undefined, // strip internal field from public response
           },
         };
       });
@@ -1390,18 +1387,20 @@ export async function advertRoutes(app: FastifyInstance) {
     const { slug } = request.params as { slug: string };
     try {
       const result = await withTransaction(async (client) => {
-        await ensureProSchemaOnce(client);
         const row = await client.query(`
           SELECT
-            al.id, al.status, al.admin_keep_alive, al.access_state,
+            al.id, al.business_id, al.status, al.admin_keep_alive, al.access_state,
             al.campaign_start_at, al.campaign_end_at,
-            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
-            ${proKeepAliveConditionSql('camp.user_id')} AS has_pro_subscription
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
           FROM advert_listings al
-          LEFT JOIN campaigns camp ON camp.id = al.campaign_id
           WHERE al.slug = $1
         `, [slug]);
-        return row.rows[0] ?? null;
+        const r = row.rows[0];
+        if (!r) return null;
+        const hasProSub = r.business_id
+          ? await hasActiveBusinessProSubscription(client, String(r.business_id))
+          : false;
+        return { ...r, has_pro_subscription: hasProSub };
       });
       if (!result) return reply.code(404).send({ error: 'listing_not_found' });
       const accessState = String(result.access_state ?? 'PUBLIC').toUpperCase();
@@ -1415,7 +1414,6 @@ export async function advertRoutes(app: FastifyInstance) {
       );
       return reply.send({
         is_live: isLive,
-        // Pro subscribers have no countdown
         time_remaining_secs: hasProSub ? null : Math.max(0, remaining),
         campaign_start_at: result.campaign_start_at,
         campaign_end_at: result.campaign_end_at,
