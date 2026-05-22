@@ -1044,6 +1044,10 @@ export async function advertRoutes(app: FastifyInstance) {
     const offset  = (page - 1) * limit;
 
     try {
+      // Ensure business_pro_subscriptions table exists before we reference it in the WHERE clause.
+      // proSchemaEnsured is a module-level flag, so this round-trip only happens once per process.
+      await withTransaction(async (client) => { await ensureProSchemaOnce(client); });
+
       const proAlive = proKeepAliveConditionSql('c.user_id');
       const conditions: string[] = [
         `al.status = 'ACTIVE'`,
