@@ -73,6 +73,7 @@ const createListingSchema = z.object({
     )
     .max(10)
     .default([]),
+  content_blocks: z.array(z.record(z.any())).optional().default([]),
 });
 
 const patchListingSchema = createListingSchema.partial().omit({ listing_type_id: true });
@@ -80,6 +81,13 @@ const patchListingSchema = createListingSchema.partial().omit({ listing_type_id:
 // ─────────────────────────────────────────────
 // ROUTE REGISTRATION
 // ─────────────────────────────────────────────
+
+let contentBlocksColumnEnsured = false;
+async function ensureContentBlocksColumn(client: any) {
+  if (contentBlocksColumnEnsured) return;
+  await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS content_blocks JSONB`);
+  contentBlocksColumnEnsured = true;
+}
 
 export async function marketplaceRoutes(app: FastifyInstance) {
 
@@ -279,6 +287,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       const slug      = generateListingSlug(body.title);
 
       await withTransaction(async (client) => {
+        await ensureContentBlocksColumn(client);
         await client.query(
           `INSERT INTO advert_listings (
             id, campaign_id, business_id, listing_type_id, slug,
@@ -286,14 +295,14 @@ export async function marketplaceRoutes(app: FastifyInstance) {
             is_negotiable, location_text,
             cta_whatsapp, cta_phone, cta_email, cta_url,
             status, access_state, admin_keep_alive, campaign_end_at,
-            listing_quality_score
+            listing_quality_score, content_blocks
           ) VALUES (
             $1, NULL, $2, $3, $4,
             $5, $6, $7, $8, $9,
             $10, $11,
             $12, $13, $14, $15,
             'ACTIVE', 'PUBLIC', TRUE, NULL,
-            $16
+            $16, $17
           )`,
           [
             listingId, userId, body.listing_type_id, slug,
@@ -303,6 +312,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
             body.cta_whatsapp ?? null, body.cta_phone ?? null,
             body.cta_email ?? null, body.cta_url ?? null,
             qualityScore,
+            JSON.stringify(body.content_blocks),
           ]
         );
 
@@ -425,6 +435,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       if (body.cta_phone !== undefined)     addField('cta_phone', body.cta_phone ?? null);
       if (body.cta_email !== undefined)     addField('cta_email', body.cta_email ?? null);
       if (body.cta_url !== undefined)       addField('cta_url', body.cta_url ?? null);
+      if (body.content_blocks !== undefined) addField('content_blocks', JSON.stringify(body.content_blocks));
 
       sets.push(`updated_at = NOW()`);
 
