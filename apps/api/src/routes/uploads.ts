@@ -17,6 +17,7 @@ const VALID_PURPOSES = new Set([
   'campaign_gallery',
   'campaign_video',
   'landing_page_media',
+  'listing_media',
   'ambassador_proof_screenshot',
   'ambassador_proof_screen_recording',
   'user_avatar',
@@ -35,6 +36,7 @@ const SIZE_LIMITS: Record<string, number> = {
   campaign_gallery:                  10 * 1024 * 1024,
   campaign_video:                    100 * 1024 * 1024,
   landing_page_media:                100 * 1024 * 1024,
+  listing_media:                     200 * 1024 * 1024,
   ambassador_proof_screenshot:       10 * 1024 * 1024,
   ambassador_proof_screen_recording: 250 * 1024 * 1024,
   user_avatar:                       5  * 1024 * 1024,
@@ -48,6 +50,7 @@ const ALLOWED_MIMES: Record<string, string[]> = {
   campaign_gallery:                  ['image/'],
   campaign_video:                    ['video/'],
   landing_page_media:                ['image/', 'video/'],
+  listing_media:                     ['image/', 'video/', 'audio/'],
   ambassador_proof_screenshot:       ['image/'],
   ambassador_proof_screen_recording: ['video/'],
   user_avatar:                       ['image/'],
@@ -78,6 +81,7 @@ function isMimeAllowed(mime: string, purpose: string): boolean {
 function assetTypeFromMime(mime: string): string {
   if (mime.startsWith('video/')) return 'video';
   if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('audio/')) return 'audio';
   return 'document';
 }
 
@@ -92,6 +96,9 @@ function storagePath(purpose: string, userId: string, fileId: string, filename: 
   }
   if (purpose === 'admin_attachment') {
     return `admin/${userId}/${name}`;
+  }
+  if (purpose === 'listing_media') {
+    return `listings/media/${name}`;
   }
   return `campaigns/media/${name}`;
 }
