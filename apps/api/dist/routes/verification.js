@@ -327,6 +327,8 @@ export async function verificationRoutes(app) {
                 meta: body.client_meta ?? null
             });
             await verificationRepo.insertDeviceFingerprint(client, authUser, fingerprintHash);
+            await client.query(`INSERT INTO job_queue (id, job_type, payload, status, run_at)
+         VALUES (gen_random_uuid(), 'VERIFY_PROOF', $1, 'QUEUED', now())`, [JSON.stringify({ proof_id: created.id })]);
             return created;
         });
         if (proof.error) {
