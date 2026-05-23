@@ -1407,7 +1407,20 @@ async function processVerificationJob(job) {
         }
         tempVideoPath = await downloadToTemp(videoUrl);
         const tamper = await runTamperChecks(tempVideoPath);
-        const result = await verifier.verify(tempVideoPath, { platform: campaign.platform, title: campaign.title }, { challenge_code: session.challenge_code, challenge_phrase: session.challenge_phrase });
+        // Resolve campaign media URL to absolute so the verifier can download it
+        let campaignMediaUrl = campaign.media_url ?? null;
+        if (campaignMediaUrl &&
+            (campaignMediaUrl.startsWith('/uploads/files/') ||
+                campaignMediaUrl.startsWith('/api/uploads/files/'))) {
+            campaignMediaUrl = (process.env.API_BASE_URL ?? '') + campaignMediaUrl;
+        }
+        const result = await verifier.verify(tempVideoPath, {
+            platform: campaign.platform,
+            title: campaign.title,
+            media_type: campaign.media_type ?? null,
+            media_text: campaign.media_text ?? null,
+            media_url: campaignMediaUrl,
+        }, { challenge_code: session.challenge_code, challenge_phrase: session.challenge_phrase });
         // meta may be { script, client_meta } or directly contain script steps as an array
         const script = Array.isArray(proof.meta)
             ? proof.meta

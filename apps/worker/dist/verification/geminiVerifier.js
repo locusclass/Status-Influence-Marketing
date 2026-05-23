@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
+import { fetch } from 'undici';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 function run(cmd, args) {
     return new Promise((resolve, reject) => {
@@ -39,26 +40,102 @@ async function getVideoDuration(videoPath) {
         p.on('close', () => resolve(parseFloat(out.trim()) || 0));
     });
 }
-function buildPrompt(campaignSpec, challenge) {
+/** Download a URL and return raw bytes, capped at 20 MB. */
+async function fetchBytes(url) {
+    try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+        if (!res.ok)
+            return null;
+        const chunks = [];
+        let total = 0;
+        for await (const chunk of res.body) {
+            const buf = Buffer.from(chunk);
+            total += buf.length;
+            if (total > 20 * 1024 * 1024)
+                return null; // too large
+            chunks.push(buf);
+        }
+        return Buffer.concat(chunks);
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Download the campaign creative and return an inline Gemini image part.
+ * For IMAGE media: download directly.
+ * For VIDEO media: extract the first frame via ffmpeg.
+ * Returns null if the media cannot be fetched or processed.
+ */
+async function buildCampaignMediaPart(mediaType, mediaUrl, tmpDir) {
+    if (!mediaUrl)
+        return null;
+    if (mediaType === 'IMAGE') {
+        const bytes = await fetchBytes(mediaUrl);
+        if (!bytes)
+            return null;
+        // Detect JPEG vs PNG by magic bytes
+        const mimeType = bytes[0] === 0xff && bytes[1] === 0xd8 ? 'image/jpeg' : 'image/png';
+        return { inlineData: { mimeType, data: bytes.toString('base64') } };
+    }
+    if (mediaType === 'VIDEO') {
+        // Download video to temp, extract first frame
+        const bytes = await fetchBytes(mediaUrl);
+        if (!bytes)
+            return null;
+        const videoTmp = path.join(tmpDir, 'campaign_video.mp4');
+        const frameTmp = path.join(tmpDir, 'campaign_frame.jpg');
+        await fs.promises.writeFile(videoTmp, bytes);
+        try {
+            await extractFrameAt(videoTmp, 0, frameTmp);
+            const frameData = await fs.promises.readFile(frameTmp);
+            return { inlineData: { mimeType: 'image/jpeg', data: frameData.toString('base64') } };
+        }
+        catch {
+            return null;
+        }
+    }
+    return null;
+}
+function buildPrompt(campaignSpec, challenge, hasCampaignMedia) {
+    const mediaType = campaignSpec?.media_type ?? 'UNKNOWN';
+    const mediaText = campaignSpec?.media_text ?? null;
+    const mediaDescription = mediaType === 'TEXT' && mediaText
+        ? `Campaign ad content (TEXT): "${mediaText}"`
+        : hasCampaignMedia
+            ? `The first image provided is the CAMPAIGN REFERENCE IMAGE — this is the actual ad creative the ambassador was supposed to post as their WhatsApp Status.`
+            : `No campaign media reference is available. Assess based on campaign title only.`;
+    const proofFrameNote = hasCampaignMedia
+        ? `The remaining images are PROOF FRAMES extracted from the ambassador's screen recording.`
+        : `The images are PROOF FRAMES extracted from the ambassador's screen recording.`;
     return `You are verifying a WhatsApp Status advertising proof video for Prime Status. The ambassador is paid based on verified views.
 
-Campaign: ${campaignSpec?.title ?? 'Unknown'}
+CAMPAIGN DETAILS
+Title: ${campaignSpec?.title ?? 'Unknown'}
 Platform: ${campaignSpec?.platform ?? 'Unknown'}
-Challenge code: ${challenge?.challenge_code ?? ''}
-Challenge phrase: ${challenge?.challenge_phrase ?? ''}
+Media type: ${mediaType}
+${mediaDescription}
 
-Inspect the provided frames carefully. Determine:
-1. Whether the recording shows the real WhatsApp status viewer count.
-2. Whether the campaign media is visible and matches the expected content.
-3. Whether the UI is genuine WhatsApp (not a mock/editor).
-4. Whether there are signs of tampering.
+PROOF RECORDING
+${proofFrameNote}
 
-Required evidence checklist:
-- WhatsApp status viewer count screen visible
-- Viewer count number clearly readable
-- Campaign/ad content visible in the recording
-- Challenge code "${challenge?.challenge_code ?? ''}" visible somewhere in the frames
-- Challenge phrase "${challenge?.challenge_phrase ?? ''}" visible somewhere in the frames
+Challenge code the ambassador must display: "${challenge?.challenge_code ?? ''}"
+Challenge phrase the ambassador must speak/show: "${challenge?.challenge_phrase ?? ''}"
+
+YOUR TASK
+Carefully examine all provided images and determine:
+1. Does the proof recording show the real WhatsApp Status viewer count screen?
+2. Is the campaign ad creative (the content the ambassador posted) visible in the recording${hasCampaignMedia || mediaText ? ' and does it match the reference provided above' : ''}?
+3. Is the UI genuinely WhatsApp (not a mock, editor, or photo of a screen)?
+4. Are the challenge code and phrase visible in the recording?
+5. Are there any signs of tampering, editing, frozen frames, overlays, or AI-generated content?
+
+REQUIRED EVIDENCE CHECKLIST
+- WhatsApp Status viewer count screen clearly visible
+- Viewer count number legible
+- Campaign ad content visible in the recording${hasCampaignMedia || mediaText ? ' and matching the reference creative' : ''}
+- Challenge code "${challenge?.challenge_code ?? ''}" present in the frames
+- Challenge phrase "${challenge?.challenge_phrase ?? ''}" present in the frames
 
 Return ONLY valid JSON with no markdown, matching exactly this schema:
 {
@@ -101,7 +178,9 @@ export class GeminiVerifier {
         const duration = await getVideoDuration(videoPath);
         const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gm-gemini-'));
         try {
-            // Determine frame extraction seconds
+            // ── Campaign media reference ──────────────────────────────────────────
+            const campaignMediaPart = await buildCampaignMediaPart(campaignSpec?.media_type ?? null, campaignSpec?.media_url ?? null, tmpDir);
+            // ── Proof frames ──────────────────────────────────────────────────────
             let frameTimes;
             if (duration > 0 && duration < 50) {
                 const mid = Math.max(1, Math.round(duration / 2));
@@ -111,8 +190,7 @@ export class GeminiVerifier {
             else {
                 frameTimes = [10, 30, 50];
             }
-            // Extract frames (skip a timestamp if video is too short for it)
-            const frameDataParts = [];
+            const proofFrameParts = [];
             for (let i = 0; i < frameTimes.length; i++) {
                 const t = frameTimes[i] ?? 0;
                 if (duration > 0 && t >= duration)
@@ -121,30 +199,29 @@ export class GeminiVerifier {
                 try {
                     await extractFrameAt(videoPath, t, outPath);
                     const data = await fs.promises.readFile(outPath);
-                    frameDataParts.push({
-                        inlineData: {
-                            mimeType: 'image/jpeg',
-                            data: data.toString('base64'),
-                        },
-                    });
+                    proofFrameParts.push({ inlineData: { mimeType: 'image/jpeg', data: data.toString('base64') } });
                 }
                 catch {
-                    // If a frame can't be extracted, skip it
+                    // skip unextractable frame
                 }
             }
-            if (frameDataParts.length === 0) {
+            if (proofFrameParts.length === 0) {
                 throw new Error('no_frames_extracted');
             }
+            // ── Build content parts: [prompt, campaign ref (if any), proof frames] ─
+            const hasCampaignMedia = campaignMediaPart !== null;
+            const promptText = buildPrompt(campaignSpec, challenge, hasCampaignMedia);
+            const contentParts = [
+                promptText,
+                ...(hasCampaignMedia ? [campaignMediaPart] : []),
+                ...proofFrameParts,
+            ];
+            // ── Call Gemini ───────────────────────────────────────────────────────
             const genAI = new GoogleGenerativeAI(apiKey);
             const model = genAI.getGenerativeModel({ model: modelName });
-            const promptText = buildPrompt(campaignSpec, challenge);
             const attemptParse = async () => {
-                const result = await model.generateContent([
-                    promptText,
-                    ...frameDataParts,
-                ]);
+                const result = await model.generateContent(contentParts);
                 const text = result.response.text().trim();
-                // Strip possible markdown fences
                 const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
                 return JSON.parse(cleaned);
             };
@@ -153,9 +230,9 @@ export class GeminiVerifier {
                 geminiResponse = await attemptParse();
             }
             catch {
-                // Retry once on parse failure
                 geminiResponse = await attemptParse();
             }
+            // ── Map response to WorkerVerificationResult ──────────────────────────
             const challengeCode = String(challenge?.challenge_code ?? '').trim();
             const challengePhrase = String(challenge?.challenge_phrase ?? '').trim();
             const missingEvidence = Array.isArray(geminiResponse.missing_evidence)
@@ -166,13 +243,12 @@ export class GeminiVerifier {
                 !missingEvidence.some((m) => typeof m === 'string' &&
                     (m.toLowerCase().includes('challenge code') ||
                         m.toLowerCase().includes('challenge phrase')));
-            const decision = mapToDecision(geminiResponse);
             return {
                 observed_views: geminiResponse.viewer_count_detected ?? 0,
                 observed_post_hash: null,
                 challenge_seen: challengeSeen,
                 confidence: geminiResponse.screen_recording_authenticity_score,
-                decision,
+                decision: mapToDecision(geminiResponse),
                 verifier_report: geminiResponse,
             };
         }

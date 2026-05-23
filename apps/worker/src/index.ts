@@ -1846,9 +1846,25 @@ async function processVerificationJob(job: any) {
 
     const tamper = await runTamperChecks(tempVideoPath);
 
+    // Resolve campaign media URL to absolute so the verifier can download it
+    let campaignMediaUrl: string | null = campaign.media_url ?? null;
+    if (
+      campaignMediaUrl &&
+      (campaignMediaUrl.startsWith('/uploads/files/') ||
+        campaignMediaUrl.startsWith('/api/uploads/files/'))
+    ) {
+      campaignMediaUrl = (process.env.API_BASE_URL ?? '') + campaignMediaUrl;
+    }
+
     const result = await verifier.verify(
       tempVideoPath,
-      { platform: campaign.platform, title: campaign.title },
+      {
+        platform: campaign.platform,
+        title: campaign.title,
+        media_type: campaign.media_type ?? null,
+        media_text: campaign.media_text ?? null,
+        media_url: campaignMediaUrl,
+      },
       { challenge_code: session.challenge_code, challenge_phrase: session.challenge_phrase }
     );
 
