@@ -1831,4 +1831,216 @@ export async function advertRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });
+
+  // ─── MARKETPLACE: DIRECT PRODUCT-PAGE LISTINGS ──────────────────────────────
+  // These routes serve the mobile product-page builder (listing_block_builder_screen).
+  // They are intentionally lenient: no listing_type_id, no campaign_id, accepts
+  // content_blocks JSON and an `images` array matching the Flutter payload shape.
+
+  // POST /api/marketplace/listings — Create a direct product-page listing
+  app.post('/marketplace/listings', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+
+    const bodySchema = z.object({
+      title:          z.string().min(3).max(150),
+      summary:        z.string().min(10).max(500),
+      description:    z.string().min(1).max(10000).optional().nullable(),
+      content_blocks: z.array(z.any()).default([]),
+      price:          z.number().positive().optional().nullable(),
+      currency:       z.string().default('UGX'),
+      is_negotiable:  z.boolean().default(false),
+      location_text:  z.string().max(200).optional().nullable(),
+      cta_whatsapp:   z.string().optional().nullable(),
+      cta_phone:      z.string().optional().nullable(),
+      cta_email:      z.string().optional().nullable(),
+      cta_url:        z.string().optional().nullable(),
+      images: z.array(z.object({
+        url:        z.string().url(),
+        media_type: z.string().default('IMAGE'),
+      })).default([]),
+      draft_mode: z.boolean().optional(),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: 'validation_error', details: err.errors ?? err.message });
+    }
+
+    try {
+      const listing = await withTransaction(async (client) => {
+        const userRow = await client.query(
+          `SELECT id, role, active_role FROM users WHERE id = $1`, [userId]
+        );
+        if (!userRow.rows[0]) throw Object.assign(new Error('user_not_found'), { statusCode: 404 });
+        if (!canAccessBusinessFeatures(userRow.rows[0])) {
+          throw Object.assign(new Error('business_role_required'), { statusCode: 403 });
+        }
+
+        let slug = generateListingSlug(body.title);
+        const slugCheck = await client.query(
+          `SELECT id FROM advert_listings WHERE slug = $1`, [slug]
+        );
+        if (slugCheck.rows.length > 0) {
+          slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
+        }
+
+        const description = (body.description && body.description.trim()) || body.summary;
+
+        const listingRow = await client.query(`
+          INSERT INTO advert_listings (
+            id, campaign_id, business_id, listing_type_id, slug,
+            title, summary, description, content_blocks, price, currency,
+            is_negotiable, location_text,
+            cta_whatsapp, cta_phone, cta_email, cta_url,
+            status, listing_quality_score
+          ) VALUES (
+            $1, NULL, $2, NULL, $3,
+            $4, $5, $6, $7::jsonb, $8, $9,
+            $10, $11,
+            $12, $13, $14, $15,
+            'DRAFT', 0
+          ) RETURNING *
+        `, [
+          uuid(), userId, slug,
+          body.title, body.summary, description,
+          JSON.stringify(body.content_blocks),
+          body.price ?? null, body.currency,
+          body.is_negotiable, body.location_text || null,
+          body.cta_whatsapp || null, body.cta_phone || null,
+          body.cta_email   || null, body.cta_url   || null,
+        ]);
+
+        const listingId = listingRow.rows[0].id;
+
+        const galleryItems = body.images.filter(i => i.url);
+        if (galleryItems.length > 0) {
+          const params: any[] = [];
+          const rowPlaceholders = galleryItems.map((m, i) => {
+            const b = i * 6;
+            const mt = (m.media_type ?? 'IMAGE').toUpperCase();
+            const validType = (['IMAGE','VIDEO','DOCUMENT'] as string[]).includes(mt) ? mt : 'IMAGE';
+            params.push(uuid(), listingId, 'PRODUCT_GALLERY', validType, m.url, i);
+            return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6})`;
+          });
+          await client.query(`
+            INSERT INTO advert_media (id, listing_id, media_pack, media_type, url, sort_order)
+            VALUES ${rowPlaceholders.join(',')}
+          `, params);
+        }
+
+        return listingRow.rows[0];
+      });
+
+      return reply.code(201).send({ listing, slug: listing.slug });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'marketplace.listing.create.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // PATCH /api/marketplace/listings/:slug — Update a direct product-page listing
+  app.patch('/marketplace/listings/:slug', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    const { slug } = request.params as { slug: string };
+
+    const bodySchema = z.object({
+      title:          z.string().min(3).max(150).optional(),
+      summary:        z.string().min(10).max(500).optional(),
+      description:    z.string().min(1).max(10000).optional().nullable(),
+      content_blocks: z.array(z.any()).optional(),
+      price:          z.number().positive().optional().nullable(),
+      currency:       z.string().optional(),
+      is_negotiable:  z.boolean().optional(),
+      location_text:  z.string().max(200).optional().nullable(),
+      cta_whatsapp:   z.string().optional().nullable(),
+      cta_phone:      z.string().optional().nullable(),
+      cta_email:      z.string().optional().nullable(),
+      cta_url:        z.string().optional().nullable(),
+      images: z.array(z.object({
+        url:        z.string().url(),
+        media_type: z.string().default('IMAGE'),
+      })).optional(),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: 'validation_error', details: err.errors ?? err.message });
+    }
+
+    try {
+      const updated = await withTransaction(async (client) => {
+        const existing = await client.query(
+          `SELECT id, business_id FROM advert_listings WHERE slug = $1`, [slug]
+        );
+        if (!existing.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
+        if (existing.rows[0].business_id !== userId) {
+          throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+        }
+        const listingId = existing.rows[0].id;
+
+        const sets: string[] = [];
+        const values: any[] = [];
+        let pIdx = 1;
+
+        if (body.title          !== undefined) { sets.push(`title = $${pIdx++}`);                 values.push(body.title); }
+        if (body.summary        !== undefined) { sets.push(`summary = $${pIdx++}`);               values.push(body.summary); }
+        if (body.description    !== undefined) { sets.push(`description = $${pIdx++}`);           values.push(body.description || body.summary); }
+        if (body.content_blocks !== undefined) { sets.push(`content_blocks = $${pIdx++}::jsonb`); values.push(JSON.stringify(body.content_blocks)); }
+        if (body.price          !== undefined) { sets.push(`price = $${pIdx++}`);                 values.push(body.price ?? null); }
+        if (body.currency       !== undefined) { sets.push(`currency = $${pIdx++}`);              values.push(body.currency); }
+        if (body.is_negotiable  !== undefined) { sets.push(`is_negotiable = $${pIdx++}`);         values.push(body.is_negotiable); }
+        if (body.location_text  !== undefined) { sets.push(`location_text = $${pIdx++}`);         values.push(body.location_text || null); }
+        if (body.cta_whatsapp   !== undefined) { sets.push(`cta_whatsapp = $${pIdx++}`);          values.push(body.cta_whatsapp || null); }
+        if (body.cta_phone      !== undefined) { sets.push(`cta_phone = $${pIdx++}`);             values.push(body.cta_phone || null); }
+        if (body.cta_email      !== undefined) { sets.push(`cta_email = $${pIdx++}`);             values.push(body.cta_email || null); }
+        if (body.cta_url        !== undefined) { sets.push(`cta_url = $${pIdx++}`);               values.push(body.cta_url || null); }
+        sets.push(`updated_at = now()`);
+
+        values.push(listingId);
+        const res = await client.query(
+          `UPDATE advert_listings SET ${sets.join(', ')} WHERE id = $${pIdx} RETURNING *`,
+          values
+        );
+
+        if (body.images !== undefined) {
+          await client.query(
+            `DELETE FROM advert_media WHERE listing_id = $1 AND media_pack = 'PRODUCT_GALLERY'`,
+            [listingId]
+          );
+          const galleryItems = body.images.filter(i => i.url);
+          if (galleryItems.length > 0) {
+            const params: any[] = [];
+            const rowPlaceholders = galleryItems.map((m, i) => {
+              const b = i * 6;
+              const mt = (m.media_type ?? 'IMAGE').toUpperCase();
+              const validType = (['IMAGE','VIDEO','DOCUMENT'] as string[]).includes(mt) ? mt : 'IMAGE';
+              params.push(uuid(), listingId, 'PRODUCT_GALLERY', validType, m.url, i);
+              return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6})`;
+            });
+            await client.query(`
+              INSERT INTO advert_media (id, listing_id, media_pack, media_type, url, sort_order)
+              VALUES ${rowPlaceholders.join(',')}
+            `, params);
+          }
+        }
+
+        return res.rows[0];
+      });
+
+      return reply.code(200).send({ listing: updated });
+    } catch (err: any) {
+      if (err.statusCode) return reply.code(err.statusCode).send({ error: err.message });
+      app.log.error(err, 'marketplace.listing.update.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
 }
