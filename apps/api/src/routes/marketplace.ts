@@ -87,14 +87,6 @@ async function ensureContentBlocksColumn(client: any) {
   if (schemaEnsured) return;
   await client.query(`ALTER TABLE advert_listings ADD COLUMN IF NOT EXISTS content_blocks JSONB`);
   await client.query(`ALTER TABLE advert_listings ALTER COLUMN listing_type_id DROP NOT NULL`);
-  await client.query(
-    `ALTER TABLE advert_listings
-       ADD COLUMN IF NOT EXISTS preview_token UUID NOT NULL DEFAULT gen_random_uuid()`
-  );
-  await client.query(
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_advert_listings_preview_token
-       ON advert_listings(preview_token)`
-  );
   schemaEnsured = true;
 }
 
@@ -235,6 +227,49 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       };
     } catch (err) {
       app.log.error(err, 'marketplace.listings.browse.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ── GET /marketplace/listings/:slug ─────────────────────────────────────
+  app.get('/marketplace/listings/:slug', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    try {
+      const rows = await query<any>(
+        `SELECT
+          al.*,
+          u.full_name AS business_name,
+          lt.name  AS listing_type_name,
+          sub.name AS subcategory_name,
+          cat.name AS category_name,
+          cat.id   AS category_id,
+          cat.icon AS category_icon,
+          sub.id   AS subcategory_id,
+          EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
+        FROM advert_listings al
+        JOIN  users u                       ON u.id   = al.business_id
+        LEFT JOIN advert_listing_types  lt  ON lt.id  = al.listing_type_id
+        LEFT JOIN advert_subcategories  sub ON sub.id = lt.subcategory_id
+        LEFT JOIN advert_categories     cat ON cat.id = sub.category_id
+        WHERE al.slug = $1
+          AND al.status = 'ACTIVE'
+          AND al.access_state = 'PUBLIC'`,
+        [slug]
+      );
+      if (!rows[0]) return reply.code(404).send({ error: 'listing_not_found' });
+
+      const listing = rows[0];
+      const media = await query<any>(
+        `SELECT id, media_pack, media_type, url, thumbnail_url, file_name, sort_order
+         FROM advert_media WHERE listing_id = $1
+         ORDER BY CASE media_pack WHEN 'AMBASSADOR_PACK' THEN 0 ELSE 1 END, sort_order ASC`,
+        [listing.id]
+      );
+
+      reply.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+      return { listing, media };
+    } catch (err) {
+      app.log.error(err, 'marketplace.listings.detail.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });

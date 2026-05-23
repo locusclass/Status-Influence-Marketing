@@ -2348,9 +2348,9 @@ export async function advertRoutes(app: FastifyInstance) {
           FROM advert_listings al
           JOIN users u ON u.id = al.business_id
           LEFT JOIN campaigns c ON c.id = al.campaign_id
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories cat ON cat.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          LEFT JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          LEFT JOIN advert_categories cat ON cat.id = s.category_id
           WHERE al.slug = $1
         `, [slug]);
         if (!row.rows[0]) throw Object.assign(new Error('listing_not_found'), { statusCode: 404 });
