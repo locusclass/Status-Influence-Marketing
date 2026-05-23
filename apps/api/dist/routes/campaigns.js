@@ -4,6 +4,7 @@ import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
+import { BUSINESS_PRO_PLANS, getBusinessProSubscriptionStatus, reserveBusinessProSubscription, markBusinessProSubscriptionPaid, } from '../services/businessSubscriptions.js';
 import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
 import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { ensureChatSchema } from '../services/chat.js';
@@ -4643,6 +4644,110 @@ export async function campaignRoutes(app) {
                 await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
             }
             catch (_) { /* non-fatal if record doesn't exist */ }
+            return { ok: true };
+        });
+    });
+    // ── BUSINESS PRO SUBSCRIPTION ─────────────────────────────────────────────
+    // GET /business/subscription/status
+    app.get('/business/subscription/status', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        return withTransaction(async (client) => {
+            const status = await getBusinessProSubscriptionStatus(client, authUser);
+            return status;
+        });
+    });
+    // POST /business/subscription/pay — reserves a Pro subscription slot and returns checkout_payload
+    app.post('/business/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        if (!hasYoClientCredentials()) {
+            reply.code(503);
+            return { error: 'yo_uganda_not_configured' };
+        }
+        const body = request.body ?? {};
+        const planCodeRaw = String(body.plan ?? 'monthly').trim().toLowerCase();
+        const plan = BUSINESS_PRO_PLANS[planCodeRaw] ?? BUSINESS_PRO_PLANS.monthly;
+        const merchantReference = uuid();
+        return withTransaction(async (client) => {
+            const userRes = await client.query('SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1', [authUser]);
+            const user = userRes.rows[0];
+            const userCountry = user?.country ?? 'UG';
+            const userEmail = user?.email ?? '';
+            const userPhone = user?.phone ?? null;
+            const userName = user?.full_name ?? 'Business';
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
+            const rawPayload = {
+                kind: 'BUSINESS_PRO_SUBSCRIPTION',
+                user_id: authUser,
+                plan_code: plan.code,
+                amount: plan.amountUgx,
+                currency: 'UGX',
+                country: checkoutProfile.country,
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
+                customer: { email: userEmail, name: userName, phone_number: userPhone },
+            };
+            await reserveBusinessProSubscription(client, authUser, merchantReference, plan.code);
+            const paymentRepo = new PaymentRepo();
+            await paymentRepo.createPesaPalTransaction(client, {
+                escrow_id: undefined,
+                type: 'FUNDING',
+                amount: plan.amountUgx,
+                merchant_reference: merchantReference,
+                raw_payload: rawPayload,
+            });
+            const checkoutPayload = {
+                provider: 'YO_UGANDA',
+                mode: 'DIRECT_CHARGE',
+                tx_ref: merchantReference,
+                amount: plan.amountUgx,
+                currency: 'UGX',
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
+                country: checkoutProfile.country,
+                customer: { email: userEmail, name: userName, phone_number: userPhone },
+                meta: {
+                    merchant_reference: merchantReference,
+                    kind: 'BUSINESS_PRO_SUBSCRIPTION',
+                    user_id: authUser,
+                    plan_code: plan.code,
+                },
+            };
+            return {
+                ok: true,
+                tx_ref: merchantReference,
+                amount: plan.amountUgx,
+                currency: 'UGX',
+                plan,
+                checkout_payload: checkoutPayload,
+            };
+        });
+    });
+    // POST /business/subscription/confirm — marks subscription paid after checkout completes
+    app.post('/business/subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        const body = request.body ?? {};
+        const paymentReference = String(body.payment_reference ?? '').trim();
+        if (!paymentReference)
+            return reply.code(400).send({ error: 'payment_reference_required' });
+        return withTransaction(async (client) => {
+            await markBusinessProSubscriptionPaid(client, authUser, paymentReference);
+            const paymentRepo = new PaymentRepo();
+            try {
+                await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+            }
+            catch (_) { /* non-fatal */ }
             return { ok: true };
         });
     });

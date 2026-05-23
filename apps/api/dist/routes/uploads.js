@@ -9,6 +9,7 @@ const VALID_PURPOSES = new Set([
     'campaign_gallery',
     'campaign_video',
     'landing_page_media',
+    'listing_media',
     'ambassador_proof_screenshot',
     'ambassador_proof_screen_recording',
     'user_avatar',
@@ -25,6 +26,7 @@ const SIZE_LIMITS = {
     campaign_gallery: 10 * 1024 * 1024,
     campaign_video: 100 * 1024 * 1024,
     landing_page_media: 100 * 1024 * 1024,
+    listing_media: 200 * 1024 * 1024,
     ambassador_proof_screenshot: 10 * 1024 * 1024,
     ambassador_proof_screen_recording: 250 * 1024 * 1024,
     user_avatar: 5 * 1024 * 1024,
@@ -37,8 +39,9 @@ const ALLOWED_MIMES = {
     campaign_gallery: ['image/'],
     campaign_video: ['video/'],
     landing_page_media: ['image/', 'video/'],
+    listing_media: ['image/', 'video/', 'audio/'],
     ambassador_proof_screenshot: ['image/'],
-    ambassador_proof_screen_recording: ['video/mp4'],
+    ambassador_proof_screen_recording: ['video/'],
     user_avatar: ['image/'],
     business_logo: ['image/'],
     admin_attachment: ['image/', 'video/', 'application/pdf'],
@@ -65,6 +68,8 @@ function assetTypeFromMime(mime) {
         return 'video';
     if (mime.startsWith('image/'))
         return 'image';
+    if (mime.startsWith('audio/'))
+        return 'audio';
     return 'document';
 }
 function storagePath(purpose, userId, fileId, filename) {
@@ -78,6 +83,9 @@ function storagePath(purpose, userId, fileId, filename) {
     }
     if (purpose === 'admin_attachment') {
         return `admin/${userId}/${name}`;
+    }
+    if (purpose === 'listing_media') {
+        return `listings/media/${name}`;
     }
     return `campaigns/media/${name}`;
 }
@@ -115,9 +123,15 @@ export async function uploadRoutes(app) {
         if (!file_name || !mime_type) {
             return reply.code(400).send({ error: 'missing_fields', detail: 'file_name and mime_type are required' });
         }
-        const purpose = (upload_purpose ?? 'campaign_gallery').trim();
+        let purpose = (upload_purpose ?? 'campaign_gallery').trim();
         if (!VALID_PURPOSES.has(purpose)) {
             return reply.code(400).send({ error: 'invalid_purpose', detail: `upload_purpose must be one of: ${[...VALID_PURPOSES].join(', ')}` });
+        }
+        // If a video is sent with the generic campaign_gallery purpose (older clients
+        // or cached web builds that don't pass an explicit purpose), upgrade it to
+        // campaign_video so the MIME check passes correctly.
+        if (purpose === 'campaign_gallery' && mime_type.startsWith('video/')) {
+            purpose = 'campaign_video';
         }
         if (!isMimeAllowed(mime_type, purpose)) {
             return reply.code(400).send({ error: 'invalid_mime', detail: `${mime_type} is not allowed for ${purpose}` });

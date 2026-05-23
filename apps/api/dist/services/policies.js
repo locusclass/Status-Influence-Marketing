@@ -13,8 +13,10 @@ export function policyAcceptanceSelectSql(alias = 'u') {
   `;
 }
 export function buildPolicyAcceptanceState(user) {
-    const privacyPolicyAcceptedVersion = asOptionalText(user.privacy_policy_accepted_version ?? user.privacyPolicyAcceptedVersion);
-    const platformPolicyAcceptedVersion = asOptionalText(user.platform_policy_accepted_version ?? user.platformPolicyAcceptedVersion);
+    // Policy enforcement has been retired. Keep the old response contract so
+    // existing clients continue to deserialize the same fields without blocking.
+    const privacyPolicyAcceptedVersion = asOptionalText(user.privacy_policy_accepted_version ?? user.privacyPolicyAcceptedVersion) ?? CURRENT_PRIVACY_POLICY_VERSION;
+    const platformPolicyAcceptedVersion = asOptionalText(user.platform_policy_accepted_version ?? user.platformPolicyAcceptedVersion) ?? CURRENT_PLATFORM_POLICY_VERSION;
     return {
         privacy_policy_required_version: CURRENT_PRIVACY_POLICY_VERSION,
         privacy_policy_accepted_version: privacyPolicyAcceptedVersion,
@@ -22,12 +24,11 @@ export function buildPolicyAcceptanceState(user) {
         platform_policy_required_version: CURRENT_PLATFORM_POLICY_VERSION,
         platform_policy_accepted_version: platformPolicyAcceptedVersion,
         platform_policy_accepted_at: user.platform_policy_accepted_at ?? user.platformPolicyAcceptedAt ?? null,
-        policies_accepted: privacyPolicyAcceptedVersion === CURRENT_PRIVACY_POLICY_VERSION &&
-            platformPolicyAcceptedVersion === CURRENT_PLATFORM_POLICY_VERSION,
+        policies_accepted: true,
     };
 }
 export function hasAcceptedRequiredPolicies(user) {
-    return buildPolicyAcceptanceState(user).policies_accepted;
+    return true;
 }
 export function buildCurrentPolicyDocuments() {
     return {

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { pool, withTransaction } from './db.js';
 import { platformAdapters } from './verification/adapters.js';
 import { MockVerifier } from './verification/mockVerifier.js';
@@ -1813,14 +1814,189 @@ async function compensatePayoutFailure(proofId: string, campaignId: string) {
 }
 
 async function processVerificationJob(job: any) {
-  await pool.query(
-    `UPDATE job_queue
-     SET status='DONE',
-         retry_reason='manual_admin_review_required',
-         updated_at=now()
-     WHERE id=$1`,
-    [job.id]
-  );
+  const proofId = job.payload.proof_id as string;
+  let tempVideoPath: string | null = null;
+
+  try {
+    const proofRes = await pool.query('SELECT * FROM proofs WHERE id=$1', [proofId]);
+    const proof = proofRes.rows[0];
+    if (!proof) throw new Error('proof_not_found');
+
+    const sessionRes = await pool.query(
+      'SELECT * FROM verification_sessions WHERE id=$1',
+      [proof.session_id]
+    );
+    const session = sessionRes.rows[0];
+    if (!session) throw new Error('session_not_found');
+
+    const campaignRes = await pool.query(
+      'SELECT * FROM campaigns WHERE id=$1',
+      [session.campaign_id]
+    );
+    const campaign = campaignRes.rows[0];
+    if (!campaign) throw new Error('campaign_not_found');
+
+    // Resolve full video URL
+    let videoUrl: string = proof.video_url;
+    if (videoUrl.startsWith('/uploads/files/') || videoUrl.startsWith('/api/uploads/files/')) {
+      videoUrl = (process.env.API_BASE_URL ?? '') + videoUrl;
+    }
+
+    tempVideoPath = await downloadToTemp(videoUrl);
+
+    const tamper = await runTamperChecks(tempVideoPath);
+
+    const result = await verifier.verify(
+      tempVideoPath,
+      { platform: campaign.platform, title: campaign.title },
+      { challenge_code: session.challenge_code, challenge_phrase: session.challenge_phrase }
+    );
+
+    // meta may be { script, client_meta } or directly contain script steps as an array
+    const script = Array.isArray(proof.meta)
+      ? proof.meta
+      : Array.isArray(proof.meta?.script)
+      ? proof.meta.script
+      : proof.meta;
+    const clientMeta = Array.isArray(proof.meta)
+      ? null
+      : (proof.meta?.client_meta ?? proof.meta ?? null);
+
+    const tamperDuration = Number(tamper?.details?.duration ?? 0);
+    const trace = evaluateClientTrace(script, clientMeta, tamperDuration);
+
+    const reviewReasons = buildReviewReasons({
+      campaign,
+      tamper,
+      result,
+      script,
+      clientMeta,
+    });
+
+    const platformValidation = buildPlatformValidationSummary(campaign, proof, result);
+    const platformReviewReasons = buildPlatformReviewReasons(campaign, platformValidation);
+    const allReasons = [...reviewReasons, ...platformReviewReasons];
+
+    const finalDecision = deriveFinalProofDecision({
+      campaign,
+      reasons: allReasons,
+      result,
+      trace,
+      platformValidation,
+    });
+
+    const geminiReport = result.verifier_report ?? null;
+    const aiProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
+    const aiModel = process.env.GEMINI_VERIFICATION_MODEL ?? null;
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE proofs
+         SET status=$2,
+             decision=$3,
+             confidence=$4,
+             observed_views=$5,
+             challenge_seen=$6,
+             review_reasons=$7::jsonb,
+             verification_status=$8,
+             ai_provider=$9,
+             ai_model=$10,
+             viewer_count_detected=$11,
+             viewer_count_confidence=$12,
+             campaign_visible=$13,
+             campaign_match_confidence=$14,
+             whatsapp_ui_detected=$15,
+             authenticity_score=$16,
+             suspected_tampering=$17,
+             fraud_risk_score=$18,
+             fraud_signals=$19::jsonb,
+             missing_evidence=$20::jsonb,
+             local_warnings=$21::jsonb,
+             ai_recommendation=$22,
+             reasoning_summary=$23,
+             raw_ai_response=$24::jsonb,
+             updated_at=now()
+         WHERE id=$1`,
+        [
+          proofId,
+          finalDecision,
+          finalDecision,
+          result.confidence ?? null,
+          result.observed_views ?? null,
+          result.challenge_seen ?? null,
+          JSON.stringify(allReasons),
+          finalDecision === 'VERIFIED' ? 'APPROVED' : finalDecision,
+          aiProvider,
+          aiModel,
+          geminiReport != null ? ((geminiReport as any).viewer_count_detected ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).viewer_count_confidence ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).campaign_visible ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).campaign_match_confidence ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).whatsapp_ui_detected ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).screen_recording_authenticity_score ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).suspected_tampering ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).fraud_risk_score ?? null) : null,
+          JSON.stringify(
+            geminiReport != null ? ((geminiReport as any).fraud_signals ?? null) : null
+          ),
+          JSON.stringify(
+            geminiReport != null ? ((geminiReport as any).missing_evidence ?? null) : null
+          ),
+          JSON.stringify(tamper ? [
+            ...(tamper.cut_spike ? ['cut_spike'] : []),
+            ...(tamper.frozen_frames ? ['frozen_frames'] : []),
+            ...(tamper.timestamp_inconsistent ? ['timestamp_inconsistent'] : []),
+            ...(tamper.overlay_suspected ? ['overlay_suspected'] : []),
+          ] : null),
+          geminiReport != null ? ((geminiReport as any).recommendation ?? null) : null,
+          geminiReport != null ? ((geminiReport as any).reasoning_summary ?? null) : null,
+          JSON.stringify(geminiReport),
+        ]
+      );
+
+      await upsertContentSubmission(client, campaign, proof, platformValidation, finalDecision);
+      await updateCreatorPerformance(client, campaign, proof, finalDecision, platformValidation);
+
+      if (finalDecision === 'VERIFIED') {
+        await markContractCompletedForVerifiedProof(client, proofId);
+      }
+      if (finalDecision === 'REJECTED') {
+        await queueRejectedOpenAllocationRetry(client, campaign, proof, platformValidation);
+      }
+    });
+
+    if (finalDecision === 'VERIFIED') {
+      await pool.query(
+        `INSERT INTO job_queue (job_type, payload, status)
+         VALUES ('PAYOUT_PROOF', $1::jsonb, 'QUEUED')`,
+        [JSON.stringify({ proof_id: proofId })]
+      );
+    }
+
+    await pool.query(
+      "UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1",
+      [job.id]
+    );
+  } catch (err: any) {
+    const attempts = job.attempts + 1;
+    const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
+    const delay = Math.min(60 * attempts, 300);
+
+    await pool.query(
+      `UPDATE job_queue
+       SET status=$2,
+           attempts=$3,
+           last_error=$4,
+           run_at=now() + ($5 || ' seconds')::interval,
+           updated_at=now()
+       WHERE id=$1`,
+      [job.id, nextStatus, attempts, err?.message ?? 'error', delay]
+    );
+  } finally {
+    if (tempVideoPath) {
+      await removeTemp(tempVideoPath);
+    }
+  }
 }
 
 async function processPayoutJob(job: any) {

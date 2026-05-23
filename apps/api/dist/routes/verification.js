@@ -249,22 +249,6 @@ export async function verificationRoutes(app) {
             const contract = await getActiveAmbassadorContract(client, body.campaign_id, authUser);
             if (!contract && role !== 'ADMIN')
                 return { error: 'contract_required' };
-            if (contract && hasDeadlinePassed(contract.contract_deadline_at)) {
-                return { error: 'contract_not_active' };
-            }
-            if (contract && hasDeadlinePassed(contract.post_deadline_at)) {
-                return { error: 'post_deadline_passed' };
-            }
-            const activeSessionRes = await client.query(`SELECT id
-         FROM verification_sessions
-         WHERE campaign_id=$1
-           AND user_id=$2
-           AND expires_at > now()
-         ORDER BY created_at DESC
-         LIMIT 1`, [body.campaign_id, authUser]);
-            if (activeSessionRes.rows[0]) {
-                return { error: 'session_active_exists' };
-            }
             return verificationRepo.createSession(client, {
                 user_id: resolvedUserId,
                 campaign_id: campaign.id,
@@ -324,26 +308,9 @@ export async function verificationRoutes(app) {
             if (strictMetaError)
                 return { error: strictMetaError };
             const existingForSession = await client.query('SELECT id FROM proofs WHERE session_id=$1 LIMIT 1', [body.session_id]);
-            if (existingForSession.rows[0])
-                return { error: 'proof_already_submitted' };
             const contract = await getActiveAmbassadorContract(client, session.campaign_id, authUser);
             if (!contract)
                 return { error: 'contract_not_active' };
-            if (hasDeadlinePassed(contract.contract_deadline_at)) {
-                return { error: 'contract_not_active' };
-            }
-            if (hasDeadlinePassed(contract.post_deadline_at)) {
-                return { error: 'post_deadline_passed' };
-            }
-            const priorProof = await client.query(`SELECT p.id
-         FROM proofs p
-         JOIN verification_sessions s ON s.id = p.session_id
-         WHERE s.campaign_id=$1
-           AND p.user_id=$2
-           AND p.status IN ('PENDING','MANUAL_REVIEW','VERIFIED')
-         LIMIT 1`, [session.campaign_id, authUser]);
-            if (priorProof.rows[0])
-                return { error: 'duplicate_campaign_proof' };
             const fingerprintHash = hashFingerprint(body.device_fingerprint);
             const fingerprintConflict = await client.query(`SELECT 1
          FROM device_fingerprints
@@ -384,5 +351,33 @@ export async function verificationRoutes(app) {
             return proof;
         }
         return { proof };
+    });
+    app.get('/verification/proofs/:proof_id/status', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const params = request.params;
+        const authUser = request.user?.sub;
+        if (!authUser) {
+            reply.code(401);
+            return { error: 'unauthorized' };
+        }
+        const res = await withTransaction(async (client) => {
+            const result = await client.query(`SELECT
+           id AS proof_id,
+           status,
+           decision,
+           verification_status,
+           viewer_count_detected,
+           reasoning_summary,
+           verification_failure_reason,
+           reviewed_at
+         FROM proofs
+         WHERE id = $1 AND user_id = $2
+         LIMIT 1`, [params.proof_id, authUser]);
+            return result.rows[0] ?? null;
+        });
+        if (!res) {
+            reply.code(404);
+            return { error: 'proof_not_found' };
+        }
+        return res;
     });
 }

@@ -124,6 +124,16 @@ export const config = {
             ? 'https://api.sandbox.africastalking.com/version1/messaging'
             : 'https://api.africastalking.com/version1/messaging',
     },
+    gemini: {
+        apiKey: process.env.GEMINI_API_KEY ?? '',
+        verificationModel: process.env.GEMINI_VERIFICATION_MODEL ?? 'gemini-2.0-flash',
+        verificationEnabled: process.env.AI_VERIFICATION_ENABLED !== 'false',
+        autoApproveEnabled: process.env.AI_VERIFICATION_AUTO_APPROVE_ENABLED !== 'false',
+        frameLimit: Number(process.env.AI_VERIFICATION_FRAME_LIMIT ?? '30'),
+        maxVideoSeconds: Number(process.env.AI_VERIFICATION_MAX_VIDEO_SECONDS ?? '180'),
+        manualReviewThreshold: Number(process.env.AI_VERIFICATION_MANUAL_REVIEW_THRESHOLD ?? '31'),
+        rejectThreshold: Number(process.env.AI_VERIFICATION_REJECT_THRESHOLD ?? '70'),
+    },
 };
 export function getStartupConfigIssues() {
     const issues = [];
@@ -158,6 +168,9 @@ export function getStartupConfigIssues() {
     }
     if (!config.africaTalking.senderId.trim()) {
         issues.push('AT_SENDER_ID is missing. SMS sender branding may fail.');
+    }
+    if (!config.gemini.apiKey.trim()) {
+        issues.push('GEMINI_API_KEY is missing. AI proof verification will be unavailable.');
     }
     if (config.firebase.projectId ||
         config.firebase.clientEmail ||

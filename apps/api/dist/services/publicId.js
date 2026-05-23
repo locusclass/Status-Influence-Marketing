@@ -46,6 +46,11 @@ END;
 $$;
 `;
 export async function ensurePublicIdColumns(client) {
+    // This helper is called from request paths. Serialize the migration body so
+    // concurrent logins do not try to rewrite the same rows at once.
+    await client.query(`
+    SELECT pg_advisory_xact_lock(hashtext('ensure_public_id_columns_v1')::bigint)
+  `);
     await client.query(ensurePublicIdFunctionSql);
     await client.query(`
     CREATE TABLE IF NOT EXISTS system_flags (

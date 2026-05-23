@@ -1,8 +1,11 @@
+import 'dotenv/config';
 import { pool, withTransaction } from './db.js';
 import { MockVerifier } from './verification/mockVerifier.js';
 import { GeminiVerifier } from './verification/geminiVerifier.js';
 import { DeterministicVerifier } from './verification/deterministicVerifier.js';
 import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
+import { runTamperChecks } from './verification/tamper.js';
+import { downloadToTemp, removeTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
 import { calculateAmbassadorPayoutBreakdown, generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, AMBASSADOR_PLATFORM_FEE_PERCENT, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
 const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
@@ -15,6 +18,7 @@ const verifier = verifierProvider === 'gemini'
             : new MockVerifier();
 let lastContractExpirySweepAt = 0;
 let lastOpenAllocatorSweepAt = 0;
+let lastPublicAdvertReallocatorSweepAt = 0;
 let lastMonthlyPayoutSweepAt = 0;
 let lastAdvertRollupSweepAt = 0;
 if (process.env.NODE_ENV === 'production' && verifierProvider === 'mock') {
@@ -1381,11 +1385,149 @@ async function compensatePayoutFailure(proofId, campaignId) {
     });
 }
 async function processVerificationJob(job) {
-    await pool.query(`UPDATE job_queue
-     SET status='DONE',
-         retry_reason='manual_admin_review_required',
-         updated_at=now()
-     WHERE id=$1`, [job.id]);
+    const proofId = job.payload.proof_id;
+    let tempVideoPath = null;
+    try {
+        const proofRes = await pool.query('SELECT * FROM proofs WHERE id=$1', [proofId]);
+        const proof = proofRes.rows[0];
+        if (!proof)
+            throw new Error('proof_not_found');
+        const sessionRes = await pool.query('SELECT * FROM verification_sessions WHERE id=$1', [proof.session_id]);
+        const session = sessionRes.rows[0];
+        if (!session)
+            throw new Error('session_not_found');
+        const campaignRes = await pool.query('SELECT * FROM campaigns WHERE id=$1', [session.campaign_id]);
+        const campaign = campaignRes.rows[0];
+        if (!campaign)
+            throw new Error('campaign_not_found');
+        // Resolve full video URL
+        let videoUrl = proof.video_url;
+        if (videoUrl.startsWith('/uploads/files/') || videoUrl.startsWith('/api/uploads/files/')) {
+            videoUrl = (process.env.API_BASE_URL ?? '') + videoUrl;
+        }
+        tempVideoPath = await downloadToTemp(videoUrl);
+        const tamper = await runTamperChecks(tempVideoPath);
+        const result = await verifier.verify(tempVideoPath, { platform: campaign.platform, title: campaign.title }, { challenge_code: session.challenge_code, challenge_phrase: session.challenge_phrase });
+        // meta may be { script, client_meta } or directly contain script steps as an array
+        const script = Array.isArray(proof.meta)
+            ? proof.meta
+            : Array.isArray(proof.meta?.script)
+                ? proof.meta.script
+                : proof.meta;
+        const clientMeta = Array.isArray(proof.meta)
+            ? null
+            : (proof.meta?.client_meta ?? proof.meta ?? null);
+        const tamperDuration = Number(tamper?.details?.duration ?? 0);
+        const trace = evaluateClientTrace(script, clientMeta, tamperDuration);
+        const reviewReasons = buildReviewReasons({
+            campaign,
+            tamper,
+            result,
+            script,
+            clientMeta,
+        });
+        const platformValidation = buildPlatformValidationSummary(campaign, proof, result);
+        const platformReviewReasons = buildPlatformReviewReasons(campaign, platformValidation);
+        const allReasons = [...reviewReasons, ...platformReviewReasons];
+        const finalDecision = deriveFinalProofDecision({
+            campaign,
+            reasons: allReasons,
+            result,
+            trace,
+            platformValidation,
+        });
+        const geminiReport = result.verifier_report ?? null;
+        const aiProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
+        const aiModel = process.env.GEMINI_VERIFICATION_MODEL ?? null;
+        await withTransaction(async (client) => {
+            await client.query(`UPDATE proofs
+         SET status=$2,
+             decision=$3,
+             confidence=$4,
+             observed_views=$5,
+             challenge_seen=$6,
+             review_reasons=$7::jsonb,
+             verification_status=$8,
+             ai_provider=$9,
+             ai_model=$10,
+             viewer_count_detected=$11,
+             viewer_count_confidence=$12,
+             campaign_visible=$13,
+             campaign_match_confidence=$14,
+             whatsapp_ui_detected=$15,
+             authenticity_score=$16,
+             suspected_tampering=$17,
+             fraud_risk_score=$18,
+             fraud_signals=$19::jsonb,
+             missing_evidence=$20::jsonb,
+             local_warnings=$21::jsonb,
+             ai_recommendation=$22,
+             reasoning_summary=$23,
+             raw_ai_response=$24::jsonb,
+             updated_at=now()
+         WHERE id=$1`, [
+                proofId,
+                finalDecision,
+                finalDecision,
+                result.confidence ?? null,
+                result.observed_views ?? null,
+                result.challenge_seen ?? null,
+                JSON.stringify(allReasons),
+                finalDecision === 'VERIFIED' ? 'APPROVED' : finalDecision,
+                aiProvider,
+                aiModel,
+                geminiReport != null ? (geminiReport.viewer_count_detected ?? null) : null,
+                geminiReport != null ? (geminiReport.viewer_count_confidence ?? null) : null,
+                geminiReport != null ? (geminiReport.campaign_visible ?? null) : null,
+                geminiReport != null ? (geminiReport.campaign_match_confidence ?? null) : null,
+                geminiReport != null ? (geminiReport.whatsapp_ui_detected ?? null) : null,
+                geminiReport != null ? (geminiReport.screen_recording_authenticity_score ?? null) : null,
+                geminiReport != null ? (geminiReport.suspected_tampering ?? null) : null,
+                geminiReport != null ? (geminiReport.fraud_risk_score ?? null) : null,
+                JSON.stringify(geminiReport != null ? (geminiReport.fraud_signals ?? null) : null),
+                JSON.stringify(geminiReport != null ? (geminiReport.missing_evidence ?? null) : null),
+                JSON.stringify(tamper ? [
+                    ...(tamper.cut_spike ? ['cut_spike'] : []),
+                    ...(tamper.frozen_frames ? ['frozen_frames'] : []),
+                    ...(tamper.timestamp_inconsistent ? ['timestamp_inconsistent'] : []),
+                    ...(tamper.overlay_suspected ? ['overlay_suspected'] : []),
+                ] : null),
+                geminiReport != null ? (geminiReport.recommendation ?? null) : null,
+                geminiReport != null ? (geminiReport.reasoning_summary ?? null) : null,
+                JSON.stringify(geminiReport),
+            ]);
+            await upsertContentSubmission(client, campaign, proof, platformValidation, finalDecision);
+            await updateCreatorPerformance(client, campaign, proof, finalDecision, platformValidation);
+            if (finalDecision === 'VERIFIED') {
+                await markContractCompletedForVerifiedProof(client, proofId);
+            }
+            if (finalDecision === 'REJECTED') {
+                await queueRejectedOpenAllocationRetry(client, campaign, proof, platformValidation);
+            }
+        });
+        if (finalDecision === 'VERIFIED') {
+            await pool.query(`INSERT INTO job_queue (job_type, payload, status)
+         VALUES ('PAYOUT_PROOF', $1::jsonb, 'QUEUED')`, [JSON.stringify({ proof_id: proofId })]);
+        }
+        await pool.query("UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1", [job.id]);
+    }
+    catch (err) {
+        const attempts = job.attempts + 1;
+        const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
+        const delay = Math.min(60 * attempts, 300);
+        await pool.query(`UPDATE job_queue
+       SET status=$2,
+           attempts=$3,
+           last_error=$4,
+           run_at=now() + ($5 || ' seconds')::interval,
+           updated_at=now()
+       WHERE id=$1`, [job.id, nextStatus, attempts, err?.message ?? 'error', delay]);
+    }
+    finally {
+        if (tempVideoPath) {
+            await removeTemp(tempVideoPath);
+        }
+    }
 }
 async function processPayoutJob(job) {
     const proofId = job.payload.proof_id;
@@ -1479,6 +1621,139 @@ async function expireOverdueContractsIfDue() {
         }
     });
 }
+async function reallocateExpiredPublicAdvertContracts(client) {
+    const PUBLIC_AD_ELIGIBLE_ROLES = ['ADMIN', 'AMBASSADOR', 'DUAL_USER'];
+    const PUBLIC_AD_RATE = 50;
+    // Find expired pending PUBLIC_ADVERT contracts
+    const expiredRes = await client.query(`SELECT c.*
+     FROM campaigns c
+     WHERE c.parent_campaign_id IS NOT NULL
+       AND c.execution_mode = 'PUBLIC_ADVERT'
+       AND c.status = 'ACTIVE'
+       AND c.public_allocation_expires_at IS NOT NULL
+       AND c.public_allocation_expires_at < NOW()
+       AND NOT EXISTS (
+         SELECT 1 FROM verification_sessions vs
+         WHERE vs.campaign_id = c.id AND vs.status IN ('ACTIVE', 'COMPLETED')
+       )
+     ORDER BY c.public_allocation_expires_at ASC
+     LIMIT 50`);
+    if (expiredRes.rows.length === 0)
+        return;
+    for (const expired of expiredRes.rows) {
+        const rootId = expired.parent_campaign_id;
+        // Get root campaign budget info
+        const rootRes = await client.query(`SELECT *, public_ad_viewer_target, public_ad_rate_per_view FROM campaigns WHERE id=$1 LIMIT 1`, [rootId]);
+        const root = rootRes.rows[0];
+        if (!root)
+            continue;
+        // Count allocations per ambassador for this root (non-expired, non-cancelled)
+        const allocCountRes = await client.query(`SELECT assigned_ambassador_id, COUNT(*)::int AS contract_count,
+              MAX(last_allocated_at) AS last_allocated
+       FROM campaigns
+       WHERE parent_campaign_id = $1
+         AND execution_mode = 'PUBLIC_ADVERT'
+         AND id != $2
+       GROUP BY assigned_ambassador_id`, [rootId, expired.id]);
+        const countByAmbassador = new Map();
+        for (const row of allocCountRes.rows) {
+            countByAmbassador.set(row.assigned_ambassador_id, {
+                count: Number(row.contract_count),
+                last: new Date(row.last_allocated),
+            });
+        }
+        // Get all ambassadors
+        const ambRes = await client.query(`SELECT id, phone, COALESCE(NULLIF(max_status_viewers_12h, 0), 50)::int AS effective_viewers
+       FROM users
+       WHERE status = 'ACTIVE' AND role = ANY($1::text[])`, [PUBLIC_AD_ELIGIBLE_ROLES]);
+        const ambassadors = ambRes.rows;
+        if (ambassadors.length === 0)
+            continue;
+        // Determine the minimum contract count in the pool (excluding the expired one's ambassador)
+        const allCounts = ambassadors.map((a) => countByAmbassador.get(a.id)?.count ?? 0);
+        const minCount = Math.min(...allCounts);
+        // Priority: ambassadors with minCount contracts, sorted by least-recently allocated
+        const candidates = ambassadors
+            .filter((a) => a.id !== expired.assigned_ambassador_id)
+            .map((a) => ({
+            ...a,
+            count: countByAmbassador.get(a.id)?.count ?? 0,
+            last: countByAmbassador.get(a.id)?.last ?? new Date(0),
+        }))
+            .filter((a) => a.count === minCount)
+            .sort((x, y) => x.last.getTime() - y.last.getTime());
+        // If no minCount candidates, widen to all not already at max
+        const finalCandidates = candidates.length > 0
+            ? candidates
+            : ambassadors
+                .filter((a) => a.id !== expired.assigned_ambassador_id)
+                .map((a) => ({
+                ...a,
+                count: countByAmbassador.get(a.id)?.count ?? 0,
+                last: countByAmbassador.get(a.id)?.last ?? new Date(0),
+            }))
+                .sort((x, y) => x.last.getTime() - y.last.getTime());
+        if (finalCandidates.length === 0)
+            continue;
+        const next = finalCandidates[0];
+        const ambPayout = Number(next.effective_viewers) * PUBLIC_AD_RATE;
+        const newExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // +1 hour
+        // Mark old contract as cancelled
+        await client.query(`UPDATE campaigns SET status='CANCELLED' WHERE id=$1`, [expired.id]);
+        // Create new contract for next ambassador
+        const metaJson = root.execution_meta == null ? null : JSON.stringify(root.execution_meta);
+        await client.query(`INSERT INTO campaigns (
+         business_id, campaign_bundle_id, bundle_root_campaign_id, parent_campaign_id,
+         assigned_ambassador_id, assigned_phone, title, platform, delivery_model,
+         execution_mode, visibility, payout_amount, budget_total, impression_target,
+         platform_fee_percent, business_wallet_mode, last_allocated_at, allocation_round,
+         media_type, media_text, media_url, execution_meta, campaign_burst_mode,
+         terms_keep_hours, terms_min_views, terms_requirement, status, start_date, end_date,
+         public_distribution_round, public_allocation_expires_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,'PUBLIC_ADVERT','PRIVATE',$10,$11,$12,$13,$14,NOW(),$15,
+         $16,$17,$18,$19::jsonb,$20,$21,$22,$23,'ACTIVE',$24,$25,$26,$27
+       )`, [
+            root.business_id,
+            root.campaign_bundle_id ?? null,
+            root.bundle_root_campaign_id ?? rootId,
+            rootId,
+            next.id,
+            next.phone,
+            root.title,
+            root.platform,
+            root.delivery_model ?? 'DETERMINISTIC',
+            ambPayout,
+            ambPayout,
+            Number(next.effective_viewers),
+            root.platform_fee_percent ?? 0,
+            root.business_wallet_mode ?? 'CAMPAIGN_ONLY',
+            expired.public_distribution_round ?? 1,
+            root.media_type,
+            root.media_text ?? null,
+            root.media_url ?? null,
+            metaJson,
+            root.campaign_burst_mode ?? false,
+            root.terms_keep_hours ?? 12,
+            root.terms_min_views ?? null,
+            root.terms_requirement ?? 'DURATION',
+            root.start_date,
+            root.end_date,
+            (expired.public_distribution_round ?? 1),
+            newExpiresAt,
+        ]);
+        console.info(`[PUBLIC_ADVERT] Reallocated expired contract ${expired.id} (was: ${expired.assigned_ambassador_id}) → new: ${next.id}`);
+    }
+}
+async function runPublicAdvertReallocatorIfDue() {
+    const now = Date.now();
+    if (now - lastPublicAdvertReallocatorSweepAt < 60_000)
+        return; // every 60 seconds
+    lastPublicAdvertReallocatorSweepAt = now;
+    await withTransaction(async (client) => {
+        await reallocateExpiredPublicAdvertContracts(client);
+    });
+}
 async function runOpenContractAllocatorIfDue() {
     const now = Date.now();
     if (now - lastOpenAllocatorSweepAt < 30_000)
@@ -1519,12 +1794,20 @@ async function expireEndedAdvertListingsIfDue() {
         return;
     expireEndedAdvertListingsIfDue.__lastAt = Date.now();
     const { rowCount } = await pool.query(`
-    UPDATE advert_listings
+    UPDATE advert_listings al
     SET status = 'EXPIRED', updated_at = now()
-    WHERE status = 'ACTIVE'
-      AND admin_keep_alive = FALSE
-      AND campaign_end_at IS NOT NULL
-      AND campaign_end_at < now()
+    WHERE al.status = 'ACTIVE'
+      AND al.admin_keep_alive = FALSE
+      AND al.campaign_end_at IS NOT NULL
+      AND al.campaign_end_at < now()
+      AND NOT EXISTS (
+        SELECT 1
+        FROM campaigns c
+        JOIN business_pro_subscriptions bps ON bps.business_id = c.user_id
+        WHERE c.id = al.campaign_id
+          AND bps.valid_until > now()
+          AND (bps.is_waived = TRUE OR bps.paid_at IS NOT NULL)
+      )
   `);
     if ((rowCount ?? 0) > 0) {
         console.info(`advert_listings_expired count=${rowCount}`);
@@ -1596,6 +1879,12 @@ async function loop() {
             console.error('open_contract_allocator_failed', err);
         }
         try {
+            await runPublicAdvertReallocatorIfDue();
+        }
+        catch (err) {
+            console.error('public_advert_reallocator_failed', err);
+        }
+        try {
             await runMonthlyManagerPayoutsIfDue();
         }
         catch (err) {
@@ -1624,9 +1913,97 @@ async function loop() {
         else if (job.job_type === 'PAYOUT_PROOF') {
             await processPayoutJob(job);
         }
+        else if (job.job_type === 'PROCESS_MEDIA') {
+            await processMediaJob(job);
+        }
+        else if (job.job_type === 'CLEANUP_MEDIA') {
+            await cleanupMediaJob(job);
+        }
         else {
             await pool.query("UPDATE job_queue SET status='FAILED', last_error='unknown_job_type' WHERE id=$1", [job.id]);
         }
+    }
+}
+// ─── PROCESS_MEDIA ────────────────────────────────────────────────────────────
+// Fetches file metadata from Firebase, computes a sha256 hash, and marks the
+// asset ready.  Heavy work (thumbnails, transcoding) can be added here later.
+async function processMediaJob(job) {
+    const { asset_id, object_name, mime_type, purpose } = job.payload;
+    if (!asset_id || !object_name) {
+        await pool.query("UPDATE job_queue SET status='FAILED', last_error='missing_payload_fields', updated_at=now() WHERE id=$1", [job.id]);
+        return;
+    }
+    try {
+        await pool.query("UPDATE media_assets SET processing_status='processing', updated_at=now() WHERE id=$1", [asset_id]);
+        // Fetch GCS object metadata (size, content-type).
+        const { getFirebaseObjectMetadata } = await import('./firebaseStorageWorker.js');
+        const meta = await getFirebaseObjectMetadata(object_name);
+        const fileSizeBytes = meta?.size ?? null;
+        const assetType = (mime_type ?? '').startsWith('video/') ? 'video'
+            : (mime_type ?? '').startsWith('image/') ? 'image'
+                : 'document';
+        // Proof assets need admin review before payout release.
+        const proofPurposes = new Set([
+            'ambassador_proof_screenshot',
+            'ambassador_proof_screen_recording',
+        ]);
+        const verificationStatus = proofPurposes.has(purpose ?? '') ? 'needs_admin_review' : 'not_required';
+        await pool.query(`UPDATE media_assets
+       SET processing_status = 'ready',
+           asset_type        = $2,
+           file_size_bytes   = COALESCE($3, file_size_bytes),
+           verification_status = CASE
+             WHEN upload_purpose IN ('ambassador_proof_screenshot','ambassador_proof_screen_recording')
+               AND verification_status = 'pending' THEN $4
+             ELSE verification_status
+           END,
+           updated_at        = now()
+       WHERE id = $1`, [asset_id, assetType, fileSizeBytes, verificationStatus]);
+        await pool.query("UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1", [job.id]);
+    }
+    catch (err) {
+        const attempts = job.attempts + 1;
+        const nextStatus = attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
+        const delay = Math.min(30 * attempts, 180);
+        if (nextStatus === 'FAILED') {
+            await pool.query("UPDATE media_assets SET processing_status='failed', updated_at=now() WHERE id=$1", [asset_id]);
+        }
+        await pool.query(`UPDATE job_queue
+       SET status=$2, attempts=$3, last_error=$4,
+           run_at=now() + ($5 || ' seconds')::interval, updated_at=now()
+       WHERE id=$1`, [job.id, nextStatus, attempts, err?.message ?? 'error', delay]);
+    }
+}
+// ─── CLEANUP_MEDIA ────────────────────────────────────────────────────────────
+// Deletes orphaned or soft-deleted assets from Firebase Storage.
+// Also sweeps abandoned pending_upload records older than 30 minutes.
+async function cleanupMediaJob(job) {
+    const { asset_id, object_name } = job.payload;
+    try {
+        if (object_name) {
+            const { deleteFromFirebaseStorage } = await import('./firebaseStorageWorker.js');
+            await deleteFromFirebaseStorage(object_name).catch(() => { });
+        }
+        // Sweep abandoned pending_upload records older than 30 minutes.
+        const abandoned = await pool.query(`SELECT id, original_storage_path
+       FROM media_assets
+       WHERE processing_status = 'pending_upload'
+         AND created_at < now() - interval '30 minutes'
+         AND deleted_at IS NULL
+       LIMIT 50`);
+        for (const row of abandoned.rows) {
+            if (row.original_storage_path) {
+                const { deleteFromFirebaseStorage } = await import('./firebaseStorageWorker.js');
+                await deleteFromFirebaseStorage(row.original_storage_path).catch(() => { });
+            }
+            await pool.query("UPDATE media_assets SET processing_status='deleted', deleted_at=now(), updated_at=now() WHERE id=$1", [row.id]);
+        }
+        await pool.query("UPDATE job_queue SET status='DONE', updated_at=now() WHERE id=$1", [job.id]);
+    }
+    catch (err) {
+        const attempts = job.attempts + 1;
+        const nextStatus = attempts >= (job.max_attempts ?? 3) ? 'FAILED' : 'RETRY';
+        await pool.query(`UPDATE job_queue SET status=$2, attempts=$3, last_error=$4, updated_at=now() WHERE id=$1`, [job.id, nextStatus, attempts, err?.message ?? 'error']);
     }
 }
 loop().catch((err) => {

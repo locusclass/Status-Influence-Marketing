@@ -1,4 +1,4 @@
-import { ADMIN_ROLE_SUPER_ADMIN, ADMIN_ROLE_USER, normalizeAdminDashboardRole, } from '@prime/shared';
+import { ADMIN_ROLE_USER, normalizeAdminDashboardRole, } from '@prime/shared';
 import { buildPolicyAcceptanceState } from './policies.js';
 export const ACCOUNT_ROLE_ADMIN = 'ADMIN';
 export const ACCOUNT_ROLE_BUSINESS = 'BUSINESS';
@@ -74,9 +74,7 @@ export function buildAuthClaims(user) {
     const activeRole = normalizeActiveRole(user.active_role, role);
     const adminRole = normalizeAdminDashboardRole(user.admin_role) !== ADMIN_ROLE_USER
         ? normalizeAdminDashboardRole(user.admin_role)
-        : role === ACCOUNT_ROLE_ADMIN || activeRole === ACCOUNT_ROLE_ADMIN
-            ? ADMIN_ROLE_SUPER_ADMIN
-            : ADMIN_ROLE_USER;
+        : ADMIN_ROLE_USER;
     return {
         sub: user.id,
         role,
@@ -94,9 +92,7 @@ export function buildUserSession(user) {
     const activeRole = normalizeActiveRole(user.active_role, role);
     const adminRole = normalizeAdminDashboardRole(user.admin_role) !== ADMIN_ROLE_USER
         ? normalizeAdminDashboardRole(user.admin_role)
-        : role === ACCOUNT_ROLE_ADMIN || activeRole === ACCOUNT_ROLE_ADMIN
-            ? ADMIN_ROLE_SUPER_ADMIN
-            : ADMIN_ROLE_USER;
+        : ADMIN_ROLE_USER;
     const maxStatusViewers12h = Number(user.max_status_viewers_12h ?? 0);
     const currentBusinessViewers = Number(user.current_business_viewers ?? 0);
     const privateContractRateUgx = Number(user.private_contract_rate_ugx ?? 0);

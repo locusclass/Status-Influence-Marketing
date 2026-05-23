@@ -4,6 +4,19 @@ import { z } from 'zod';
 import { withTransaction, query } from '../db.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
+import { PaymentRepo } from '../repositories/paymentRepo.js';
+import { hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
+import { buildListingBoostOptions, resolveListingBoostPlan, activateListingBoost, ensureListingBoostSchema, } from '../services/listingBoosts.js';
+import { hasActiveBusinessProSubscription, ensureBusinessProSubscriptionSchema, } from '../services/businessSubscriptions.js';
+// Ensure Pro subscription table exists on first advert route use
+let proSchemaEnsured = false;
+async function ensureProSchemaOnce(client) {
+    if (proSchemaEnsured)
+        return;
+    await ensureBusinessProSubscriptionSchema(client);
+    proSchemaEnsured = true;
+}
 const DEFAULT_LISTING_KEEP_HOURS = 12;
 const LISTING_LIFETIME_BUFFER_HOURS = 1;
 const MILLIS_PER_HOUR = 60 * 60 * 1000;
@@ -895,8 +908,11 @@ export async function advertRoutes(app) {
         try {
             const conditions = [
                 `al.status = 'ACTIVE'`,
-                `c.status = 'ACTIVE'`,
-                `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())`,
+                `al.access_state = 'PUBLIC'`,
+                // Direct listings (no campaign) and admin/Pro-kept-alive listings always pass.
+                `(c.status = 'ACTIVE' OR c.id IS NULL OR al.admin_keep_alive = TRUE)`,
+                // Show listing if campaign window is open, OR there is no end date, OR it's kept alive.
+                `(al.campaign_end_at IS NULL OR al.campaign_end_at > NOW() OR al.admin_keep_alive = TRUE)`,
             ];
             const filterParams = [];
             if (search) {
@@ -952,7 +968,7 @@ export async function advertRoutes(app) {
             ac.slug   AS category_slug,
             ac.icon   AS category_icon
           FROM advert_listings al
-          INNER JOIN campaigns c      ON c.id   = al.campaign_id
+          LEFT  JOIN campaigns c      ON c.id   = al.campaign_id
           LEFT  JOIN advert_listing_types  lt  ON lt.id   = al.listing_type_id
           LEFT  JOIN advert_subcategories  sub ON sub.id  = lt.subcategory_id
           LEFT  JOIN advert_categories     ac  ON ac.id   = sub.category_id
@@ -963,7 +979,7 @@ export async function advertRoutes(app) {
                 query(`
           SELECT COUNT(*)::int AS total
           FROM advert_listings al
-          INNER JOIN campaigns c ON c.id = al.campaign_id
+          LEFT  JOIN campaigns c ON c.id = al.campaign_id
           LEFT  JOIN advert_listing_types  lt  ON lt.id  = al.listing_type_id
           LEFT  JOIN advert_subcategories  sub ON sub.id = lt.subcategory_id
           LEFT  JOIN advert_categories     ac  ON ac.id  = sub.category_id
@@ -972,9 +988,9 @@ export async function advertRoutes(app) {
                 query(`
           SELECT COUNT(*)::int AS live_count
           FROM advert_listings al
-          INNER JOIN campaigns c ON c.id = al.campaign_id
+          LEFT  JOIN campaigns c ON c.id = al.campaign_id
           WHERE al.status = 'ACTIVE'
-            AND c.status  = 'ACTIVE'
+            AND (c.status = 'ACTIVE' OR c.id IS NULL)
             AND (al.campaign_end_at IS NULL OR al.campaign_end_at > NOW())
         `, []),
             ]);
@@ -1025,9 +1041,9 @@ export async function advertRoutes(app) {
              ORDER BY sort_order LIMIT 1) AS hero_image,
             (SELECT COUNT(*) FROM advert_offers WHERE listing_id = al.id AND status = 'PENDING') AS pending_offers
           FROM advert_listings al
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories c ON c.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          LEFT JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          LEFT JOIN advert_categories c ON c.id = s.category_id
           WHERE al.business_id = $1
             AND ($4::text IS NULL OR al.status = $4)
           ORDER BY al.created_at DESC
@@ -1051,6 +1067,8 @@ export async function advertRoutes(app) {
     // GET /api/advert/listings/:slug — Public listing page
     app.get('/advert/listings/:slug', async (request, reply) => {
         const { slug } = request.params;
+        const query = request.query;
+        const previewToken = String(query.preview_token ?? query.preview ?? '').trim();
         try {
             const result = await withTransaction(async (client) => {
                 const row = await client.query(`
@@ -1061,9 +1079,9 @@ export async function advertRoutes(app) {
             c.name AS category_name, c.slug AS category_slug, c.icon AS category_icon,
             EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
           FROM advert_listings al
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories c ON c.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          LEFT JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          LEFT JOIN advert_categories c ON c.id = s.category_id
           WHERE al.slug = $1
         `, [slug]);
                 if (!row.rows[0])
@@ -1081,6 +1099,11 @@ export async function advertRoutes(app) {
                     };
                 }
                 if (listing.status === 'DRAFT') {
+                    const expectedPreviewToken = String(listing.preview_token ?? '').trim();
+                    if (!expectedPreviewToken ||
+                        previewToken !== expectedPreviewToken) {
+                        return { gone: false, notFound: true };
+                    }
                     const [mediaRows, fieldRows] = await Promise.all([
                         client.query(`
               SELECT id, media_pack, media_type, url, thumbnail_url, file_name,
@@ -1119,9 +1142,12 @@ export async function advertRoutes(app) {
                 }
                 // Enforce the buffered campaign window:
                 // listing is inaccessible once campaign_end_at has passed,
-                // unless admin_keep_alive is set.
+                // unless admin_keep_alive is set or the business has an active Pro subscription.
                 const timeRemainingSecs = Number(listing.time_remaining_secs ?? -1);
-                const isExpired = !listing.admin_keep_alive && timeRemainingSecs <= 0;
+                const hasProSubscription = listing.business_id
+                    ? await hasActiveBusinessProSubscription(client, String(listing.business_id))
+                    : false;
+                const isExpired = !listing.admin_keep_alive && !hasProSubscription && timeRemainingSecs <= 0;
                 // Auto-expire in DB if needed
                 if (isExpired && listing.status === 'ACTIVE') {
                     await client.query(`UPDATE advert_listings SET status = 'EXPIRED', updated_at = now()
@@ -1170,7 +1196,8 @@ export async function advertRoutes(app) {
                         gallery_media: galleryMedia,
                         field_values: fieldValues,
                         field_types: fieldTypes,
-                        time_remaining_secs: Math.max(0, timeRemainingSecs),
+                        // Pro subscribers have no countdown — return null so the client renders no timer
+                        time_remaining_secs: hasProSubscription ? null : Math.max(0, timeRemainingSecs),
                         business_id: undefined,
                     },
                 };
@@ -1204,27 +1231,46 @@ export async function advertRoutes(app) {
     // GET /api/advert/listings/:slug/time-status — Live time poll (lightweight, no session)
     app.get('/advert/listings/:slug/time-status', async (request, reply) => {
         const { slug } = request.params;
+        const query = request.query;
+        const previewToken = String(query.preview_token ?? query.preview ?? '').trim();
         try {
             const result = await withTransaction(async (client) => {
                 const row = await client.query(`
           SELECT
-            id, status, admin_keep_alive, access_state,
-            campaign_start_at, campaign_end_at,
-            EXTRACT(EPOCH FROM (campaign_end_at - now()))::bigint AS time_remaining_secs
-          FROM advert_listings WHERE slug = $1
+            al.id, al.business_id, al.status, al.admin_keep_alive, al.access_state,
+            al.preview_token,
+            al.campaign_start_at, al.campaign_end_at,
+            EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
+          FROM advert_listings al
+          WHERE al.slug = $1
         `, [slug]);
-                return row.rows[0] ?? null;
+                const r = row.rows[0];
+                if (!r)
+                    return null;
+                const hasProSub = r.business_id
+                    ? await hasActiveBusinessProSubscription(client, String(r.business_id))
+                    : false;
+                return { ...r, has_pro_subscription: hasProSub };
             });
             if (!result)
                 return reply.code(404).send({ error: 'listing_not_found' });
+            if (String(result.status ?? '').toUpperCase() === 'DRAFT') {
+                const expectedPreviewToken = String(result.preview_token ?? '').trim();
+                if (!expectedPreviewToken ||
+                    previewToken !== expectedPreviewToken) {
+                    return reply.code(404).send({ error: 'listing_not_found' });
+                }
+            }
             const accessState = String(result.access_state ?? 'PUBLIC').toUpperCase();
             const remaining = Number(result.time_remaining_secs ?? -1);
+            const hasProSub = result.has_pro_subscription === true;
             const isLive = accessState === 'PUBLIC' && (result.status === 'DRAFT' ||
                 result.admin_keep_alive ||
+                hasProSub ||
                 remaining > 0);
             return reply.send({
                 is_live: isLive,
-                time_remaining_secs: Math.max(0, remaining),
+                time_remaining_secs: hasProSub ? null : Math.max(0, remaining),
                 campaign_start_at: result.campaign_start_at,
                 campaign_end_at: result.campaign_end_at,
                 status: result.status,
@@ -2025,9 +2071,9 @@ export async function advertRoutes(app) {
           FROM advert_listings al
           JOIN users u ON u.id = al.business_id
           LEFT JOIN campaigns c ON c.id = al.campaign_id
-          JOIN advert_listing_types lt ON lt.id = al.listing_type_id
-          JOIN advert_subcategories s ON s.id = lt.subcategory_id
-          JOIN advert_categories cat ON cat.id = s.category_id
+          LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+          LEFT JOIN advert_subcategories s ON s.id = lt.subcategory_id
+          LEFT JOIN advert_categories cat ON cat.id = s.category_id
           WHERE al.slug = $1
         `, [slug]);
                 if (!row.rows[0])
@@ -3140,7 +3186,7 @@ export async function advertRoutes(app) {
             const lr = await client.query(`SELECT al.id, al.slug, al.title, al.status
          FROM advert_listings al
          JOIN campaigns c ON c.id=al.campaign_id
-         WHERE c.user_id=$1 AND al.is_draft=FALSE AND al.is_negotiable=TRUE
+         WHERE c.business_id=$1 AND al.status='ACTIVE' AND al.is_negotiable=TRUE
          ORDER BY al.created_at DESC`, [userId]);
             const listings = await Promise.all(lr.rows.map(async (l) => {
                 const sr = await client.query(`SELECT lbs.id, lbs.status, lbs.listing_price::float, lbs.agreed_price::float,
@@ -3201,6 +3247,180 @@ export async function advertRoutes(app) {
             await client.query(`UPDATE listing_bid_sessions SET status='agreed', agreed_price=$2, last_activity_at=NOW()
          WHERE id=$1`, [session_id, bid.amount]);
             return reply.send({ agreed: true, agreed_price: parseFloat(bid.amount) });
+        });
+    });
+    // ── LISTING BOOSTS ────────────────────────────────────────────────────────
+    // GET /advert/listings/:slug/boost-options — returns available boost plans
+    app.get('/advert/listings/:slug/boost-options', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug } = request.params;
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId)
+            return reply.code(401).send({ error: 'unauthorized' });
+        return withTransaction(async (client) => {
+            await ensureListingBoostSchema(client);
+            const listingRes = await client.query(`SELECT al.id, al.status, al.access_state, al.boost_plan, al.boost_expires_at,
+                c.user_id AS business_id
+         FROM advert_listings al
+         JOIN campaigns c ON c.id = al.campaign_id
+         WHERE al.slug = $1
+         LIMIT 1`, [slug]);
+            const listing = listingRes.rows[0];
+            if (!listing)
+                return reply.code(404).send({ error: 'listing_not_found' });
+            if (listing.business_id !== userId)
+                return reply.code(403).send({ error: 'forbidden' });
+            const isPro = await hasActiveBusinessProSubscription(client, userId);
+            const options = buildListingBoostOptions(isPro);
+            const boostExpiresAt = listing.boost_expires_at ? new Date(listing.boost_expires_at) : null;
+            const isCurrentlyBoosted = boostExpiresAt != null && boostExpiresAt.getTime() > Date.now();
+            return {
+                is_pro: isPro,
+                is_currently_boosted: isCurrentlyBoosted,
+                boost_expires_at: listing.boost_expires_at ?? null,
+                current_boost_plan: listing.boost_plan ?? null,
+                options,
+            };
+        });
+    });
+    // POST /advert/listings/:slug/boost — initiates a boost payment
+    app.post('/advert/listings/:slug/boost', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug } = request.params;
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId)
+            return reply.code(401).send({ error: 'unauthorized' });
+        if (!hasYoClientCredentials()) {
+            reply.code(503);
+            return { error: 'yo_uganda_not_configured' };
+        }
+        const body = request.body ?? {};
+        const planCode = String(body.plan_code ?? '').trim().toUpperCase();
+        const plan = resolveListingBoostPlan(planCode);
+        if (!plan)
+            return reply.code(400).send({ error: 'invalid_boost_plan' });
+        const merchantReference = uuid();
+        return withTransaction(async (client) => {
+            const listingRes = await client.query(`SELECT al.id, al.status, al.access_state, c.user_id AS business_id
+         FROM advert_listings al
+         JOIN campaigns c ON c.id = al.campaign_id
+         WHERE al.slug = $1
+         LIMIT 1`, [slug]);
+            const listing = listingRes.rows[0];
+            if (!listing)
+                return reply.code(404).send({ error: 'listing_not_found' });
+            if (listing.business_id !== userId)
+                return reply.code(403).send({ error: 'forbidden' });
+            const status = String(listing.status ?? '').trim().toUpperCase();
+            const accessState = String(listing.access_state ?? 'PUBLIC').trim().toUpperCase();
+            if (status !== 'ACTIVE' || accessState !== 'PUBLIC') {
+                return reply.code(400).send({ error: 'listing_boost_requires_active_listing' });
+            }
+            const isPro = await hasActiveBusinessProSubscription(client, userId);
+            const { amount_ugx: amountUgx } = resolveListingBoostPlan(planCode);
+            const discountedAmount = isPro
+                ? Math.max(0, Math.round(amountUgx * 0.8))
+                : amountUgx;
+            const userRes = await client.query('SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1', [userId]);
+            const user = userRes.rows[0];
+            const userCountry = user?.country ?? 'UG';
+            const userEmail = user?.email ?? '';
+            const userPhone = user?.phone ?? null;
+            const userName = user?.full_name ?? 'Business';
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
+            const rawPayload = {
+                kind: 'LISTING_BOOST',
+                user_id: userId,
+                listing_id: listing.id,
+                listing_slug: slug,
+                plan_code: planCode,
+                amount: discountedAmount,
+                currency: 'UGX',
+                is_pro_discounted: isPro,
+                country: checkoutProfile.country,
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
+                customer: { email: userEmail, name: userName, phone_number: userPhone },
+            };
+            const paymentRepo = new PaymentRepo();
+            await paymentRepo.createPesaPalTransaction(client, {
+                escrow_id: undefined,
+                type: 'FUNDING',
+                amount: discountedAmount,
+                merchant_reference: merchantReference,
+                raw_payload: rawPayload,
+            });
+            const checkoutPayload = {
+                provider: 'YO_UGANDA',
+                mode: 'DIRECT_CHARGE',
+                tx_ref: merchantReference,
+                amount: discountedAmount,
+                currency: 'UGX',
+                payment_options: checkoutProfile.paymentOptions,
+                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                phone_country_code: checkoutProfile.phoneCountryCode,
+                availability_notes: checkoutProfile.availabilityNotes,
+                country: checkoutProfile.country,
+                customer: { email: userEmail, name: userName, phone_number: userPhone },
+                meta: {
+                    merchant_reference: merchantReference,
+                    kind: 'LISTING_BOOST',
+                    user_id: userId,
+                    listing_id: listing.id,
+                    plan_code: planCode,
+                },
+            };
+            return {
+                ok: true,
+                tx_ref: merchantReference,
+                amount: discountedAmount,
+                currency: 'UGX',
+                plan: plan,
+                is_pro_discounted: isPro,
+                checkout_payload: checkoutPayload,
+            };
+        });
+    });
+    // POST /advert/listings/:slug/boost/confirm — activates boost after payment
+    app.post('/advert/listings/:slug/boost/confirm', {
+        preHandler: [app.authenticate],
+    }, async (request, reply) => {
+        const { slug } = request.params;
+        const userId = String(request.user?.sub ?? '').trim();
+        if (!userId)
+            return reply.code(401).send({ error: 'unauthorized' });
+        const body = request.body ?? {};
+        const paymentReference = String(body.payment_reference ?? '').trim();
+        if (!paymentReference)
+            return reply.code(400).send({ error: 'payment_reference_required' });
+        return withTransaction(async (client) => {
+            const txnRes = await client.query(`SELECT raw_payload FROM pesapal_transactions WHERE merchant_reference=$1 LIMIT 1`, [paymentReference]);
+            const rawPayload = (txnRes.rows[0]?.raw_payload ?? {});
+            const listingId = String(rawPayload.listing_id ?? '').trim();
+            const planCode = String(rawPayload.plan_code ?? '').trim();
+            const amountUgx = Number(rawPayload.amount ?? 0);
+            if (!listingId || !planCode) {
+                return reply.code(400).send({ error: 'invalid_payment_reference' });
+            }
+            const result = await activateListingBoost(client, {
+                listingId,
+                businessId: userId,
+                paymentReference,
+                planCode,
+                amountUgx,
+            });
+            const paymentRepo = new PaymentRepo();
+            try {
+                await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+            }
+            catch (_) { /* non-fatal */ }
+            return { ok: true, boost: result };
         });
     });
 }

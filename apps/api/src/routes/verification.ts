@@ -398,4 +398,36 @@ export async function verificationRoutes(app: FastifyInstance) {
     }
     return { proof };
   });
+
+  app.get('/verification/proofs/:proof_id/status', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { proof_id: string };
+    const authUser = (request.user as any)?.sub as string | undefined;
+    if (!authUser) {
+      reply.code(401);
+      return { error: 'unauthorized' } as any;
+    }
+    const res = await withTransaction(async (client) => {
+      const result = await client.query(
+        `SELECT
+           id AS proof_id,
+           status,
+           decision,
+           verification_status,
+           viewer_count_detected,
+           reasoning_summary,
+           verification_failure_reason,
+           reviewed_at
+         FROM proofs
+         WHERE id = $1 AND user_id = $2
+         LIMIT 1`,
+        [params.proof_id, authUser]
+      );
+      return result.rows[0] ?? null;
+    });
+    if (!res) {
+      reply.code(404);
+      return { error: 'proof_not_found' } as any;
+    }
+    return res;
+  });
 }

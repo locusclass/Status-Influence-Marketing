@@ -10,6 +10,7 @@ import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CA
 import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes, advertRoutes, } from './routes/index.js';
+import { marketplaceRoutes } from './routes/marketplace.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
 import { ensureSmsSchema } from './services/smsDispatch.js';
 import { ensurePublicIdColumns } from './services/publicId.js';
@@ -18,7 +19,12 @@ import { ensurePrimarySuperAdmin, hasAdminModuleAccess, resolveLiveDashboardAcce
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 export function buildServer() {
     const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
-    const adminTestRouteProfile = process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() === 'admin';
+    const requestedTestRouteScope = process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() ?? '';
+    const isTestRuntime = process.env.NODE_ENV === 'test' ||
+        String(process.env.VITEST ?? '').trim().toLowerCase() === 'true';
+    const adminTestRouteProfile = isTestRuntime &&
+        skipOptionalStartupWarmups &&
+        requestedTestRouteScope === 'admin';
     const resolveAdminModuleForPath = (value) => {
         const path = value.split('?')[0] ?? value;
         const normalized = path.startsWith('/api/') ? path.slice(4) : path;
@@ -79,6 +85,13 @@ export function buildServer() {
             level: process.env.LOG_LEVEL ?? 'info'
         }
     });
+    if (requestedTestRouteScope && !adminTestRouteProfile) {
+        app.log.warn({
+            requestedTestRouteScope,
+            isTestRuntime,
+            skipOptionalStartupWarmups,
+        }, 'Ignoring TEST_ROUTE_SCOPE outside the test-only startup profile');
+    }
     const runStartupWarmups = async (source) => {
         if (skipOptionalStartupWarmups) {
             return;
@@ -250,14 +263,17 @@ export function buildServer() {
             return reply.code(401).send({ error: 'unauthorized' });
         }
         void touchUserPresence(userId).catch(() => { });
+        const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
+        if (!acceptance) {
+            return reply.code(401).send({ error: 'unauthorized' });
+        }
         if (isPolicyAcceptanceBypassRoute(request)) {
             return;
         }
-        const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
-        if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+        if (!hasAcceptedRequiredPolicies(acceptance)) {
             return reply.code(428).send({
                 error: 'policy_acceptance_required',
-                ...buildPolicyAcceptanceState(acceptance ?? {}),
+                ...buildPolicyAcceptanceState(acceptance),
             });
         }
     });
@@ -323,6 +339,7 @@ export function buildServer() {
         instance.register(adminRoutes);
         instance.register(tenantAdminRoutes);
         instance.register(advertRoutes);
+        instance.register(marketplaceRoutes);
     };
     // Routes
     registerRootRoutes(app);

@@ -4,6 +4,7 @@ const isVitestRuntime = String(process.env.VITEST ?? '').trim().toLowerCase() ==
 const databaseUrl = isVitestRuntime && String(process.env.TEST_DATABASE_URL ?? '').trim().length > 0
     ? String(process.env.TEST_DATABASE_URL).trim()
     : config.databaseUrl;
+const databaseConnectionTimeoutMillis = Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 30000);
 /**
  * Validate DATABASE_URL early so failure is explicit.
  */
@@ -23,7 +24,10 @@ export const pool = new Pool({
         },
     max: 10, // cap concurrent DB connections (Railway free tier limit)
     idleTimeoutMillis: 30000, // release idle connections after 30 s
-    connectionTimeoutMillis: 5000, // fail fast if pool is exhausted
+    connectionTimeoutMillis: Number.isFinite(databaseConnectionTimeoutMillis) &&
+        databaseConnectionTimeoutMillis > 0
+        ? databaseConnectionTimeoutMillis
+        : 30000,
 });
 /**
  * Optional: log connection errors clearly instead of silent crashes

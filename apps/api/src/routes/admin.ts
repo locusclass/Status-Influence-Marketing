@@ -4374,6 +4374,197 @@ export async function adminRoutes(app: FastifyInstance) {
     return { proof: res };
   });
 
+  // ── AI proof verification review queue ────────────────────────────────────────
+
+  app.get('/admin/proofs/verification-queue', { preHandler: [app.adminOnly] }, async (request) => {
+    const query = request.query as any;
+    const { limit, offset } = parsePaging(query);
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_PROOFS)) {
+        return { proofs: [] };
+      }
+      const conditions: string[] = ["p.verification_status = 'MANUAL_REVIEW'"];
+      const params: any[] = [];
+      let idx = 1;
+
+      const state = { conditions, params, idx };
+      appendTenantScope(state, access, {
+        country: 'c.country_id',
+        division: 'c.division_id',
+      });
+      idx = state.idx;
+
+      const where = `WHERE ${conditions.join(' AND ')}`;
+      const res = await client.query(
+        `SELECT
+           p.id,
+           p.session_id,
+           p.user_id,
+           p.video_url,
+           p.status,
+           p.decision,
+           p.verification_status,
+           p.ai_provider,
+           p.ai_model,
+           p.viewer_count_detected,
+           p.viewer_count_confidence,
+           p.campaign_visible,
+           p.whatsapp_ui_detected,
+           p.authenticity_score,
+           p.suspected_tampering,
+           p.fraud_risk_score,
+           p.fraud_signals,
+           p.missing_evidence,
+           p.ai_recommendation,
+           p.reasoning_summary,
+           p.confidence,
+           p.observed_views,
+           p.challenge_seen,
+           p.created_at,
+           p.updated_at,
+           c.id AS campaign_id,
+           c.title AS campaign_title
+         FROM proofs p
+         JOIN verification_sessions s ON s.id = p.session_id
+         JOIN campaigns c ON c.id = s.campaign_id
+         ${where}
+         ORDER BY p.created_at ASC
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      );
+      return { proofs: res.rows };
+    });
+  });
+
+  app.get('/admin/proofs/:proof_id/verification', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { proof_id: string };
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_PROOFS)) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+      const res = await client.query(
+        `SELECT
+           p.*,
+           c.id AS campaign_id,
+           c.title AS campaign_title,
+           c.platform AS campaign_platform,
+           s.challenge_code,
+           s.challenge_phrase,
+           s.script AS verification_script
+         FROM proofs p
+         JOIN verification_sessions s ON s.id = p.session_id
+         JOIN campaigns c ON c.id = s.campaign_id
+         WHERE p.id = $1
+         LIMIT 1`,
+        [params.proof_id]
+      );
+      const proof = res.rows[0];
+      if (!proof) {
+        reply.code(404);
+        return { error: 'proof_not_found' };
+      }
+      if (!matchesTenantScope(access, { country_id: proof.country_id, division_id: proof.division_id })) {
+        reply.code(404);
+        return { error: 'proof_not_found' };
+      }
+      return { proof };
+    });
+  });
+
+  app.patch('/admin/proofs/:proof_id/verification-decision', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { proof_id: string };
+    const body = z.object({
+      action: z.enum(['approve', 'reject', 'return_for_resubmission']),
+      reason: z.string().trim().max(1000).optional(),
+    }).parse(request.body);
+
+    return withTransaction(async (client) => {
+      const access = await getLiveDashboardAccess(client, request);
+      if (!hasAdminModuleAccess(access, ADMIN_MODULE_PROOFS)) {
+        reply.code(403);
+        return { error: 'forbidden' };
+      }
+
+      const proofRes = await client.query(
+        `SELECT p.*, c.country_id, c.division_id, s.campaign_id
+         FROM proofs p
+         JOIN verification_sessions s ON s.id = p.session_id
+         JOIN campaigns c ON c.id = s.campaign_id
+         WHERE p.id = $1 LIMIT 1`,
+        [params.proof_id]
+      );
+      const proof = proofRes.rows[0];
+      if (!proof) {
+        reply.code(404);
+        return { error: 'proof_not_found' };
+      }
+      if (!matchesTenantScope(access, { country_id: proof.country_id, division_id: proof.division_id })) {
+        reply.code(404);
+        return { error: 'proof_not_found' };
+      }
+
+      const adminUserId = (request.user as any).sub as string;
+
+      if (body.action === 'approve') {
+        // Check not already paid
+        const existingJob = await client.query(
+          `SELECT id FROM job_queue WHERE job_type='PAYOUT_PROOF' AND payload->>'proof_id'=$1 AND status IN ('QUEUED','PROCESSING','DONE') LIMIT 1`,
+          [params.proof_id]
+        );
+        await client.query(
+          `UPDATE proofs
+           SET verification_status='APPROVED',
+               decision='VERIFIED',
+               status='VERIFIED',
+               reviewed_by_admin_id=$2,
+               reviewed_at=now(),
+               updated_at=now()
+           WHERE id=$1`,
+          [params.proof_id, adminUserId]
+        );
+        await markContractCompletedForVerifiedProof(client, params.proof_id);
+        if (!existingJob.rows[0]) {
+          await jobRepo.enqueue(client, 'PAYOUT_PROOF', { proof_id: params.proof_id });
+        }
+        await logAudit(client, adminUserId, 'APPROVE_PROOF_VERIFICATION', 'proof', params.proof_id, { action: body.action, reason: body.reason });
+      } else if (body.action === 'reject') {
+        await client.query(
+          `UPDATE proofs
+           SET verification_status='REJECTED',
+               decision='REJECTED',
+               status='REJECTED',
+               verification_failure_reason=$2,
+               reviewed_by_admin_id=$3,
+               reviewed_at=now(),
+               updated_at=now()
+           WHERE id=$1`,
+          [params.proof_id, body.reason ?? null, adminUserId]
+        );
+        await logAudit(client, adminUserId, 'REJECT_PROOF_VERIFICATION', 'proof', params.proof_id, { action: body.action, reason: body.reason });
+      } else {
+        // return_for_resubmission
+        await client.query(
+          `UPDATE proofs
+           SET verification_status='RETURNED',
+               status='PENDING',
+               verification_failure_reason=$2,
+               reviewed_by_admin_id=$3,
+               reviewed_at=now(),
+               updated_at=now()
+           WHERE id=$1`,
+          [params.proof_id, body.reason ?? null, adminUserId]
+        );
+        await logAudit(client, adminUserId, 'RETURN_PROOF_FOR_RESUBMISSION', 'proof', params.proof_id, { action: body.action, reason: body.reason });
+      }
+
+      const updated = await client.query('SELECT * FROM proofs WHERE id=$1', [params.proof_id]);
+      return { proof: updated.rows[0] };
+    });
+  });
+
   // ── Ambassador account verification recordings (admin review) ─────────────────
 
   app.get('/admin/user-verifications', { preHandler: [app.adminOnly] }, async (request) => {
