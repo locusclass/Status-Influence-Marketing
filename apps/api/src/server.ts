@@ -354,17 +354,21 @@ export function buildServer() {
     }
     void touchUserPresence(userId).catch(() => {});
 
+    const acceptance = await withTransaction(async (client) =>
+      loadUserPolicyAcceptance(client, userId)
+    );
+    if (!acceptance) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+
     if (isPolicyAcceptanceBypassRoute(request)) {
       return;
     }
 
-    const acceptance = await withTransaction(async (client) =>
-      loadUserPolicyAcceptance(client, userId)
-    );
-    if (!acceptance || !hasAcceptedRequiredPolicies(acceptance)) {
+    if (!hasAcceptedRequiredPolicies(acceptance)) {
       return reply.code(428).send({
         error: 'policy_acceptance_required',
-        ...buildPolicyAcceptanceState(acceptance ?? {}),
+        ...buildPolicyAcceptanceState(acceptance),
       });
     }
   });

@@ -264,13 +264,6 @@ function roleForLegacyScope(user: Record<string, unknown>) {
   if (explicit !== ADMIN_ROLE_USER) {
     return explicit;
   }
-
-  const accountRole = normalizeAccountRole(user);
-  const activeRole = normalizeActiveRole(user);
-  if (accountRole === 'ADMIN' || activeRole === 'ADMIN') {
-    return ADMIN_ROLE_SUPER_ADMIN;
-  }
-
   return ADMIN_ROLE_USER;
 }
 

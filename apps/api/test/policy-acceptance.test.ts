@@ -88,16 +88,16 @@ describe('Policy acceptance gate', () => {
     app = serverModule.buildServer();
     await applySchema(pool);
     await app.ready();
-  });
+  }, 120000);
 
   beforeEach(async () => {
     await resetDatabase();
-  });
+  }, 120000);
 
   afterAll(async () => {
     await app.close();
     await pool.end();
-  });
+  }, 120000);
 
   it('blocks protected prefixed routes until both policy documents are accepted', async () => {
     await insertBusiness();
