@@ -32,6 +32,9 @@ importers:
       '@fastify/swagger-ui':
         specifier: ^1.10.0
         version: 1.10.2
+      '@google/generative-ai':
+        specifier: ^0.21.0
+        version: 0.21.0
       '@prime/shared':
         specifier: workspace:*
         version: link:../../packages/shared

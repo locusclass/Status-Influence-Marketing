@@ -10,3 +10,4 @@ export * from './admin.js';
 export * from './tenantAdmin.js';
 export * from './chat.js';
 export * from './advert.js';
+export * from './aiAdmin.js';
