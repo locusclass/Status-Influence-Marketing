@@ -6,7 +6,21 @@ import { fileURLToPath } from 'url';
 export function getTestPool() {
   const url = process.env.TEST_DATABASE_URL;
   if (!url) return null;
-  return new Pool({ connectionString: url });
+  const connectionTimeoutMillis = Number(
+    process.env.DB_CONNECTION_TIMEOUT_MS ?? 30000
+  );
+  return new Pool({
+    connectionString: url,
+    ssl: /localhost|127\.0\.0\.1/i.test(url)
+      ? false
+      : {
+          rejectUnauthorized: false,
+        },
+    connectionTimeoutMillis:
+      Number.isFinite(connectionTimeoutMillis) && connectionTimeoutMillis > 0
+        ? connectionTimeoutMillis
+        : 30000,
+  });
 }
 
 async function hasExpectedSchema(pool: Pool) {

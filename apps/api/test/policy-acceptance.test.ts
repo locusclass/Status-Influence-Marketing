@@ -99,12 +99,12 @@ describe('Policy acceptance gate', () => {
     await pool.end();
   });
 
-  it('blocks protected routes until both policy documents are accepted', async () => {
+  it('blocks protected prefixed routes until both policy documents are accepted', async () => {
     await insertBusiness();
 
     const loginResponse = await app.inject({
       method: 'POST',
-      url: '/auth/login',
+      url: '/api/auth/login',
       payload: {
         email: 'policy-business@example.com',
         password: 'Password123!',
@@ -121,7 +121,7 @@ describe('Policy acceptance gate', () => {
 
     const blockedResponse = await app.inject({
       method: 'GET',
-      url: '/dashboard/summary',
+      url: '/api/dashboard/summary',
       headers: { authorization: `Bearer ${loginBody.token}` },
     });
 
@@ -133,7 +133,7 @@ describe('Policy acceptance gate', () => {
 
     const policyResponse = await app.inject({
       method: 'GET',
-      url: '/account/policies',
+      url: '/api/account/policies',
       headers: { authorization: `Bearer ${loginBody.token}` },
     });
 
@@ -154,7 +154,7 @@ describe('Policy acceptance gate', () => {
 
     const acceptResponse = await app.inject({
       method: 'POST',
-      url: '/account/policies/accept',
+      url: '/api/account/policies/accept',
       headers: { authorization: `Bearer ${loginBody.token}` },
       payload: {
         privacy_policy_version: CURRENT_PRIVACY_POLICY_VERSION,
@@ -174,12 +174,12 @@ describe('Policy acceptance gate', () => {
 
     const unlockedResponse = await app.inject({
       method: 'GET',
-      url: '/dashboard/summary',
+      url: '/api/dashboard/summary',
       headers: { authorization: `Bearer ${acceptBody.token}` },
     });
 
     expect(unlockedResponse.statusCode).toBe(200);
-  });
+  }, 120000);
 
   it('allows prefixed policy routes to bypass the acceptance gate', async () => {
     await insertBusiness();
@@ -227,5 +227,5 @@ describe('Policy acceptance gate', () => {
         policies_accepted: true,
       },
     });
-  });
+  }, 120000);
 });

@@ -77,8 +77,15 @@ import {
 export function buildServer() {
   const skipOptionalStartupWarmups =
     process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
+  const requestedTestRouteScope =
+    process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() ?? '';
+  const isTestRuntime =
+    process.env.NODE_ENV === 'test' ||
+    String(process.env.VITEST ?? '').trim().toLowerCase() === 'true';
   const adminTestRouteProfile =
-    process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() === 'admin';
+    isTestRuntime &&
+    skipOptionalStartupWarmups &&
+    requestedTestRouteScope === 'admin';
 
   const resolveAdminModuleForPath = (value: string) => {
     const path = value.split('?')[0] ?? value;
@@ -133,6 +140,17 @@ export function buildServer() {
       level: process.env.LOG_LEVEL ?? 'info'
     }
   });
+
+  if (requestedTestRouteScope && !adminTestRouteProfile) {
+    app.log.warn(
+      {
+        requestedTestRouteScope,
+        isTestRuntime,
+        skipOptionalStartupWarmups,
+      },
+      'Ignoring TEST_ROUTE_SCOPE outside the test-only startup profile'
+    );
+  }
 
   const runStartupWarmups = async (source: string) => {
     if (skipOptionalStartupWarmups) {
