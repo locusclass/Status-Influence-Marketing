@@ -1,10 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { hashPassword } from '../src/services/auth.js';
-import {
-  CURRENT_PLATFORM_POLICY_VERSION,
-  CURRENT_PRIVACY_POLICY_VERSION,
-} from '../src/services/policies.js';
 import { applySchema, getTestPool } from './db.js';
 
 const pool = getTestPool();
@@ -76,7 +72,7 @@ async function insertBusiness() {
   return result.rows[0];
 }
 
-describe('Policy acceptance gate', () => {
+describe('Policy compatibility endpoints', () => {
   if (!pool) {
     it('skipped: TEST_DATABASE_URL not set', () => expect(true).toBe(true));
     return;
@@ -99,7 +95,7 @@ describe('Policy acceptance gate', () => {
     await pool.end();
   }, 120000);
 
-  it('blocks protected prefixed routes until both policy documents are accepted', async () => {
+  it('does not block protected prefixed routes anymore', async () => {
     await insertBusiness();
 
     const loginResponse = await app.inject({
@@ -114,22 +110,16 @@ describe('Policy acceptance gate', () => {
     expect(loginResponse.statusCode).toBe(200);
     const loginBody = loginResponse.json();
     expect(loginBody.user).toMatchObject({
-      policies_accepted: false,
-      privacy_policy_required_version: CURRENT_PRIVACY_POLICY_VERSION,
-      platform_policy_required_version: CURRENT_PLATFORM_POLICY_VERSION,
+      policies_accepted: true,
     });
 
-    const blockedResponse = await app.inject({
+    const campaignsResponse = await app.inject({
       method: 'GET',
-      url: '/api/dashboard/summary',
+      url: '/api/campaigns?limit=20&offset=0',
       headers: { authorization: `Bearer ${loginBody.token}` },
     });
 
-    expect(blockedResponse.statusCode).toBe(428);
-    expect(blockedResponse.json()).toMatchObject({
-      error: 'policy_acceptance_required',
-      policies_accepted: false,
-    });
+    expect(campaignsResponse.statusCode).toBe(200);
 
     const policyResponse = await app.inject({
       method: 'GET',
@@ -140,15 +130,7 @@ describe('Policy acceptance gate', () => {
     expect(policyResponse.statusCode).toBe(200);
     expect(policyResponse.json()).toMatchObject({
       acceptance: {
-        policies_accepted: false,
-      },
-      policies: {
-        privacy_policy: {
-          version: CURRENT_PRIVACY_POLICY_VERSION,
-        },
-        platform_policy: {
-          version: CURRENT_PLATFORM_POLICY_VERSION,
-        },
+        policies_accepted: true,
       },
     });
 
@@ -156,32 +138,16 @@ describe('Policy acceptance gate', () => {
       method: 'POST',
       url: '/api/account/policies/accept',
       headers: { authorization: `Bearer ${loginBody.token}` },
-      payload: {
-        privacy_policy_version: CURRENT_PRIVACY_POLICY_VERSION,
-        platform_policy_version: CURRENT_PLATFORM_POLICY_VERSION,
-        accept_privacy_policy: true,
-        accept_platform_policy: true,
-      },
     });
 
     expect(acceptResponse.statusCode).toBe(200);
     const acceptBody = acceptResponse.json();
     expect(acceptBody.user).toMatchObject({
       policies_accepted: true,
-      privacy_policy_accepted_version: CURRENT_PRIVACY_POLICY_VERSION,
-      platform_policy_accepted_version: CURRENT_PLATFORM_POLICY_VERSION,
     });
-
-    const unlockedResponse = await app.inject({
-      method: 'GET',
-      url: '/api/dashboard/summary',
-      headers: { authorization: `Bearer ${acceptBody.token}` },
-    });
-
-    expect(unlockedResponse.statusCode).toBe(200);
   }, 120000);
 
-  it('allows prefixed policy routes to bypass the acceptance gate', async () => {
+  it('keeps policy endpoints as accepted no-ops for older clients', async () => {
     await insertBusiness();
 
     const loginResponse = await app.inject({
@@ -205,7 +171,7 @@ describe('Policy acceptance gate', () => {
     expect(policyResponse.statusCode).toBe(200);
     expect(policyResponse.json()).toMatchObject({
       acceptance: {
-        policies_accepted: false,
+        policies_accepted: true,
       },
     });
 
@@ -213,12 +179,6 @@ describe('Policy acceptance gate', () => {
       method: 'POST',
       url: '/api/account/policies/accept',
       headers: { authorization: `Bearer ${loginBody.token}` },
-      payload: {
-        privacy_policy_version: CURRENT_PRIVACY_POLICY_VERSION,
-        platform_policy_version: CURRENT_PLATFORM_POLICY_VERSION,
-        accept_privacy_policy: true,
-        accept_platform_policy: true,
-      },
     });
 
     expect(acceptResponse.statusCode).toBe(200);

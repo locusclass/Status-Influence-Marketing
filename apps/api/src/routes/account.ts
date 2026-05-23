@@ -39,8 +39,6 @@ import {
 import {
   buildCurrentPolicyDocuments,
   buildPolicyAcceptanceState,
-  CURRENT_PLATFORM_POLICY_VERSION,
-  CURRENT_PRIVACY_POLICY_VERSION,
   ensurePolicyAcceptanceColumns,
   policyAcceptanceSelectSql,
 } from '../services/policies.js';
@@ -110,13 +108,6 @@ const ambassadorCapacitySchema = z.object({
 
 const accountWhatsappVerifySchema = z.object({
   phone: z.string().trim().min(7).max(20).optional(),
-});
-
-const accountPolicyAcceptanceSchema = z.object({
-  privacy_policy_version: z.string().trim().min(1),
-  platform_policy_version: z.string().trim().min(1),
-  accept_privacy_policy: z.boolean().optional(),
-  accept_platform_policy: z.boolean().optional(),
 });
 
 const accountNotificationUpdateSchema = z.object({
@@ -781,42 +772,20 @@ export async function accountRoutes(app: FastifyInstance) {
         userSub === 'ariaka-access'
           ? '00000000-0000-0000-0000-000000000000'
           : userSub;
-      const parsed = accountPolicyAcceptanceSchema.safeParse(request.body ?? {});
-      if (!parsed.success) {
-        reply.code(400);
-        return { error: 'validation_failed', issues: parsed.error.issues };
-      }
-
-      if (
-        parsed.data.privacy_policy_version !== CURRENT_PRIVACY_POLICY_VERSION ||
-        parsed.data.platform_policy_version !== CURRENT_PLATFORM_POLICY_VERSION
-      ) {
-        reply.code(409);
-        return {
-          error: 'policy_version_mismatch',
-          policies: buildCurrentPolicyDocuments(),
-        };
-      }
 
       return withTransaction(async (client) => {
         await ensurePolicyAcceptanceColumns(client);
-        const updated = await client.query(
+        const result = await client.query(
           `
-          UPDATE users
-          SET privacy_policy_accepted_version = $2,
-              privacy_policy_accepted_at = NOW(),
-              platform_policy_accepted_version = $3,
-              platform_policy_accepted_at = NOW()
+          SELECT
+            *,
+            ${policyAcceptanceSelectSql('u')}
+          FROM users u
           WHERE id = $1
-          RETURNING *
           `,
-          [
-            userId,
-            CURRENT_PRIVACY_POLICY_VERSION,
-            CURRENT_PLATFORM_POLICY_VERSION,
-          ]
+          [userId]
         );
-        const user = updated.rows[0];
+        const user = result.rows[0];
         if (!user) {
           reply.code(404);
           return { error: 'user_not_found' };
