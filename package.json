@@ -5,6 +5,9 @@
   "scripts": {
     "build": "pnpm -r build",
     "start": "node apps/api/dist/index.js",
+    "start:api": "node apps/api/dist/index.js",
+    "start:worker": "node apps/worker/dist/index.js",
+    "start:combined": "node scripts/start-runtime.mjs",
     "dev:api": "pnpm --filter @prime/shared build && pnpm --filter @prime/api dev",
     "dev:worker": "pnpm --filter @prime/shared build && pnpm --filter @prime/worker dev",
     "lint": "pnpm -r lint",

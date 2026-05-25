@@ -17,6 +17,7 @@ import { ensurePublicIdColumns } from './services/publicId.js';
 import { ensureAdminOperationsSchema } from './services/adminOperations.js';
 import { ensurePrimarySuperAdmin, hasAdminModuleAccess, resolveLiveDashboardAccess, } from './services/adminTenant.js';
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
+import { maskErrorResponsePayload, normalizePublicErrorCode, } from './errorResponses.js';
 export function buildServer() {
     const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
     const requestedTestRouteScope = process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() ?? '';
@@ -231,6 +232,9 @@ export function buildServer() {
             err: error
         }, `request:error ${request.method} ${request.url}`);
     });
+    app.addHook('preSerialization', async (_request, reply, payload) => {
+        return maskErrorResponsePayload(payload, reply.statusCode);
+    });
     app.setErrorHandler((error, request, reply) => {
         request.log.error({
             reqId: request.id,
@@ -246,8 +250,9 @@ export function buildServer() {
             reply.header('Access-Control-Allow-Credentials', 'true');
             reply.header('Vary', 'Origin');
         }
-        reply.status(error.statusCode ?? 500).send({
-            error: error.statusCode && error.statusCode < 500 ? error.message : 'internal_server_error'
+        const statusCode = error.statusCode ?? 500;
+        reply.status(statusCode).send({
+            error: normalizePublicErrorCode(error?.code ?? error.message, statusCode),
         });
     });
     app.decorate('authenticate', async (request, reply) => {

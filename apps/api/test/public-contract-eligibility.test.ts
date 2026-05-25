@@ -107,7 +107,7 @@ describe('Retired public contracts', () => {
 
     expect(response.statusCode).toBe(410);
     expect(response.json()).toMatchObject({
-      error: 'public_contracts_retired',
+      code: 'public_contracts_retired',
     });
   });
 
@@ -124,7 +124,7 @@ describe('Retired public contracts', () => {
 
     expect(blocked.statusCode).toBe(400);
     expect(blocked.json()).toMatchObject({
-      error: 'validation_error',
+      code: 'validation_error',
     });
   });
 });

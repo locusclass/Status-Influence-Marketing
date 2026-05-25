@@ -237,7 +237,7 @@ describe('Tenant admin architecture', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(dashboardAccess.statusCode).toBe(403);
-    expect(dashboardAccess.json()).toMatchObject({ error: 'forbidden' });
+    expect(dashboardAccess.json()).toMatchObject({ code: 'forbidden' });
   });
 
   it('lets a persisted super admin reach dashboard routes', async () => {
@@ -401,7 +401,7 @@ describe('Tenant admin architecture', () => {
     });
     expect(suspendedOverview.statusCode).toBe(403);
     expect(suspendedOverview.json()).toMatchObject({
-      error: 'admin_suspended',
+      code: 'admin_suspended',
     });
 
     const auditRows = await pool.query(
@@ -572,7 +572,7 @@ describe('Tenant admin architecture', () => {
       },
     });
     expect(duplicateEmail.statusCode).toBe(409);
-    expect(duplicateEmail.json()).toMatchObject({ error: 'email_taken' });
+    expect(duplicateEmail.json()).toMatchObject({ code: 'email_taken' });
 
     const duplicatePhone = await app.inject({
       method: 'POST',
@@ -589,7 +589,7 @@ describe('Tenant admin architecture', () => {
       },
     });
     expect(duplicatePhone.statusCode).toBe(409);
-    expect(duplicatePhone.json()).toMatchObject({ error: 'phone_taken' });
+    expect(duplicatePhone.json()).toMatchObject({ code: 'phone_taken' });
   });
 
   it('returns a bad request when admin scope assignments reference unknown tenants', async () => {
@@ -624,7 +624,7 @@ describe('Tenant admin architecture', () => {
     });
     expect(invalidCountry.statusCode).toBe(400);
     expect(invalidCountry.json()).toMatchObject({
-      error: 'country_scope_not_found',
+      code: 'country_scope_not_found',
     });
 
     const invalidDivision = await app.inject({
@@ -644,7 +644,7 @@ describe('Tenant admin architecture', () => {
     });
     expect(invalidDivision.statusCode).toBe(400);
     expect(invalidDivision.json()).toMatchObject({
-      error: 'division_scope_not_found',
+      code: 'division_scope_not_found',
     });
   });
 
@@ -879,7 +879,7 @@ describe('Tenant admin architecture', () => {
       payload: { role: 'ADMIN' },
     });
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toMatchObject({ error: 'forbidden' });
+    expect(response.json()).toMatchObject({ code: 'forbidden' });
 
     const userRes = await pool.query(
       'SELECT role, active_role FROM users WHERE id = $1 LIMIT 1',

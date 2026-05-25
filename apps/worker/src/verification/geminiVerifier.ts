@@ -257,7 +257,12 @@ export class GeminiVerifier implements Verifier {
 
       // ── Call Gemini ───────────────────────────────────────────────────────
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: modelName });
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: {
+          responseMimeType: 'application/json',
+        },
+      });
 
       const attemptParse = async (): Promise<GeminiVerificationResponse> => {
         const result = await model.generateContent(contentParts);

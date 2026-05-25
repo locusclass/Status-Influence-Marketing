@@ -33,6 +33,11 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
    - `pnpm --filter @prime/api dev`
 5. Start worker:
    - `pnpm --filter @prime/worker dev`
+6. Optional combined runtime (mirrors Railway):
+   - `pnpm --filter @prime/shared build`
+   - `pnpm --filter @prime/api build`
+   - `pnpm --filter @prime/worker build`
+   - `pnpm run start:combined`
 
 ## YO Uganda payment configuration
 - Use the Yo merchant portal username and API key for production collections.
@@ -48,8 +53,11 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 
 ## Railway deployment
 - Railway uses Nixpacks and reads `railway.json`.
+- `railway.json` starts both API and worker in one service via `pnpm run start:combined`.
+- `nixpacks.toml` installs `ffmpeg`, which Gemini verification needs for frame extraction.
 - Set all environment variables in Railway.
-- Do not hardcode ports; API and worker read `PORT`.
+- Keep `RUN_WORKER=true` unless you intentionally want an API-only deployment.
+- Do not hardcode ports; API reads `PORT`.
 
 ## Environment variables
 ### API
@@ -75,12 +83,17 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `YO_API_PASSWORD`
 - `YO_AUTHORIZATION`
 - `YO_WEBHOOK_SECRET_HASH`
+- `GEMINI_API_KEY`
+- `GEMINI_VERIFICATION_MODEL`
+- `RUN_WORKER`
 
 ### Worker
 - `PORT`
 - `DATABASE_URL`
 - `FINGERPRINT_PEPPER`
 - `VERIFIER_PROVIDER` (`python_bot|deterministic|gemini|mock`)
+- `GEMINI_API_KEY`
+- `GEMINI_VERIFICATION_MODEL`
 - `PYTHON_EXECUTABLE` (for python bot, e.g. `python3`)
 - `PYTHON_VERIFIER_SCRIPT` (defaults to `apps/worker/scripts/wa_status_verifier.py`)
 - `WA_VERIFIER_FPS`

@@ -74,6 +74,10 @@ import {
   isPolicyAcceptanceBypassRoute,
   loadUserPolicyAcceptance,
 } from './services/policies.js';
+import {
+  maskErrorResponsePayload,
+  normalizePublicErrorCode,
+} from './errorResponses.js';
 
 export function buildServer() {
   const skipOptionalStartupWarmups =
@@ -318,6 +322,10 @@ export function buildServer() {
     );
   });
 
+  app.addHook('preSerialization', async (_request, reply, payload) => {
+    return maskErrorResponsePayload(payload, reply.statusCode);
+  });
+
   app.setErrorHandler((error, request, reply) => {
     request.log.error(
       {
@@ -336,8 +344,12 @@ export function buildServer() {
       reply.header('Access-Control-Allow-Credentials', 'true');
       reply.header('Vary', 'Origin');
     }
-    reply.status(error.statusCode ?? 500).send({
-      error: error.statusCode && error.statusCode < 500 ? error.message : 'internal_server_error'
+    const statusCode = error.statusCode ?? 500;
+    reply.status(statusCode).send({
+      error: normalizePublicErrorCode(
+        (error as any)?.code ?? error.message,
+        statusCode
+      ),
     });
   });
 

@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import './loadEnv.js';
+import { spawnSync } from 'child_process';
 import { pool, withTransaction } from './db.js';
 import { platformAdapters } from './verification/adapters.js';
 import { MockVerifier } from './verification/mockVerifier.js';
@@ -31,7 +32,52 @@ import {
   recordCampaignRevenueEntry,
 } from '@prime/shared';
 
-const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
+type VerifierProvider = 'gemini' | 'python_bot' | 'deterministic' | 'mock';
+
+function resolveVerifierProvider(): VerifierProvider {
+  const configured = process.env.VERIFIER_PROVIDER?.trim();
+  if (!configured) {
+    return process.env.GEMINI_API_KEY?.trim() ? 'gemini' : 'python_bot';
+  }
+
+  if (
+    configured !== 'gemini' &&
+    configured !== 'python_bot' &&
+    configured !== 'deterministic' &&
+    configured !== 'mock'
+  ) {
+    throw new Error(
+      `Unsupported VERIFIER_PROVIDER "${configured}". Expected gemini, python_bot, deterministic, or mock.`
+    );
+  }
+
+  return configured;
+}
+
+function ensureCommandAvailable(command: string) {
+  const result = spawnSync(command, ['-version'], { stdio: 'ignore' });
+  if (result.error) {
+    throw new Error(
+      `${command} is required when VERIFIER_PROVIDER=gemini. Install it or disable Gemini verification.`
+    );
+  }
+}
+
+function assertGeminiRuntime() {
+  const apiKey = process.env.GEMINI_API_KEY?.trim() ?? '';
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is required when VERIFIER_PROVIDER=gemini');
+  }
+
+  ensureCommandAvailable('ffmpeg');
+  ensureCommandAvailable('ffprobe');
+}
+
+const verifierProvider = resolveVerifierProvider();
+if (verifierProvider === 'gemini') {
+  assertGeminiRuntime();
+}
+
 const verifier =
   verifierProvider === 'gemini'
     ? new GeminiVerifier()

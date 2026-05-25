@@ -157,7 +157,7 @@ describe('Admin proof verification decision endpoints', () => {
     });
 
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toMatchObject({ error: 'admin_observer_read_only' });
+    expect(response.json()).toMatchObject({ code: 'admin_observer_read_only' });
   });
 
   it('observer admin cannot reject a proof (403 admin_observer_read_only)', async () => {
@@ -197,7 +197,7 @@ describe('Admin proof verification decision endpoints', () => {
     });
 
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toMatchObject({ error: 'admin_observer_read_only' });
+    expect(response.json()).toMatchObject({ code: 'admin_observer_read_only' });
   });
 
   it('super admin approve sets correct DB fields', async () => {

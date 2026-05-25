@@ -464,7 +464,7 @@ describe('YO Uganda payment routes', () => {
 
     expect(response.statusCode).toBe(403);
     expect(response.json()).toMatchObject({
-      error: 'forbidden',
+      code: 'forbidden',
     });
     expect(yoMocks.getTransactionStatus).not.toHaveBeenCalled();
   });
