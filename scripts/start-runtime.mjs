@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 
+const requireWorker = process.env.REQUIRE_WORKER === 'true';
 const services = [
   {
     name: 'api',
     command: process.execPath,
     args: ['apps/api/dist/index.js'],
+    required: true,
   },
 ];
 
@@ -13,6 +15,7 @@ if (process.env.RUN_WORKER !== 'false') {
     name: 'worker',
     command: process.execPath,
     args: ['apps/worker/dist/index.js'],
+    required: requireWorker,
   });
 }
 
@@ -80,6 +83,12 @@ for (const service of services) {
   children.set(service.name, child);
   bindOutput(child, service.name);
 
+  if (!service.required) {
+    process.stderr.write(
+      `[launcher] ${service.name} is running in optional mode; API healthchecks will stay up if it exits.\n`
+    );
+  }
+
   child.on('exit', (code, signal) => {
     children.delete(service.name);
     if (shuttingDown) {
@@ -88,16 +97,35 @@ for (const service of services) {
 
     const detail = signal ? `signal ${signal}` : `code ${code ?? 0}`;
     process.stderr.write(`[launcher] ${service.name} exited with ${detail}\n`);
-    shutdown(code ?? 1);
+
+    if (service.required) {
+      shutdown(code ?? 1);
+      return;
+    }
+
+    process.stderr.write(
+      `[launcher] ${service.name} was optional, so the remaining services will stay online.\n`
+    );
   });
 
   child.on('error', (error) => {
+    children.delete(service.name);
     if (shuttingDown) {
       return;
     }
 
-    process.stderr.write(`[launcher] failed to start ${service.name}: ${error.message}\n`);
-    shutdown(1);
+    process.stderr.write(
+      `[launcher] failed to start ${service.name}: ${error.message}\n`
+    );
+
+    if (service.required) {
+      shutdown(1);
+      return;
+    }
+
+    process.stderr.write(
+      `[launcher] ${service.name} is optional, so the remaining services will stay online.\n`
+    );
   });
 }
 

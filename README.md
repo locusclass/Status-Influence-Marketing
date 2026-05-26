@@ -57,6 +57,7 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `nixpacks.toml` installs `ffmpeg`, which Gemini verification needs for frame extraction.
 - Set all environment variables in Railway.
 - Keep `RUN_WORKER=true` unless you intentionally want an API-only deployment.
+- The API process is required for healthchecks. The worker runs in optional mode by default so a worker-only crash does not take the web service down. Set `REQUIRE_WORKER=true` if you want the combined runtime to fail fast when the worker exits.
 - Do not hardcode ports; API reads `PORT`.
 
 ## Environment variables
@@ -86,6 +87,7 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `GEMINI_API_KEY`
 - `GEMINI_VERIFICATION_MODEL`
 - `RUN_WORKER`
+- `REQUIRE_WORKER`
 
 ### Worker
 - `PORT`
@@ -107,6 +109,7 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `YO_AUTHORIZATION`
 - `YO_WEBHOOK_SECRET_HASH`
 - `API_BASE_URL`
+- `REQUIRE_WORKER`
 
 ## Threat model for screen recording verification
 - Replay attacks: challenge code + phrase tied to session with expiry.
