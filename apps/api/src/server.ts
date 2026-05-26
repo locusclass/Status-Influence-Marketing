@@ -53,6 +53,7 @@ import {
   tenantAdminRoutes,
   advertRoutes,
   aiAdminRoutes,
+  vendorRoutes,
 } from './routes/index.js';
 import { marketplaceRoutes } from './routes/marketplace.js';
 import {
@@ -472,6 +473,7 @@ export function buildServer() {
     instance.register(advertRoutes);
     instance.register(marketplaceRoutes);
     instance.register(aiAdminRoutes);
+    instance.register(vendorRoutes);
   };
 
   // Routes
