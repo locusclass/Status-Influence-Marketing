@@ -340,19 +340,21 @@ export function verifyWebhookSignature(rawBody, signature, secret) {
     if (!signature || !secret) {
         return false;
     }
-    if (signature === secret) {
-        return true;
-    }
+    const matches = (candidate) => {
+        const left = Buffer.from(signature);
+        const right = Buffer.from(candidate);
+        return left.length === right.length && crypto.timingSafeEqual(left, right);
+    };
     const hmac = crypto
         .createHmac('sha256', secret)
         .update(rawBody)
         .digest('base64');
-    if (signature === hmac) {
+    if (matches(hmac)) {
         return true;
     }
     const hex = crypto
         .createHmac('sha256', secret)
         .update(rawBody)
         .digest('hex');
-    return signature === hex;
+    return matches(hex);
 }

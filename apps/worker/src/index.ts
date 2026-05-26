@@ -1,13 +1,15 @@
 import './loadEnv.js';
 import { spawnSync } from 'child_process';
 import { pool, withTransaction } from './db.js';
+import { assertSecureRuntimeConfig } from './config.js';
 import { platformAdapters } from './verification/adapters.js';
 import { MockVerifier } from './verification/mockVerifier.js';
 import { GeminiVerifier } from './verification/geminiVerifier.js';
 import { DeterministicVerifier } from './verification/deterministicVerifier.js';
 import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
-import { downloadToTemp, removeTemp } from './utils.js';
+import { resolveTrustedApiUploadUrl } from './uploadTrust.js';
+import { downloadToTemp, removeTemp, writeBufferToTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
 import {
   calculateAmbassadorPayoutBreakdown,
@@ -31,6 +33,8 @@ import {
   normalizeCampaignPlatform,
   recordCampaignRevenueEntry,
 } from '@prime/shared';
+
+assertSecureRuntimeConfig();
 
 type VerifierProvider = 'gemini' | 'python_bot' | 'deterministic' | 'mock';
 
@@ -71,6 +75,16 @@ function assertGeminiRuntime() {
 
   ensureCommandAvailable('ffmpeg');
   ensureCommandAvailable('ffprobe');
+}
+
+function readProofUploadStoragePath(meta: unknown) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return null;
+  }
+  const storagePath = String(
+    (meta as Record<string, unknown>).upload_storage_path ?? ''
+  ).trim();
+  return storagePath || null;
 }
 
 const verifierProvider = resolveVerifierProvider();
@@ -1882,25 +1896,29 @@ async function processVerificationJob(job: any) {
     const campaign = campaignRes.rows[0];
     if (!campaign) throw new Error('campaign_not_found');
 
-    // Resolve full video URL
-    let videoUrl: string = proof.video_url;
-    if (videoUrl.startsWith('/uploads/files/') || videoUrl.startsWith('/api/uploads/files/')) {
-      videoUrl = (process.env.API_BASE_URL ?? '') + videoUrl;
+    const proofStoragePath = readProofUploadStoragePath(proof.meta);
+    if (proofStoragePath) {
+      const { downloadFirebaseObject } = await import('./firebaseStorageWorker.js');
+      const bytes = await downloadFirebaseObject(proofStoragePath);
+      tempVideoPath = await writeBufferToTemp(bytes);
+    } else {
+      const videoUrl = resolveTrustedApiUploadUrl(
+        proof.video_url,
+        process.env.API_BASE_URL ?? ''
+      );
+      if (!videoUrl) {
+        throw new Error('proof_video_unavailable');
+      }
+      tempVideoPath = await downloadToTemp(videoUrl);
     }
-
-    tempVideoPath = await downloadToTemp(videoUrl);
 
     const tamper = await runTamperChecks(tempVideoPath);
 
-    // Resolve campaign media URL to absolute so the verifier can download it
-    let campaignMediaUrl: string | null = campaign.media_url ?? null;
-    if (
-      campaignMediaUrl &&
-      (campaignMediaUrl.startsWith('/uploads/files/') ||
-        campaignMediaUrl.startsWith('/api/uploads/files/'))
-    ) {
-      campaignMediaUrl = (process.env.API_BASE_URL ?? '') + campaignMediaUrl;
-    }
+    // Only fetch campaign creative from trusted local uploads.
+    const campaignMediaUrl = resolveTrustedApiUploadUrl(
+      campaign.media_url ?? null,
+      process.env.API_BASE_URL ?? ''
+    );
 
     const result = await verifier.verify(
       tempVideoPath,

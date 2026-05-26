@@ -205,6 +205,9 @@ export async function loadUserPolicyAcceptance(client: any, userId: string) {
     `
     SELECT
       id,
+      status,
+      status_reason,
+      status_reason_updated_at,
       privacy_policy_accepted_version,
       privacy_policy_accepted_at,
       platform_policy_accepted_version,

@@ -469,7 +469,7 @@ describe('YO Uganda payment routes', () => {
     expect(yoMocks.getTransactionStatus).not.toHaveBeenCalled();
   });
 
-  it('uses the stored YO reference on the public return route and redirects back to the browser target', async () => {
+  it('uses the stored YO reference on the public return route and redirects back to an allowed browser target', async () => {
     const { escrow, txn } = await createCampaignFundingTransaction({
       transactionReference: 'yo-return-123',
       rawPayload: {
@@ -485,7 +485,7 @@ describe('YO Uganda payment routes', () => {
       })
     );
 
-    const browserTarget = 'https://example.com/payment/success';
+    const browserTarget = 'https://primestatus.site/payment/success';
     const response = await app.inject({
       method: 'GET',
       url: `/payments/return?tx_ref=${encodeURIComponent(
@@ -507,5 +507,32 @@ describe('YO Uganda payment routes', () => {
       escrow.id,
     ]);
     expect(fundedEscrow.rows[0].status).toBe('FUNDED');
+  });
+
+  it('ignores off-origin browser targets on the public return route', async () => {
+    const { txn } = await createCampaignFundingTransaction({
+      transactionReference: 'yo-return-456',
+      rawPayload: {
+        yo_transaction_reference: 'yo-return-456',
+      },
+    });
+    yoMocks.getTransactionStatus.mockResolvedValue(
+      buildYoResponse({
+        transactionReference: 'yo-return-456',
+        transactionStatus: 'SUCCESSFUL',
+        amount: Number(txn.amount),
+        merchantReference: txn.merchant_reference,
+      })
+    );
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/payments/return?tx_ref=${encodeURIComponent(
+        txn.merchant_reference
+      )}&target=${encodeURIComponent('https://evil.example/payment/success')}`,
+    });
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe('bakule://payment/return');
   });
 });

@@ -21,6 +21,12 @@ describe('YO Uganda payment configuration', () => {
     expect(verifyWebhookSignature(body, signature, secret)).toBe(true);
   });
 
+  it('does not accept the shared secret itself as a valid signature', () => {
+    const body = JSON.stringify({ hello: 'world' });
+    const secret = 'test-secret';
+    expect(verifyWebhookSignature(body, secret, secret)).toBe(false);
+  });
+
   it('maps Uganda checkout to UGX mobile money only', () => {
     expect(resolveYoUgandaCheckoutProfile('UG')).toEqual({
       country: 'UG',

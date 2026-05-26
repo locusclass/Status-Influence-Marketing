@@ -146,6 +146,7 @@ export function extractFirebaseObjectNameFromUrl(rawUrl) {
     if (!value) {
         return null;
     }
+    const isValidObjectName = (objectName) => /^[a-zA-Z0-9/._-]+$/.test(objectName);
     try {
         const parsed = new URL(value);
         const marker = '/uploads/files/';
@@ -153,7 +154,7 @@ export function extractFirebaseObjectNameFromUrl(rawUrl) {
         if (markerIndex >= 0) {
             const encodedObjectName = parsed.pathname.slice(markerIndex + marker.length);
             const objectName = decodeURIComponent(encodedObjectName);
-            return /^[a-zA-Z0-9._-]+$/.test(objectName) ? objectName : null;
+            return isValidObjectName(objectName) ? objectName : null;
         }
         return null;
     }
@@ -171,7 +172,7 @@ export function extractFirebaseObjectNameFromUrl(rawUrl) {
             return null;
         }
         const objectName = decodeURIComponent(encodedObjectName);
-        return /^[a-zA-Z0-9._-]+$/.test(objectName) ? objectName : null;
+        return isValidObjectName(objectName) ? objectName : null;
     }
 }
 export async function getFirebaseObjectMetadata(objectName) {

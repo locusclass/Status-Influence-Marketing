@@ -30,6 +30,7 @@ import {
   ADMIN_MODULE_WITHDRAWALS,
 } from '@prime/shared';
 import {
+  assertSecureRuntimeConfig,
   config,
   hasValidYoKeys,
   hasYoClientCredentials,
@@ -78,8 +79,13 @@ import {
   maskErrorResponsePayload,
   normalizePublicErrorCode,
 } from './errorResponses.js';
+import {
+  isUserAccountActive,
+  resolveDisabledAccountErrorCode,
+} from './services/roles.js';
 
 export function buildServer() {
+  assertSecureRuntimeConfig();
   const skipOptionalStartupWarmups =
     process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
   const requestedTestRouteScope =
@@ -257,6 +263,9 @@ export function buildServer() {
 
   app.register(jwt, {
     secret: config.jwtSecret,
+    sign: {
+      expiresIn: config.jwtExpiresIn,
+    },
   });
 
   app.register(multipart);
@@ -372,6 +381,11 @@ export function buildServer() {
     );
     if (!acceptance) {
       return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!isUserAccountActive((acceptance as any).status)) {
+      return reply.code(403).send({
+        error: resolveDisabledAccountErrorCode((acceptance as any).status),
+      });
     }
 
     if (isPolicyAcceptanceBypassRoute(request)) {

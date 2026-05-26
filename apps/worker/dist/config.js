@@ -8,6 +8,9 @@ function stripWrappingQuotes(value) {
     return trimmed;
 }
 const allowDirectApiBypass = allowDirectYoHostBypass(process.env.YO_ALLOW_DIRECT_API_BYPASS);
+const isTestRuntime = process.env.NODE_ENV === 'test' ||
+    String(process.env.VITEST ?? '').trim().toLowerCase() === 'true';
+const allowInsecureDevDefaults = isTestRuntime || process.env.ALLOW_INSECURE_DEV_DEFAULTS === '1';
 const yoConfig = {
     allowDirectApiBypass,
     baseUrl: normalizeYoTaskUrl(stripWrappingQuotes(process.env.YO_BASE_URL ??
@@ -53,4 +56,32 @@ export function resolveYoBaseUrl() {
 }
 export function resolveYoDirectFailoverBaseUrls() {
     return config.yo.directFailoverBaseUrls;
+}
+export function getStartupConfigIssues() {
+    const issues = [];
+    if (!config.databaseUrl.trim()) {
+        issues.push('DATABASE_URL is missing');
+    }
+    if (!config.fingerprintPepper.trim() ||
+        config.fingerprintPepper === 'dev-pepper') {
+        issues.push('FINGERPRINT_PEPPER is missing or using the development default');
+    }
+    return issues;
+}
+export function isFatalStartupIssue(issue) {
+    return (issue.includes('DATABASE_URL is missing') ||
+        issue.includes('FINGERPRINT_PEPPER is missing or using the development default'));
+}
+export function shouldAllowInsecureDevelopmentDefaults() {
+    return allowInsecureDevDefaults;
+}
+export function assertSecureRuntimeConfig() {
+    if (shouldAllowInsecureDevelopmentDefaults()) {
+        return;
+    }
+    const fatalIssues = getStartupConfigIssues().filter((issue) => isFatalStartupIssue(issue));
+    if (fatalIssues.length === 0) {
+        return;
+    }
+    throw new Error(`fatal_startup_configuration:${fatalIssues.join(' | ')}`);
 }

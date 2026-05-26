@@ -6,7 +6,7 @@ import { UserRepo } from '../repositories/userRepo.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 import { resolveCountry } from '../countryResolver.js';
 import { ensurePublicIdColumns } from '../services/publicId.js';
-import { ACCOUNT_ROLE_AMBASSADOR, buildAuthClaims, buildUserSession, normalizeRequestedUserRole, } from '../services/roles.js';
+import { ACCOUNT_ROLE_AMBASSADOR, buildAuthClaims, buildUserSession, isUserAccountActive, normalizeRequestedUserRole, resolveDisabledAccountErrorCode, } from '../services/roles.js';
 import { ADMIN_ROLE_USER, canAccessAdminDashboard } from '@prime/shared';
 import { recordAdminAudit, auditScopeFromAccess } from '../services/adminAudit.js';
 import { loadDashboardAccessContext, touchAdminLogin, } from '../services/adminTenant.js';
@@ -209,6 +209,10 @@ export async function authRoutes(app) {
             reply.code(401);
             return { error: 'invalid_credentials' };
         }
+        if (!isUserAccountActive(user.status)) {
+            reply.code(403);
+            return { error: resolveDisabledAccountErrorCode(user.status) };
+        }
         await withTransaction(async (client) => {
             await touchUserPresenceWithClient(client, String(user.id ?? ''), {
                 markLogin: true,
@@ -298,6 +302,12 @@ export async function authRoutes(app) {
             const isGoogleSignUp = body.auth_flow === 'SIGN_UP';
             const hasRealTypedPhone = typedPhone.length >= 7 && !typedPhone.startsWith('+999');
             if (existing) {
+                if (!isUserAccountActive(existing.status)) {
+                    reply.code(403);
+                    return {
+                        error: resolveDisabledAccountErrorCode(existing.status),
+                    };
+                }
                 if (isGoogleSignUp) {
                     reply.code(409);
                     return { error: 'google_account_exists' };
@@ -451,6 +461,12 @@ export async function authRoutes(app) {
                 return {
                     error: 'admin_access_required',
                     detail: 'This Google account has not been enabled for the admin dashboard yet.',
+                };
+            }
+            if (!isUserAccountActive(existing.status)) {
+                reply.code(403);
+                return {
+                    error: resolveDisabledAccountErrorCode(existing.status),
                 };
             }
             await upsertSocialProfile(client, existing.id, fullName || email, photoUrl);

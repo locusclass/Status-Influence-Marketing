@@ -7,7 +7,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import multipart from '@fastify/multipart';
 import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_CONTRACTS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_JOBS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PUBLIC_COMMUNICATION, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WALLETS, ADMIN_MODULE_WITHDRAWALS, } from '@prime/shared';
-import { config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
+import { assertSecureRuntimeConfig, config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
 import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes, advertRoutes, aiAdminRoutes, } from './routes/index.js';
 import { marketplaceRoutes } from './routes/marketplace.js';
@@ -18,7 +18,9 @@ import { ensureAdminOperationsSchema } from './services/adminOperations.js';
 import { ensurePrimarySuperAdmin, hasAdminModuleAccess, resolveLiveDashboardAccess, } from './services/adminTenant.js';
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 import { maskErrorResponsePayload, normalizePublicErrorCode, } from './errorResponses.js';
+import { isUserAccountActive, resolveDisabledAccountErrorCode, } from './services/roles.js';
 export function buildServer() {
+    assertSecureRuntimeConfig();
     const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
     const requestedTestRouteScope = process.env.TEST_ROUTE_SCOPE?.trim().toLowerCase() ?? '';
     const isTestRuntime = process.env.NODE_ENV === 'test' ||
@@ -187,6 +189,9 @@ export function buildServer() {
     });
     app.register(jwt, {
         secret: config.jwtSecret,
+        sign: {
+            expiresIn: config.jwtExpiresIn,
+        },
     });
     app.register(multipart);
     app.addHook('onListen', async () => {
@@ -271,6 +276,11 @@ export function buildServer() {
         const acceptance = await withTransaction(async (client) => loadUserPolicyAcceptance(client, userId));
         if (!acceptance) {
             return reply.code(401).send({ error: 'unauthorized' });
+        }
+        if (!isUserAccountActive(acceptance.status)) {
+            return reply.code(403).send({
+                error: resolveDisabledAccountErrorCode(acceptance.status),
+            });
         }
         if (isPolicyAcceptanceBypassRoute(request)) {
             return;

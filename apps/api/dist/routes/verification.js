@@ -3,9 +3,9 @@ import { withTransaction } from '../db.js';
 import { VerificationRepo } from '../repositories/verificationRepo.js';
 import { generateChallengeCode, generateChallengePhrase, hashFingerprint } from '../utils.js';
 import { randomInt } from 'crypto';
-import { config } from '../config.js';
 import { ensurePublicIdColumns, resolveUserId } from '../services/publicId.js';
 import { canAccessAmbassadorFeatures } from '../services/roles.js';
+import { extractFirebaseObjectNameFromUrl } from '../services/firebaseStorage.js';
 const SESSION_DURATION_SECONDS = 60;
 const SESSION_TTL_SECONDS = 10 * 60;
 const MIN_RECORDING_SECONDS = 58;
@@ -144,27 +144,65 @@ function hasDeadlinePassed(raw) {
     const deadline = Date.parse(String(raw));
     return Number.isFinite(deadline) && deadline < Date.now();
 }
-function isAllowedProofVideoUrl(value) {
-    if (value.startsWith('/uploads/files/') || value.startsWith('/api/uploads/files/')) {
-        const parsed = new URL(value, 'http://local.test');
-        const mime = String(parsed.searchParams.get('mime') ?? '').trim().toLowerCase();
-        return mime === 'video/mp4';
-    }
+function extractMediaAssetIdFromUrl(value) {
+    const candidate = String(value ?? '').trim();
+    if (!candidate)
+        return null;
     try {
-        const parsed = new URL(value);
-        if (!parsed.pathname.includes('/uploads/files/'))
-            return false;
-        const mime = String(parsed.searchParams.get('mime') ?? '').trim().toLowerCase();
-        if (mime !== 'video/mp4')
-            return false;
-        if (!config.apiBaseUrl)
-            return true;
-        const allowed = new URL(config.apiBaseUrl);
-        return parsed.host === allowed.host;
+        const parsed = new URL(candidate, 'http://local.test');
+        const path = parsed.pathname;
+        const marker = path.startsWith('/api/uploads/media/')
+            ? '/api/uploads/media/'
+            : '/uploads/media/';
+        if (!path.startsWith(marker)) {
+            return null;
+        }
+        const assetId = decodeURIComponent(path.slice(marker.length)).trim();
+        return /^[0-9a-f-]{36}$/i.test(assetId) ? assetId : null;
     }
     catch {
-        return false;
+        return null;
     }
+}
+async function resolveOwnedProofUploadAsset(client, userId, rawUrl) {
+    const assetId = extractMediaAssetIdFromUrl(rawUrl);
+    const objectName = extractFirebaseObjectNameFromUrl(rawUrl);
+    if (!assetId && !objectName) {
+        return null;
+    }
+    const params = [userId];
+    const identifiers = [];
+    if (assetId) {
+        params.push(assetId);
+        identifiers.push(`id = $${params.length}`);
+    }
+    if (objectName) {
+        params.push(objectName);
+        identifiers.push(`original_storage_path = $${params.length}`);
+    }
+    const result = await client.query(`
+    SELECT id, original_storage_path, mime_type
+    FROM media_assets
+    WHERE deleted_at IS NULL
+      AND owner_user_id = $1
+      AND upload_purpose = 'ambassador_proof_screen_recording'
+      AND (${identifiers.join(' OR ')})
+    LIMIT 1
+    `, params);
+    const asset = result.rows[0];
+    if (!asset) {
+        return null;
+    }
+    const mimeType = String(asset.mime_type ?? '').trim().toLowerCase();
+    const storagePath = String(asset.original_storage_path ?? '').trim();
+    if (mimeType !== 'video/mp4' || !storagePath) {
+        return null;
+    }
+    return {
+        assetId: String(asset.id),
+        storagePath,
+        canonicalUrl: `/uploads/media/${String(asset.id)}`,
+    };
 }
 async function ensureVerificationSessionColumns(client) {
     await ensurePublicIdColumns(client);
@@ -292,10 +330,6 @@ export async function verificationRoutes(app) {
             reply.code(401);
             return { error: 'unauthorized' };
         }
-        if (!isAllowedProofVideoUrl(body.proof_video_url)) {
-            reply.code(400);
-            return { error: 'invalid_proof_video_url' };
-        }
         const proof = await withTransaction(async (client) => {
             const session = await verificationRepo.getSession(client, body.session_id);
             if (!session)
@@ -307,7 +341,14 @@ export async function verificationRoutes(app) {
             const strictMetaError = validateStrictClientMeta(body.client_meta, session.script);
             if (strictMetaError)
                 return { error: strictMetaError };
+            const resolvedUpload = await resolveOwnedProofUploadAsset(client, authUser, body.proof_video_url);
+            if (!resolvedUpload) {
+                return { error: 'invalid_proof_video_url' };
+            }
             const existingForSession = await client.query('SELECT id FROM proofs WHERE session_id=$1 LIMIT 1', [body.session_id]);
+            if (existingForSession.rows[0]) {
+                return { error: 'proof_already_submitted' };
+            }
             const contract = await getActiveAmbassadorContract(client, session.campaign_id, authUser);
             if (!contract)
                 return { error: 'contract_not_active' };
@@ -323,8 +364,13 @@ export async function verificationRoutes(app) {
             const created = await verificationRepo.createProof(client, {
                 session_id: body.session_id,
                 user_id: authUser,
-                video_url: body.proof_video_url,
-                meta: body.client_meta ?? null
+                video_url: resolvedUpload.canonicalUrl,
+                meta: {
+                    ...(body.client_meta ?? {}),
+                    upload_asset_id: resolvedUpload.assetId,
+                    upload_storage_path: resolvedUpload.storagePath,
+                    upload_mime_type: 'video/mp4',
+                },
             });
             await verificationRepo.insertDeviceFingerprint(client, authUser, fingerprintHash);
             await client.query(`INSERT INTO job_queue (id, job_type, payload, status, run_at)

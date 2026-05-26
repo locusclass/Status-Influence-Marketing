@@ -61,6 +61,9 @@ function getBuckets() {
 function metaUrl(bucket, obj) {
     return `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(obj)}`;
 }
+function downloadUrl(bucket, obj) {
+    return `${metaUrl(bucket, obj)}?alt=media`;
+}
 export async function getFirebaseObjectMetadata(objectName) {
     try {
         const token = await getAccessToken();
@@ -94,4 +97,35 @@ export async function deleteFromFirebaseStorage(objectName) {
             return true;
     }
     return false;
+}
+export async function downloadFirebaseObject(objectName, maxBytes = 250 * 1024 * 1024) {
+    const token = await getAccessToken();
+    for (const bucket of getBuckets()) {
+        const res = await fetch(downloadUrl(bucket, objectName), {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 404) {
+            continue;
+        }
+        if (!res.ok || !res.body) {
+            const detail = await res.text().catch(() => '');
+            throw new Error(`firebase_storage_download_failed:${res.status}:${bucket}:${detail}`);
+        }
+        const sizeHeader = Number(res.headers.get('content-length') ?? 0);
+        if (Number.isFinite(sizeHeader) && sizeHeader > maxBytes) {
+            throw new Error('download_too_large');
+        }
+        const chunks = [];
+        let total = 0;
+        for await (const chunk of res.body) {
+            const buf = Buffer.from(chunk);
+            total += buf.length;
+            if (total > maxBytes) {
+                throw new Error('download_too_large');
+            }
+            chunks.push(buf);
+        }
+        return Buffer.concat(chunks);
+    }
+    throw new Error('firebase_storage_not_found');
 }

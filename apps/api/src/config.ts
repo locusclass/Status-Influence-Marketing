@@ -84,6 +84,11 @@ const configuredAtSenderId = stripWrappingQuotes(
 );
 const africaTalkingEnvironment =
   configuredAtUsername.trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'live';
+const isTestRuntime =
+  process.env.NODE_ENV === 'test' ||
+  String(process.env.VITEST ?? '').trim().toLowerCase() === 'true';
+const allowInsecureDevDefaults =
+  isTestRuntime || process.env.ALLOW_INSECURE_DEV_DEFAULTS === '1';
 
 const yoConfig = {
   allowDirectApiBypass,
@@ -139,6 +144,7 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   jwtSecret: process.env.JWT_SECRET ?? 'dev-secret',
+  jwtExpiresIn: stripWrappingQuotes(process.env.JWT_EXPIRES_IN ?? '12h'),
   corsOrigin: process.env.CORS_ORIGIN ?? '',
   apiBaseUrl: process.env.API_BASE_URL ?? '',
   publicAppBaseUrl: stripWrappingQuotes(
@@ -203,6 +209,22 @@ export function getStartupConfigIssues() {
   if (!config.jwtSecret.trim() || config.jwtSecret === 'dev-secret') {
     issues.push('JWT_SECRET is missing or using the development default');
   }
+  if (
+    !config.uploadSigningSecret.trim() ||
+    config.uploadSigningSecret === 'dev-upload-secret'
+  ) {
+    issues.push(
+      'UPLOAD_SIGNING_SECRET is missing or using the development default'
+    );
+  }
+  if (
+    !config.fingerprintPepper.trim() ||
+    config.fingerprintPepper === 'dev-pepper'
+  ) {
+    issues.push(
+      'FINGERPRINT_PEPPER is missing or using the development default'
+    );
+  }
 
   if (!configuredYoBaseUrl.trim()) {
     issues.push(YO_PROXY_URL_MISSING_MESSAGE);
@@ -264,8 +286,35 @@ export function isFatalStartupIssue(issue: string) {
     issue.includes('DATABASE_URL is missing') ||
     issue.includes('JWT_SECRET is missing') ||
     issue.includes('JWT_SECRET is missing or using the development default') ||
+    issue.includes(
+      'UPLOAD_SIGNING_SECRET is missing or using the development default'
+    ) ||
+    issue.includes(
+      'FINGERPRINT_PEPPER is missing or using the development default'
+    ) ||
     issue.includes(YO_API_USERNAME_MISSING_MESSAGE) ||
     issue.includes(YO_API_PASSWORD_MISSING_MESSAGE)
+  );
+}
+
+export function shouldAllowInsecureDevelopmentDefaults() {
+  return allowInsecureDevDefaults;
+}
+
+export function assertSecureRuntimeConfig() {
+  if (shouldAllowInsecureDevelopmentDefaults()) {
+    return;
+  }
+
+  const fatalIssues = getStartupConfigIssues().filter((issue) =>
+    isFatalStartupIssue(issue)
+  );
+  if (fatalIssues.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `fatal_startup_configuration:${fatalIssues.join(' | ')}`
   );
 }
 

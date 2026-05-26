@@ -21,6 +21,8 @@ export type ActiveRole =
   | typeof ACCOUNT_ROLE_BUSINESS
   | typeof ACCOUNT_ROLE_AMBASSADOR;
 
+export type UserAccountStatus = 'ACTIVE' | 'SUSPENDED' | 'BANNED';
+
 function normalizeLegacyRoleValue(value: unknown) {
   const role = String(value ?? '').trim().toUpperCase();
   if (role == 'ADVERTISER') return ACCOUNT_ROLE_BUSINESS;
@@ -90,6 +92,23 @@ export function normalizeRequestedUserRole(
   return null;
 }
 
+export function normalizeUserAccountStatus(value: unknown): UserAccountStatus {
+  const status = String(value ?? 'ACTIVE').trim().toUpperCase();
+  if (status === 'SUSPENDED') return 'SUSPENDED';
+  if (status === 'BANNED') return 'BANNED';
+  return 'ACTIVE';
+}
+
+export function isUserAccountActive(value: unknown) {
+  return normalizeUserAccountStatus(value) === 'ACTIVE';
+}
+
+export function resolveDisabledAccountErrorCode(value: unknown) {
+  return normalizeUserAccountStatus(value) === 'SUSPENDED'
+    ? 'account_suspended'
+    : 'account_disabled';
+}
+
 export function buildAuthClaims(user: {
   id: string;
   role?: unknown;
@@ -136,15 +155,12 @@ export function buildUserSession(user: Record<string, unknown>) {
   )
     .trim()
     .toUpperCase();
-  const accountStatus = String(user.status ?? 'ACTIVE').trim().toUpperCase();
+  const accountStatus = normalizeUserAccountStatus(user.status);
   return {
     id: String(user.id ?? ''),
     public_id: String(user.public_id ?? ''),
     email: String(user.email ?? ''),
-    status:
-      accountStatus === 'SUSPENDED' || accountStatus === 'BANNED'
-        ? accountStatus
-        : 'ACTIVE',
+    status: accountStatus,
     status_reason:
       user.status_reason == null ? null : String(user.status_reason),
     status_reason_updated_at: user.status_reason_updated_at ?? null,

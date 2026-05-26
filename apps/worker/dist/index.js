@@ -1,14 +1,55 @@
-import 'dotenv/config';
+import './loadEnv.js';
+import { spawnSync } from 'child_process';
 import { pool, withTransaction } from './db.js';
+import { assertSecureRuntimeConfig } from './config.js';
 import { MockVerifier } from './verification/mockVerifier.js';
 import { GeminiVerifier } from './verification/geminiVerifier.js';
 import { DeterministicVerifier } from './verification/deterministicVerifier.js';
 import { PythonBotVerifier } from './verification/pythonBotVerifier.js';
 import { runTamperChecks } from './verification/tamper.js';
-import { downloadToTemp, removeTemp } from './utils.js';
+import { resolveTrustedApiUploadUrl } from './uploadTrust.js';
+import { downloadToTemp, removeTemp, writeBufferToTemp } from './utils.js';
 import { v4 as uuid } from 'uuid';
 import { calculateAmbassadorPayoutBreakdown, generateMonthlyPayouts, deriveEngagementRate, doesSubmissionExist, extractMetricsSnapshot, getBurstWindowMinutes, getCampaignBurstMode, getCreatorScoreFloor, getPrimaryMetricTarget, getPublicContractUnitRate, getSubmissionActionType, getSubmissionPostId, getSubmissionPostUrl, getSubmissionPrimaryMetric, getSubmissionVideoUrl, isCreatorPlatform, AMBASSADOR_PLATFORM_FEE_PERCENT, normalizeCampaignPlatform, recordCampaignRevenueEntry, } from '@prime/shared';
-const verifierProvider = process.env.VERIFIER_PROVIDER ?? 'python_bot';
+assertSecureRuntimeConfig();
+function resolveVerifierProvider() {
+    const configured = process.env.VERIFIER_PROVIDER?.trim();
+    if (!configured) {
+        return process.env.GEMINI_API_KEY?.trim() ? 'gemini' : 'python_bot';
+    }
+    if (configured !== 'gemini' &&
+        configured !== 'python_bot' &&
+        configured !== 'deterministic' &&
+        configured !== 'mock') {
+        throw new Error(`Unsupported VERIFIER_PROVIDER "${configured}". Expected gemini, python_bot, deterministic, or mock.`);
+    }
+    return configured;
+}
+function ensureCommandAvailable(command) {
+    const result = spawnSync(command, ['-version'], { stdio: 'ignore' });
+    if (result.error) {
+        throw new Error(`${command} is required when VERIFIER_PROVIDER=gemini. Install it or disable Gemini verification.`);
+    }
+}
+function assertGeminiRuntime() {
+    const apiKey = process.env.GEMINI_API_KEY?.trim() ?? '';
+    if (!apiKey) {
+        throw new Error('GEMINI_API_KEY is required when VERIFIER_PROVIDER=gemini');
+    }
+    ensureCommandAvailable('ffmpeg');
+    ensureCommandAvailable('ffprobe');
+}
+function readProofUploadStoragePath(meta) {
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+        return null;
+    }
+    const storagePath = String(meta.upload_storage_path ?? '').trim();
+    return storagePath || null;
+}
+const verifierProvider = resolveVerifierProvider();
+if (verifierProvider === 'gemini') {
+    assertGeminiRuntime();
+}
 const verifier = verifierProvider === 'gemini'
     ? new GeminiVerifier()
     : verifierProvider === 'python_bot'
@@ -1400,20 +1441,22 @@ async function processVerificationJob(job) {
         const campaign = campaignRes.rows[0];
         if (!campaign)
             throw new Error('campaign_not_found');
-        // Resolve full video URL
-        let videoUrl = proof.video_url;
-        if (videoUrl.startsWith('/uploads/files/') || videoUrl.startsWith('/api/uploads/files/')) {
-            videoUrl = (process.env.API_BASE_URL ?? '') + videoUrl;
+        const proofStoragePath = readProofUploadStoragePath(proof.meta);
+        if (proofStoragePath) {
+            const { downloadFirebaseObject } = await import('./firebaseStorageWorker.js');
+            const bytes = await downloadFirebaseObject(proofStoragePath);
+            tempVideoPath = await writeBufferToTemp(bytes);
         }
-        tempVideoPath = await downloadToTemp(videoUrl);
+        else {
+            const videoUrl = resolveTrustedApiUploadUrl(proof.video_url, process.env.API_BASE_URL ?? '');
+            if (!videoUrl) {
+                throw new Error('proof_video_unavailable');
+            }
+            tempVideoPath = await downloadToTemp(videoUrl);
+        }
         const tamper = await runTamperChecks(tempVideoPath);
-        // Resolve campaign media URL to absolute so the verifier can download it
-        let campaignMediaUrl = campaign.media_url ?? null;
-        if (campaignMediaUrl &&
-            (campaignMediaUrl.startsWith('/uploads/files/') ||
-                campaignMediaUrl.startsWith('/api/uploads/files/'))) {
-            campaignMediaUrl = (process.env.API_BASE_URL ?? '') + campaignMediaUrl;
-        }
+        // Only fetch campaign creative from trusted local uploads.
+        const campaignMediaUrl = resolveTrustedApiUploadUrl(campaign.media_url ?? null, process.env.API_BASE_URL ?? '');
         const result = await verifier.verify(tempVideoPath, {
             platform: campaign.platform,
             title: campaign.title,

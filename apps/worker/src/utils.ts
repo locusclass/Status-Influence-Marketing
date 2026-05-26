@@ -32,6 +32,16 @@ export async function downloadToTemp(url: string): Promise<string> {
   return filePath;
 }
 
+export async function writeBufferToTemp(
+  buffer: Buffer,
+  fileName = 'video.mp4'
+): Promise<string> {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gm-video-'));
+  const filePath = path.join(tmpDir, fileName);
+  await fs.promises.writeFile(filePath, buffer);
+  return filePath;
+}
+
 export async function removeTemp(filePath: string) {
   const dir = path.dirname(filePath);
   await fs.promises.rm(dir, { recursive: true, force: true });

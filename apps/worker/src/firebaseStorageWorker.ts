@@ -72,6 +72,10 @@ function metaUrl(bucket: string, obj: string) {
   return `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(obj)}`;
 }
 
+function downloadUrl(bucket: string, obj: string) {
+  return `${metaUrl(bucket, obj)}?alt=media`;
+}
+
 export async function getFirebaseObjectMetadata(
   objectName: string
 ): Promise<{ size: number | null; contentType: string | null } | null> {
@@ -103,4 +107,45 @@ export async function deleteFromFirebaseStorage(objectName: string): Promise<boo
     if (res.ok) return true;
   }
   return false;
+}
+
+export async function downloadFirebaseObject(
+  objectName: string,
+  maxBytes = 250 * 1024 * 1024
+): Promise<Buffer> {
+  const token = await getAccessToken();
+
+  for (const bucket of getBuckets()) {
+    const res = await fetch(downloadUrl(bucket, objectName), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 404) {
+      continue;
+    }
+    if (!res.ok || !res.body) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(
+        `firebase_storage_download_failed:${res.status}:${bucket}:${detail}`
+      );
+    }
+
+    const sizeHeader = Number(res.headers.get('content-length') ?? 0);
+    if (Number.isFinite(sizeHeader) && sizeHeader > maxBytes) {
+      throw new Error('download_too_large');
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+      const buf = Buffer.from(chunk);
+      total += buf.length;
+      if (total > maxBytes) {
+        throw new Error('download_too_large');
+      }
+      chunks.push(buf);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  throw new Error('firebase_storage_not_found');
 }

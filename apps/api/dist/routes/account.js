@@ -167,6 +167,26 @@ function normalizeStringList(values) {
         .map((value) => String(value ?? '').trim())
         .filter((value) => value.length > 0)));
 }
+function extractMediaAssetIdFromUrl(value) {
+    const candidate = String(value ?? '').trim();
+    if (!candidate)
+        return null;
+    try {
+        const parsed = new URL(candidate, 'http://local.test');
+        const path = parsed.pathname;
+        const marker = path.startsWith('/api/uploads/media/')
+            ? '/api/uploads/media/'
+            : '/uploads/media/';
+        if (!path.startsWith(marker)) {
+            return null;
+        }
+        const assetId = decodeURIComponent(path.slice(marker.length)).trim();
+        return /^[0-9a-f-]{36}$/i.test(assetId) ? assetId : null;
+    }
+    catch {
+        return null;
+    }
+}
 async function deleteAccountMedia(urls) {
     const objectNames = Array.from(new Set(urls
         .map((url) => extractFirebaseObjectNameFromUrl(url))
@@ -1003,6 +1023,8 @@ export async function accountRoutes(app) {
             .toLowerCase()
             .includes('multipart/form-data');
         let videoUrl = '';
+        let uploadedStoragePath = null;
+        let uploadedSizeBytes = null;
         if (isMultipart) {
             const pending = await withTransaction(async (client) => {
                 const existing = await client.query(`SELECT id FROM ambassador_verification_recordings
@@ -1022,7 +1044,8 @@ export async function accountRoutes(app) {
                     maxBytes: 0,
                     allowedMimeTypes: ['video/mp4'],
                 });
-                videoUrl = resolveUploadedFileUrl(uploaded.fileUrl, request);
+                uploadedStoragePath = uploaded.objectName;
+                uploadedSizeBytes = uploaded.sizeBytes;
             }
             catch (error) {
                 const handled = resolveMediaUploadError(error);
@@ -1036,22 +1059,7 @@ export async function accountRoutes(app) {
         else {
             const body = z
                 .object({
-                video_url: z
-                    .string()
-                    .url()
-                    .max(2048)
-                    .refine((value) => {
-                    try {
-                        const parsed = new URL(value);
-                        return (parsed.pathname.includes('/uploads/files/') &&
-                            String(parsed.searchParams.get('mime') ?? '')
-                                .trim()
-                                .toLowerCase() === 'video/mp4');
-                    }
-                    catch {
-                        return false;
-                    }
-                }, 'video_url must point to an uploaded mp4 file'),
+                video_url: z.string().trim().min(1).max(2048),
             })
                 .safeParse(request.body);
             if (!body.success) {
@@ -1068,10 +1076,53 @@ export async function accountRoutes(app) {
                 reply.code(409);
                 return { error: 'verification_recording_pending' };
             }
+            let canonicalVideoUrl = videoUrl;
+            if (uploadedStoragePath) {
+                const assetId = uuid();
+                await client.query(`INSERT INTO media_assets
+               (id, owner_user_id, asset_type, upload_purpose, mime_type,
+                processing_status, moderation_status, verification_status,
+                original_storage_path, file_size_bytes)
+             VALUES ($1, $2, 'video', 'ambassador_verification_recording', 'video/mp4',
+                     'uploaded', 'pending', 'not_required', $3, $4)`, [assetId, userId, uploadedStoragePath, uploadedSizeBytes]);
+                canonicalVideoUrl = `/uploads/media/${assetId}`;
+            }
+            else {
+                const assetId = extractMediaAssetIdFromUrl(videoUrl);
+                const objectName = extractFirebaseObjectNameFromUrl(videoUrl);
+                if (!assetId && !objectName) {
+                    reply.code(400);
+                    return { error: 'invalid_video_url' };
+                }
+                const params = [userId];
+                const identifiers = [];
+                if (assetId) {
+                    params.push(assetId);
+                    identifiers.push(`id = $${params.length}`);
+                }
+                if (objectName) {
+                    params.push(objectName);
+                    identifiers.push(`original_storage_path = $${params.length}`);
+                }
+                const assetRes = await client.query(`SELECT id
+             FROM media_assets
+             WHERE deleted_at IS NULL
+               AND owner_user_id = $1
+               AND upload_purpose = 'ambassador_verification_recording'
+               AND mime_type = 'video/mp4'
+               AND (${identifiers.join(' OR ')})
+             LIMIT 1`, params);
+                const asset = assetRes.rows[0];
+                if (!asset) {
+                    reply.code(400);
+                    return { error: 'invalid_video_url' };
+                }
+                canonicalVideoUrl = `/uploads/media/${String(asset.id)}`;
+            }
             const res = await client.query(`INSERT INTO ambassador_verification_recordings (user_id, video_url)
            VALUES ($1, $2)
-           RETURNING id, status, created_at`, [userId, videoUrl]);
-            return { recording: res.rows[0], video_url: videoUrl };
+           RETURNING id, status, created_at`, [userId, canonicalVideoUrl]);
+            return { recording: res.rows[0], video_url: canonicalVideoUrl };
         });
     });
     app.get('/account/verification/recording', { preHandler: [app.authenticate] }, async (request) => {

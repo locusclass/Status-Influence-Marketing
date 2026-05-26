@@ -100,7 +100,10 @@ export async function aiAdminRoutes(app) {
         }
         if (!config.gemini.apiKey.trim()) {
             reply.code(503);
-            return { error: 'gemini_not_configured' };
+            return {
+                error: 'gemini_not_configured',
+                detail: 'GEMINI_API_KEY is not available in the API service environment.',
+            };
         }
         const body = request.body;
         const message = body?.message?.trim() ?? '';
@@ -134,9 +137,19 @@ ${systemContext}`;
             role: h.role,
             parts: [{ text: h.content }],
         }));
-        const chat = model.startChat({ history });
-        const result = await chat.sendMessage(message);
-        const responseText = result.response.text();
-        return { response: responseText };
+        try {
+            const chat = model.startChat({ history });
+            const result = await chat.sendMessage(message);
+            const responseText = result.response.text();
+            return { response: responseText };
+        }
+        catch (error) {
+            request.log.error({ err: error }, 'gemini_admin_chat_failed');
+            reply.code(502);
+            return {
+                error: 'gemini_request_failed',
+                detail: error instanceof Error ? error.message : 'Gemini request failed',
+            };
+        }
     });
 }

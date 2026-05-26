@@ -11,6 +11,8 @@ const EXPLICIT_USER_MESSAGES: Record<string, string> = {
   unauthorized: 'Please sign in to continue.',
   forbidden: 'You do not have permission to do that.',
   admin_suspended: 'This admin account is suspended.',
+  account_suspended: 'This account is suspended.',
+  account_disabled: 'This account is disabled.',
   policy_acceptance_required:
     'You need to accept the required policies before continuing.',
   validation_error: 'Please check the highlighted fields and try again.',

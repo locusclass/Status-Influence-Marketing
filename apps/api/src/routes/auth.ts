@@ -12,7 +12,9 @@ import {
   ACCOUNT_ROLE_BUSINESS,
   buildAuthClaims,
   buildUserSession,
+  isUserAccountActive,
   normalizeRequestedUserRole,
+  resolveDisabledAccountErrorCode,
 } from '../services/roles.js';
 import { ADMIN_ROLE_USER, canAccessAdminDashboard } from '@prime/shared';
 import { recordAdminAudit, auditScopeFromAccess } from '../services/adminAudit.js';
@@ -286,6 +288,10 @@ export async function authRoutes(app: FastifyInstance) {
       reply.code(401);
       return { error: 'invalid_credentials' };
     }
+    if (!isUserAccountActive(user.status)) {
+      reply.code(403);
+      return { error: resolveDisabledAccountErrorCode(user.status) };
+    }
 
     await withTransaction(async (client) => {
       await touchUserPresenceWithClient(client, String(user.id ?? ''), {
@@ -394,6 +400,12 @@ export async function authRoutes(app: FastifyInstance) {
       const hasRealTypedPhone =
         typedPhone.length >= 7 && !typedPhone.startsWith('+999');
       if (existing) {
+        if (!isUserAccountActive(existing.status)) {
+          reply.code(403);
+          return {
+            error: resolveDisabledAccountErrorCode(existing.status),
+          } as any;
+        }
         if (isGoogleSignUp) {
           reply.code(409);
           return { error: 'google_account_exists' } as any;
@@ -589,6 +601,12 @@ export async function authRoutes(app: FastifyInstance) {
           error: 'admin_access_required',
           detail:
             'This Google account has not been enabled for the admin dashboard yet.',
+        } as any;
+      }
+      if (!isUserAccountActive(existing.status)) {
+        reply.code(403);
+        return {
+          error: resolveDisabledAccountErrorCode(existing.status),
         } as any;
       }
 

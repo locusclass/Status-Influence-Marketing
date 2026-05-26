@@ -42,30 +42,18 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
-function getForwardedHeader(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0]?.trim() || undefined;
-  return value?.split(',')[0]?.trim() || undefined;
-}
-
 /**
  * Converts a relative upload path (e.g. "/uploads/files/xxx?mime=...") to an absolute URL.
- * Uses API_BASE_URL env var first, then falls back to the incoming request's forwarded headers.
- * If no base can be determined the relative path is returned unchanged.
+ * Only uses the configured API_BASE_URL. If it is not configured, the relative path is returned.
  */
-export function resolveUploadedFileUrl(relativeUrl: string, request: any): string {
+export function resolveUploadedFileUrl(relativeUrl: string, _request: any): string {
   const explicit = config.apiBaseUrl.trim();
-  let origin: string | null = null;
   if (explicit) {
     try {
-      origin = new URL(explicit).origin;
+      return `${new URL(explicit).origin}${relativeUrl}`;
     } catch {
-      // fall through to request headers
+      return relativeUrl;
     }
   }
-  if (!origin) {
-    const proto = getForwardedHeader(request.headers['x-forwarded-proto']) || request.protocol || 'https';
-    const host = getForwardedHeader(request.headers['x-forwarded-host']) || getForwardedHeader(request.headers.host);
-    if (host) origin = `${proto}://${host}`;
-  }
-  return origin ? `${origin}${relativeUrl}` : relativeUrl;
+  return relativeUrl;
 }

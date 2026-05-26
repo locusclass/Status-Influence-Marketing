@@ -69,6 +69,22 @@ export function normalizeRequestedUserRole(value) {
         return ACCOUNT_ROLE_AMBASSADOR;
     return null;
 }
+export function normalizeUserAccountStatus(value) {
+    const status = String(value ?? 'ACTIVE').trim().toUpperCase();
+    if (status === 'SUSPENDED')
+        return 'SUSPENDED';
+    if (status === 'BANNED')
+        return 'BANNED';
+    return 'ACTIVE';
+}
+export function isUserAccountActive(value) {
+    return normalizeUserAccountStatus(value) === 'ACTIVE';
+}
+export function resolveDisabledAccountErrorCode(value) {
+    return normalizeUserAccountStatus(value) === 'SUSPENDED'
+        ? 'account_suspended'
+        : 'account_disabled';
+}
 export function buildAuthClaims(user) {
     const role = normalizeAccountRole(user.role);
     const activeRole = normalizeActiveRole(user.active_role, role);
@@ -100,14 +116,12 @@ export function buildUserSession(user) {
     const pricePrivacyMode = String(user.price_privacy_mode ?? 'NEGOTIABLE')
         .trim()
         .toUpperCase();
-    const accountStatus = String(user.status ?? 'ACTIVE').trim().toUpperCase();
+    const accountStatus = normalizeUserAccountStatus(user.status);
     return {
         id: String(user.id ?? ''),
         public_id: String(user.public_id ?? ''),
         email: String(user.email ?? ''),
-        status: accountStatus === 'SUSPENDED' || accountStatus === 'BANNED'
-            ? accountStatus
-            : 'ACTIVE',
+        status: accountStatus,
         status_reason: user.status_reason == null ? null : String(user.status_reason),
         status_reason_updated_at: user.status_reason_updated_at ?? null,
         role,

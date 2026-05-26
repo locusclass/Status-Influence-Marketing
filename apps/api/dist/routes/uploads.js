@@ -12,6 +12,7 @@ const VALID_PURPOSES = new Set([
     'listing_media',
     'ambassador_proof_screenshot',
     'ambassador_proof_screen_recording',
+    'ambassador_verification_recording',
     'user_avatar',
     'business_logo',
     'admin_attachment',
@@ -19,6 +20,20 @@ const VALID_PURPOSES = new Set([
 const PROOF_PURPOSES = new Set([
     'ambassador_proof_screenshot',
     'ambassador_proof_screen_recording',
+]);
+const PRIVATE_PURPOSES = new Set([
+    ...PROOF_PURPOSES,
+    'ambassador_verification_recording',
+    'admin_attachment',
+]);
+const PUBLIC_PROXY_PURPOSES = new Set([
+    'campaign_banner',
+    'campaign_gallery',
+    'campaign_video',
+    'landing_page_media',
+    'listing_media',
+    'user_avatar',
+    'business_logo',
 ]);
 /** Bytes allowed per upload purpose. */
 const SIZE_LIMITS = {
@@ -29,6 +44,7 @@ const SIZE_LIMITS = {
     listing_media: 200 * 1024 * 1024,
     ambassador_proof_screenshot: 10 * 1024 * 1024,
     ambassador_proof_screen_recording: 250 * 1024 * 1024,
+    ambassador_verification_recording: 250 * 1024 * 1024,
     user_avatar: 5 * 1024 * 1024,
     business_logo: 5 * 1024 * 1024,
     admin_attachment: 50 * 1024 * 1024,
@@ -42,6 +58,7 @@ const ALLOWED_MIMES = {
     listing_media: ['image/', 'video/', 'audio/'],
     ambassador_proof_screenshot: ['image/'],
     ambassador_proof_screen_recording: ['video/'],
+    ambassador_verification_recording: ['video/'],
     user_avatar: ['image/'],
     business_logo: ['image/'],
     admin_attachment: ['image/', 'video/', 'application/pdf'],
@@ -78,6 +95,9 @@ function storagePath(purpose, userId, fileId, filename) {
     if (purpose.startsWith('ambassador_proof')) {
         return `proofs/${userId}/${name}`;
     }
+    if (purpose === 'ambassador_verification_recording') {
+        return `verification/${userId}/${name}`;
+    }
     if (purpose === 'user_avatar' || purpose === 'business_logo') {
         return `users/${userId}/${purpose}/${name}`;
     }
@@ -88,6 +108,25 @@ function storagePath(purpose, userId, fileId, filename) {
         return `listings/media/${name}`;
     }
     return `campaigns/media/${name}`;
+}
+function isPrivateUploadPurpose(purpose) {
+    return PRIVATE_PURPOSES.has(purpose);
+}
+function isPublicUploadPurpose(purpose) {
+    return PUBLIC_PROXY_PURPOSES.has(purpose);
+}
+function buildStoredFileUrl(assetId, objectName, mimeType, purpose) {
+    if (isPrivateUploadPurpose(purpose)) {
+        return `/uploads/media/${assetId}`;
+    }
+    return `/uploads/files/${encodeURIComponent(objectName)}?mime=${encodeURIComponent(mimeType)}`;
+}
+function isPublicLegacyObjectPath(objectName) {
+    return (objectName.startsWith('campaigns/media/') ||
+        objectName.startsWith('listings/media/') ||
+        /^users\/[^/]+\/(?:user_avatar|business_logo)\//.test(objectName) ||
+        objectName.startsWith('avatar-') ||
+        objectName.startsWith('chat-group-logo-'));
 }
 async function checkReadAccess(requestUserId, requestUserRole, assetRow) {
     const purpose = assetRow.upload_purpose ?? '';
@@ -268,7 +307,7 @@ export async function uploadRoutes(app) {
             await pool.query(`INSERT INTO job_queue (id, job_type, payload, status, run_at)
          VALUES (gen_random_uuid(), 'PROCESS_MEDIA', $1, 'QUEUED', now())`, [JSON.stringify({ asset_id: fileId, object_name: objectName, mime_type: uploadMime, purpose })]);
         }
-        const fileUrl = `/uploads/files/${encodeURIComponent(objectName)}?mime=${encodeURIComponent(uploadMime)}`;
+        const fileUrl = buildStoredFileUrl(fileId, objectName, uploadMime, purpose);
         return { file_url: fileUrl, asset_id: fileId };
     });
     // GET /uploads/files/:file  (existing public proxy — retained for campaign/non-proof media)
@@ -277,12 +316,28 @@ export async function uploadRoutes(app) {
         if (!/^[a-zA-Z0-9/._-]+$/.test(file)) {
             return reply.code(400).send({ error: 'invalid_file' });
         }
+        const assetRes = await pool.query(`SELECT id, upload_purpose, mime_type
+       FROM media_assets
+       WHERE deleted_at IS NULL
+         AND ($1 = original_storage_path OR $1 = optimized_storage_path OR $1 = thumbnail_storage_path)
+       LIMIT 1`, [file]);
+        const asset = assetRes.rows[0] ?? null;
+        if (asset && !isPublicUploadPurpose(String(asset.upload_purpose ?? ''))) {
+            return reply.code(404).send({ error: 'not_found' });
+        }
+        if (!asset && !isPublicLegacyObjectPath(file)) {
+            return reply.code(404).send({ error: 'not_found' });
+        }
         const downloaded = await downloadFromFirebaseStorage({ objectName: file, range: request.headers.range });
         if (!downloaded)
             return reply.code(404).send({ error: 'not_found' });
         const mime = String(request.query.mime ?? '');
         reply.header('Accept-Ranges', 'bytes');
-        reply.type(mime || downloaded.contentType || 'application/octet-stream');
+        reply.type(mime ||
+            String(asset?.mime_type ?? '').trim() ||
+            downloaded.contentType ||
+            'application/octet-stream');
+        reply.header('Cache-Control', 'public, max-age=3600');
         if (downloaded.status === 206)
             reply.code(206);
         if (downloaded.contentLength)

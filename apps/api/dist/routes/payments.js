@@ -190,6 +190,14 @@ export async function paymentRoutes(app) {
     const legacyFlutterwaveRouteBase = '/payments/flutterwave';
     const yoRecommendedPollIntervalMs = 10_000;
     const yoVerifyPendingCacheWindowMs = yoRecommendedPollIntervalMs;
+    const publicAppOrigin = (() => {
+        try {
+            return new URL(config.publicAppBaseUrl).origin;
+        }
+        catch {
+            return null;
+        }
+    })();
     const verifySchema = z
         .object({
         transaction_id: z
@@ -648,6 +656,9 @@ export async function paymentRoutes(app) {
     };
     const resolveBrowserTarget = (request, fallbackPath) => {
         const query = request.query ?? {};
+        const isAllowedBrowserUrl = (target) => (target.protocol === 'http:' || target.protocol === 'https:') &&
+            publicAppOrigin != null &&
+            target.origin === publicAppOrigin;
         const queryTarget = query.target;
         if (typeof queryTarget === 'string' && queryTarget.trim()) {
             try {
@@ -657,9 +668,7 @@ export async function paymentRoutes(app) {
                         continue;
                     target.searchParams.set(key, String(value));
                 }
-                if (target.protocol === 'http:' ||
-                    target.protocol === 'https:' ||
-                    target.protocol === 'bakule:') {
+                if (isAllowedBrowserUrl(target)) {
                     return target.toString();
                 }
             }
@@ -676,7 +685,9 @@ export async function paymentRoutes(app) {
                         continue;
                     target.searchParams.set(key, String(value));
                 }
-                return target.toString();
+                if (isAllowedBrowserUrl(target)) {
+                    return target.toString();
+                }
             }
             catch {
                 // Ignore invalid referers and use the deep link fallback.
