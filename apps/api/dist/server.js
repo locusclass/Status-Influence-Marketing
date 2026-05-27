@@ -9,7 +9,7 @@ import multipart from '@fastify/multipart';
 import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_AUDIT_LOGS, ADMIN_MODULE_CAMPAIGNS, ADMIN_MODULE_CONTRACTS, ADMIN_MODULE_DRAFTS, ADMIN_MODULE_ESCROWS, ADMIN_MODULE_FINANCE, ADMIN_MODULE_GATEWAY, ADMIN_MODULE_JOBS, ADMIN_MODULE_MANAGER_PAYOUTS, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPERATIONS, ADMIN_MODULE_PAYOUT_REQUESTS, ADMIN_MODULE_PUBLIC_COMMUNICATION, ADMIN_MODULE_PROOFS, ADMIN_MODULE_RISK, ADMIN_MODULE_SESSIONS, ADMIN_MODULE_USERS, ADMIN_MODULE_WALLETS, ADMIN_MODULE_WITHDRAWALS, } from '@prime/shared';
 import { assertSecureRuntimeConfig, config, hasValidYoKeys, hasYoClientCredentials, hasYoSecretKey, resolveYoBaseUrl, resolveYoFallbackBaseUrl, } from './config.js';
 import { withTransaction } from './db.js';
-import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes, advertRoutes, aiAdminRoutes, } from './routes/index.js';
+import { authRoutes, campaignRoutes, campaignDraftRoutes, healthRoutes, paymentRoutes, uploadRoutes, verificationRoutes, chatRoutes, accountRoutes, adminRoutes, tenantAdminRoutes, advertRoutes, aiAdminRoutes, vendorRoutes, } from './routes/index.js';
 import { marketplaceRoutes } from './routes/marketplace.js';
 import { ensureUserSignalSchema, touchUserPresence, } from './services/userSignals.js';
 import { ensureSmsSchema } from './services/smsDispatch.js';
@@ -356,6 +356,7 @@ export function buildServer() {
         instance.register(advertRoutes);
         instance.register(marketplaceRoutes);
         instance.register(aiAdminRoutes);
+        instance.register(vendorRoutes);
     };
     // Routes
     registerRootRoutes(app);

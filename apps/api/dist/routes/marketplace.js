@@ -500,4 +500,339 @@ export async function marketplaceRoutes(app) {
             return reply.code(500).send({ error: 'internal_server_error' });
         }
     });
+    // ═══════════════════════════════════════════════════════════════════════════
+    // VENDOR STOREFRONT & DISCOVERY (public, no auth required)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ── GET /marketplace/vendors ─────────────────────────────────────────────
+    // Browse/search vendors with optional filters
+    app.get('/marketplace/vendors', async (request, reply) => {
+        const q = request.query;
+        const page = Math.max(1, parseInt(q.page ?? '1', 10));
+        const limit = Math.min(50, Math.max(1, parseInt(q.limit ?? '20', 10)));
+        const search = (q.search ?? '').trim();
+        const cat = (q.category ?? '').trim();
+        const offset = (page - 1) * limit;
+        try {
+            const conditions = [`vp.status = 'ACTIVE'`];
+            const params = [];
+            if (search) {
+                params.push(`%${search}%`);
+                const n = params.length;
+                conditions.push(`(vp.vendor_name ILIKE $${n} OR vp.description ILIKE $${n} OR vp.business_location ILIKE $${n})`);
+            }
+            if (cat) {
+                params.push(cat);
+                conditions.push(`vp.business_category ILIKE $${params.length}`);
+            }
+            const where = conditions.join(' AND ');
+            const [rows, countRows] = await Promise.all([
+                query(`
+          SELECT
+            vp.id, vp.slug, vp.vendor_name, vp.logo_url, vp.banner_url,
+            vp.description, vp.business_location, vp.business_category,
+            vp.verification_status, vp.trust_badges, vp.is_featured,
+            vp.total_views, vp.follower_count, vp.created_at,
+            (SELECT COUNT(*)::int FROM advert_listings al
+             WHERE al.vendor_id = vp.id AND al.status = 'ACTIVE') AS listing_count,
+            (SELECT COUNT(*)::int FROM vendor_boosts vb
+             WHERE vb.vendor_id = vp.id AND vb.status = 'ACTIVE' AND vb.ends_at > NOW()) AS active_boost_count
+          FROM vendor_profiles vp
+          WHERE ${where}
+          ORDER BY vp.is_featured DESC, vp.total_views DESC, vp.created_at DESC
+          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, limit, offset]),
+                query(`SELECT COUNT(*)::int AS total FROM vendor_profiles vp WHERE ${where}`, params),
+            ]);
+            reply.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+            return {
+                vendors: rows,
+                total: Number(countRows[0]?.total ?? 0),
+                page,
+                limit,
+                total_pages: Math.ceil(Number(countRows[0]?.total ?? 0) / limit),
+            };
+        }
+        catch (err) {
+            app.log.error(err, 'marketplace.vendors.list.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // ── GET /marketplace/vendors/:slug ───────────────────────────────────────
+    // Full vendor storefront page data
+    app.get('/marketplace/vendors/:slug', async (request, reply) => {
+        const { slug } = request.params;
+        try {
+            const vendorRows = await query(`SELECT vp.*,
+           u.full_name AS owner_name,
+           (SELECT COUNT(*)::int FROM advert_listings al WHERE al.vendor_id = vp.id AND al.status = 'ACTIVE') AS listing_count,
+           (SELECT COUNT(*)::int FROM vendor_boosts vb
+            WHERE vb.vendor_id = vp.id AND vb.status = 'ACTIVE' AND vb.ends_at > NOW()) AS active_boost_count
+         FROM vendor_profiles vp
+         JOIN users u ON u.id = vp.user_id
+         WHERE vp.slug = $1 AND vp.status = 'ACTIVE'
+         LIMIT 1`, [slug]);
+            const vendor = vendorRows[0];
+            if (!vendor)
+                return reply.code(404).send({ error: 'vendor_not_found' });
+            const [listings, featured] = await Promise.all([
+                query(`
+          SELECT
+            al.id, al.slug, al.title, al.summary, al.price, al.currency,
+            al.is_negotiable, al.listing_kind, al.stock_status, al.condition,
+            al.tags, al.views_total, al.qr_scan_count, al.created_at,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM advert_listings al
+          WHERE al.vendor_id = $1 AND al.status = 'ACTIVE' AND al.access_state = 'PUBLIC'
+          ORDER BY al.created_at DESC
+          LIMIT 50`, [vendor.id]),
+                query(`
+          SELECT
+            al.id, al.slug, al.title, al.price, al.currency, al.listing_kind,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM vendor_boosts vb
+          JOIN advert_listings al ON al.id = vb.listing_id
+          WHERE vb.vendor_id = $1 AND vb.status = 'ACTIVE' AND vb.ends_at > NOW()
+            AND al.status = 'ACTIVE'
+          ORDER BY vb.created_at DESC
+          LIMIT 6`, [vendor.id]),
+            ]);
+            // Fire an async storefront view event (best-effort)
+            query(`INSERT INTO vendor_analytics_events (id, vendor_id, event_type, source, ip_address, user_agent)
+         VALUES (gen_random_uuid(), $1, 'STOREFRONT_VIEW', 'MARKETPLACE', $2, $3)`, [vendor.id, request.ip, request.headers['user-agent'] ?? null]).then(() => query(`UPDATE vendor_profiles SET total_views = total_views + 1 WHERE id = $1`, [vendor.id])).catch(() => { });
+            reply.header('Cache-Control', 'public, max-age=20, stale-while-revalidate=40');
+            return { vendor, listings, featured_listings: featured };
+        }
+        catch (err) {
+            app.log.error(err, 'marketplace.vendors.storefront.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // ── GET /marketplace/vendors/:slug/listings ──────────────────────────────
+    app.get('/marketplace/vendors/:slug/listings', async (request, reply) => {
+        const { slug } = request.params;
+        const q = request.query;
+        const page = Math.max(1, parseInt(q.page ?? '1', 10));
+        const limit = Math.min(50, parseInt(q.limit ?? '20', 10));
+        const kind = (q.kind ?? '').trim() || null;
+        const offset = (page - 1) * limit;
+        try {
+            const vendorRows = await query(`SELECT id FROM vendor_profiles WHERE slug = $1 AND status = 'ACTIVE' LIMIT 1`, [slug]);
+            if (!vendorRows[0])
+                return reply.code(404).send({ error: 'vendor_not_found' });
+            const vendorId = vendorRows[0].id;
+            const conditions = [`al.vendor_id = $1`, `al.status = 'ACTIVE'`, `al.access_state = 'PUBLIC'`];
+            const params = [vendorId];
+            if (kind) {
+                params.push(kind);
+                conditions.push(`al.listing_kind = $${params.length}`);
+            }
+            const where = conditions.join(' AND ');
+            const [rows, countRows] = await Promise.all([
+                query(`
+          SELECT al.id, al.slug, al.title, al.summary, al.price, al.currency,
+            al.is_negotiable, al.listing_kind, al.stock_status, al.condition, al.tags,
+            al.views_total, al.created_at,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM advert_listings al
+          WHERE ${where}
+          ORDER BY al.created_at DESC
+          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, limit, offset]),
+                query(`SELECT COUNT(*)::int AS total FROM advert_listings al WHERE ${where}`, params),
+            ]);
+            reply.header('Cache-Control', 'public, max-age=20, stale-while-revalidate=40');
+            return {
+                listings: rows,
+                total: Number(countRows[0]?.total ?? 0),
+                page,
+                limit,
+                total_pages: Math.ceil(Number(countRows[0]?.total ?? 0) / limit),
+            };
+        }
+        catch (err) {
+            app.log.error(err, 'marketplace.vendors.listings.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // ── POST /marketplace/inquiries ──────────────────────────────────────────
+    // Submit a buyer inquiry (public — no auth required)
+    app.post('/marketplace/inquiries', async (request, reply) => {
+        const body = request.body;
+        const { vendor_id, listing_id, buyer_name, buyer_phone, buyer_whatsapp, buyer_email, message, source, } = body ?? {};
+        if (!vendor_id || !message?.trim()) {
+            return reply.code(400).send({ error: 'vendor_id and message are required' });
+        }
+        if (String(message).trim().length < 5) {
+            return reply.code(400).send({ error: 'message_too_short' });
+        }
+        try {
+            const vendorRows = await query(`SELECT id FROM vendor_profiles WHERE id = $1 AND status = 'ACTIVE' LIMIT 1`, [vendor_id]);
+            if (!vendorRows[0])
+                return reply.code(404).send({ error: 'vendor_not_found' });
+            const validSources = ['MARKETPLACE', 'STOREFRONT', 'QR', 'LINK', 'DIRECT'];
+            const safeSource = validSources.includes(source) ? source : 'MARKETPLACE';
+            const inquiryId = uuid();
+            await query(`INSERT INTO vendor_inquiries
+           (id, vendor_id, listing_id, buyer_name, buyer_phone, buyer_whatsapp, buyer_email,
+            message, source, ip_address)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, [
+                inquiryId, vendor_id, listing_id ?? null,
+                buyer_name ?? null, buyer_phone ?? null, buyer_whatsapp ?? null, buyer_email ?? null,
+                String(message).trim(), safeSource, request.ip,
+            ]);
+            // Fire analytics event
+            query(`INSERT INTO vendor_analytics_events (id, vendor_id, listing_id, event_type, source, ip_address)
+         VALUES (gen_random_uuid(), $1, $2, 'INQUIRY_SENT', $3, $4)`, [vendor_id, listing_id ?? null, safeSource, request.ip]).catch(() => { });
+            return reply.code(201).send({ ok: true, inquiry_id: inquiryId });
+        }
+        catch (err) {
+            app.log.error(err, 'marketplace.inquiries.create.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // ── POST /marketplace/negotiations ──────────────────────────────────────
+    // Start a negotiation thread on a negotiable listing
+    app.post('/marketplace/negotiations', async (request, reply) => {
+        const body = request.body;
+        const { listing_id, buyer_name, buyer_phone, offer_amount, message } = body ?? {};
+        if (!listing_id || !offer_amount || !buyer_name) {
+            return reply.code(400).send({ error: 'listing_id, offer_amount, and buyer_name are required' });
+        }
+        try {
+            const listingRows = await query(`SELECT al.id, al.vendor_id, al.price, al.currency, al.is_negotiable
+         FROM advert_listings al
+         WHERE al.id = $1 AND al.status = 'ACTIVE' AND al.access_state = 'PUBLIC' LIMIT 1`, [listing_id]);
+            const listing = listingRows[0];
+            if (!listing)
+                return reply.code(404).send({ error: 'listing_not_found' });
+            if (!listing.is_negotiable)
+                return reply.code(409).send({ error: 'listing_not_negotiable' });
+            if (!listing.vendor_id)
+                return reply.code(409).send({ error: 'listing_has_no_vendor' });
+            const threadId = uuid();
+            const buyerToken = `${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+            await withTransaction(async (client) => {
+                await client.query(`INSERT INTO negotiation_threads
+             (id, listing_id, vendor_id, buyer_name, buyer_phone, buyer_token,
+              listing_price, currency, last_message_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`, [threadId, listing_id, listing.vendor_id, buyer_name, buyer_phone ?? null,
+                    buyerToken, listing.price ?? null, listing.currency ?? 'UGX']);
+                const initMessage = message?.trim() || `Opening offer: ${listing.currency ?? 'UGX'} ${Number(offer_amount).toLocaleString()}`;
+                await client.query(`INSERT INTO negotiation_messages
+             (id, thread_id, party, message_type, content, offer_amount, currency)
+           VALUES ($1, $2, 'BUYER', 'OFFER', $3, $4, $5)`, [uuid(), threadId, initMessage, Number(offer_amount), listing.currency ?? 'UGX']);
+                await client.query(`UPDATE negotiation_threads SET message_count = 1 WHERE id = $1`, [threadId]);
+            });
+            // Fire analytics event
+            query(`INSERT INTO vendor_analytics_events (id, vendor_id, listing_id, event_type, ip_address)
+         VALUES (gen_random_uuid(), $1, $2, 'NEGOTIATION_STARTED', $3)`, [listing.vendor_id, listing_id, request.ip]).catch(() => { });
+            return reply.code(201).send({ ok: true, thread_id: threadId, buyer_token: buyerToken });
+        }
+        catch (err) {
+            app.log.error(err, 'marketplace.negotiations.create.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
+    // ── GET /marketplace/homepage ────────────────────────────────────────────
+    // All data needed for the redesigned marketplace homepage
+    app.get('/marketplace/homepage', async (request, reply) => {
+        try {
+            const [featuredVendors, trendingListings, boostedListings, recentListings, negotiableDeals, categories,] = await Promise.all([
+                // Featured / boosted vendors
+                query(`
+          SELECT vp.id, vp.slug, vp.vendor_name, vp.logo_url, vp.banner_url,
+            vp.description, vp.business_location, vp.business_category,
+            vp.verification_status, vp.trust_badges, vp.total_views,
+            (SELECT COUNT(*)::int FROM advert_listings al
+             WHERE al.vendor_id = vp.id AND al.status = 'ACTIVE') AS listing_count
+          FROM vendor_profiles vp
+          WHERE vp.status = 'ACTIVE'
+          ORDER BY vp.is_featured DESC, vp.total_views DESC
+          LIMIT 8`),
+                // Trending listings (most viewed this week)
+                query(`
+          SELECT al.id, al.slug, al.title, al.summary, al.price, al.currency,
+            al.is_negotiable, al.listing_kind, al.views_total, al.created_at,
+            vp.vendor_name, vp.slug AS vendor_slug, vp.verification_status,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM advert_listings al
+          LEFT JOIN vendor_profiles vp ON vp.id = al.vendor_id
+          WHERE al.status = 'ACTIVE' AND al.access_state = 'PUBLIC'
+          ORDER BY al.views_total DESC, al.created_at DESC
+          LIMIT 12`),
+                // Boosted listings (active boost, highest spend first)
+                query(`
+          SELECT DISTINCT ON (al.id)
+            al.id, al.slug, al.title, al.summary, al.price, al.currency,
+            al.is_negotiable, al.listing_kind,
+            vp.vendor_name, vp.slug AS vendor_slug, vp.verification_status,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM vendor_boosts vb
+          JOIN advert_listings al ON al.id = vb.listing_id
+          LEFT JOIN vendor_profiles vp ON vp.id = al.vendor_id
+          WHERE vb.status = 'ACTIVE' AND vb.ends_at > NOW()
+            AND al.status = 'ACTIVE' AND al.access_state = 'PUBLIC'
+            AND vb.boost_type = 'LISTING'
+          ORDER BY al.id, vb.cost_ugx DESC
+          LIMIT 8`),
+                // Recently added
+                query(`
+          SELECT al.id, al.slug, al.title, al.summary, al.price, al.currency,
+            al.is_negotiable, al.listing_kind, al.created_at,
+            vp.vendor_name, vp.slug AS vendor_slug,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM advert_listings al
+          LEFT JOIN vendor_profiles vp ON vp.id = al.vendor_id
+          WHERE al.status = 'ACTIVE' AND al.access_state = 'PUBLIC'
+          ORDER BY al.created_at DESC
+          LIMIT 12`),
+                // Negotiation-friendly deals
+                query(`
+          SELECT al.id, al.slug, al.title, al.price, al.currency, al.listing_kind,
+            vp.vendor_name, vp.slug AS vendor_slug,
+            (SELECT am.url FROM advert_media am
+             WHERE am.listing_id = al.id AND am.media_type = 'IMAGE'
+             ORDER BY am.sort_order LIMIT 1) AS hero_url
+          FROM advert_listings al
+          LEFT JOIN vendor_profiles vp ON vp.id = al.vendor_id
+          WHERE al.status = 'ACTIVE' AND al.access_state = 'PUBLIC'
+            AND al.is_negotiable = TRUE
+          ORDER BY al.created_at DESC
+          LIMIT 8`),
+                // Active categories with listing counts
+                query(`
+          SELECT ac.id, ac.slug, ac.name, ac.icon,
+            (SELECT COUNT(*)::int FROM advert_listings al
+             LEFT JOIN advert_listing_types lt ON lt.id = al.listing_type_id
+             LEFT JOIN advert_subcategories sub ON sub.id = lt.subcategory_id
+             WHERE sub.category_id = ac.id AND al.status = 'ACTIVE') AS listing_count
+          FROM advert_categories ac
+          WHERE ac.is_active = TRUE
+          ORDER BY ac.sort_order ASC, listing_count DESC`),
+            ]);
+            reply.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+            return {
+                featured_vendors: featuredVendors,
+                trending_listings: trendingListings,
+                boosted_listings: boostedListings,
+                recent_listings: recentListings,
+                negotiable_deals: negotiableDeals,
+                categories,
+            };
+        }
+        catch (err) {
+            app.log.error(err, 'marketplace.homepage.error');
+            return reply.code(500).send({ error: 'internal_server_error' });
+        }
+    });
 }

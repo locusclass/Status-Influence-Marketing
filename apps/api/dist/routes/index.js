@@ -11,3 +11,4 @@ export * from './tenantAdmin.js';
 export * from './chat.js';
 export * from './advert.js';
 export * from './aiAdmin.js';
+export * from './vendor.js';
