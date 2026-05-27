@@ -53,6 +53,7 @@ function calcQualityScore(data: {
 
 const createListingSchema = z.object({
   listing_type_id: z.string().uuid().optional(),
+  listing_kind: z.enum(['PRODUCT', 'SERVICE']).optional().default('PRODUCT'),
   title: z.string().min(5).max(150),
   summary: z.string().min(10).max(300),
   description: z.string().min(10).max(5000),
@@ -309,6 +310,25 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: 'internal_server_error' });
     }
 
+    // Only registered vendors may create listings
+    let vendorId: string | null = null;
+    try {
+      const vendorRows = await query<any>(
+        `SELECT id FROM vendor_profiles WHERE user_id = $1 AND status = 'ACTIVE' LIMIT 1`,
+        [businessId]
+      );
+      if (!vendorRows[0]) {
+        return reply.code(403).send({
+          error: 'vendor_registration_required',
+          message: 'Register a vendor stall before creating listings.',
+        });
+      }
+      vendorId = vendorRows[0].id as string;
+    } catch (err) {
+      app.log.error(err, 'marketplace.listings.create.vendorCheck.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+
     const parsed = createListingSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'validation_error', issues: parsed.error.issues });
@@ -337,23 +357,23 @@ export async function marketplaceRoutes(app: FastifyInstance) {
         await ensureContentBlocksColumn(client);
         const inserted = await client.query(
           `INSERT INTO advert_listings (
-            id, campaign_id, business_id, listing_type_id, slug,
+            id, campaign_id, business_id, vendor_id, listing_type_id, slug,
             title, summary, description, price, currency,
             is_negotiable, location_text,
             cta_whatsapp, cta_phone, cta_email, cta_url,
             status, access_state, admin_keep_alive, campaign_end_at,
-            listing_quality_score, content_blocks
+            listing_quality_score, content_blocks, listing_kind
           ) VALUES (
-            $1, NULL, $2, $3, $4,
-            $5, $6, $7, $8, $9,
-            $10, $11,
-            $12, $13, $14, $15,
-            $16, 'PUBLIC', $17, NULL,
-            $18, $19
+            $1, NULL, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10,
+            $11, $12,
+            $13, $14, $15, $16,
+            $17, 'PUBLIC', $18, NULL,
+            $19, $20, $21
           )
           RETURNING *`,
           [
-            listingId, businessId, body.listing_type_id ?? null, slug,
+            listingId, businessId, vendorId, body.listing_type_id ?? null, slug,
             body.title, body.summary, body.description,
             body.price ?? null, body.currency,
             body.is_negotiable, body.location_text ?? null,
@@ -363,6 +383,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
             draftMode ? false : true,
             qualityScore,
             JSON.stringify(body.content_blocks),
+            body.listing_kind ?? 'PRODUCT',
           ]
         );
         createdListing = inserted.rows[0] ?? null;
