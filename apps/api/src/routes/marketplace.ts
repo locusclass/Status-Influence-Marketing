@@ -245,12 +245,20 @@ export async function marketplaceRoutes(app: FastifyInstance) {
           cat.id   AS category_id,
           cat.icon AS category_icon,
           sub.id   AS subcategory_id,
-          EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs
+          EXTRACT(EPOCH FROM (al.campaign_end_at - now()))::bigint AS time_remaining_secs,
+          vp.id           AS vendor_profile_id,
+          vp.vendor_name  AS vendor_name,
+          vp.slug         AS vendor_slug,
+          vp.logo_url     AS vendor_logo_url,
+          vp.whatsapp_number AS vendor_whatsapp,
+          vp.phone_number    AS vendor_phone,
+          vp.business_location AS vendor_location
         FROM advert_listings al
         JOIN  users u                       ON u.id   = al.business_id
         LEFT JOIN advert_listing_types  lt  ON lt.id  = al.listing_type_id
         LEFT JOIN advert_subcategories  sub ON sub.id = lt.subcategory_id
         LEFT JOIN advert_categories     cat ON cat.id = sub.category_id
+        LEFT JOIN vendor_profiles       vp  ON vp.id  = al.vendor_id
         WHERE al.slug = $1
           AND al.status = 'ACTIVE'
           AND al.access_state = 'PUBLIC'`,
