@@ -19,6 +19,7 @@ import { ensurePrimarySuperAdmin, hasAdminModuleAccess, resolveLiveDashboardAcce
 import { buildPolicyAcceptanceState, ensurePolicyAcceptanceColumns, hasAcceptedRequiredPolicies, isPolicyAcceptanceBypassRoute, loadUserPolicyAcceptance, } from './services/policies.js';
 import { maskErrorResponsePayload, normalizePublicErrorCode, } from './errorResponses.js';
 import { isUserAccountActive, resolveDisabledAccountErrorCode, } from './services/roles.js';
+import { verifyRequestJwt } from './services/jwtSession.js';
 export function buildServer() {
     assertSecureRuntimeConfig();
     const skipOptionalStartupWarmups = process.env.SKIP_OPTIONAL_STARTUP_WARMUPS === '1';
@@ -262,7 +263,7 @@ export function buildServer() {
     });
     app.decorate('authenticate', async (request, reply) => {
         try {
-            await request.jwtVerify();
+            await verifyRequestJwt(app, request);
         }
         catch {
             reply.code(401).send({ error: 'unauthorized' });
@@ -294,7 +295,7 @@ export function buildServer() {
     });
     app.decorate('adminOnly', async (request, reply) => {
         try {
-            await request.jwtVerify();
+            await verifyRequestJwt(app, request);
         }
         catch {
             return reply.code(401).send({ error: 'unauthorized' });

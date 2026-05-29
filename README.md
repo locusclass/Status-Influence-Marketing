@@ -65,6 +65,10 @@ Prime is a Pan-African escrow and verification infrastructure that formalizes pa
 - `PORT`
 - `DATABASE_URL`
 - `JWT_SECRET`
+- `JWT_PREVIOUS_SECRETS`
+  - Optional comma-separated old JWT secrets kept temporarily during secret rotation or multi-instance deploys so existing users are not forced to log in again.
+- `JWT_EXPIRES_IN`
+  - Optional session lifetime. Defaults to `30d` for mobile users so normal app usage does not force daily re-login.
 - `CORS_ORIGIN`
   - Comma-separated origins. Wildcards are supported (example: `http://localhost:*`).
 - `UPLOAD_SIGNING_SECRET`

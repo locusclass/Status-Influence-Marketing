@@ -6,6 +6,28 @@ import { z } from 'zod';
 import { withTransaction, query } from '../db.js';
 import { canAccessBusinessFeatures } from '../services/roles.js';
 import { v4 as uuid } from 'uuid';
+import { PaymentRepo } from '../repositories/paymentRepo.js';
+import { hasYoClientCredentials, hasYoEncryptionKey } from '../config.js';
+import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
+import {
+  PRIME_REQUEST_ACCESS_PASS_PLANS,
+  PRIME_REQUEST_PRICING,
+  PRIME_REQUEST_UNLOCK_PRICE_UGX,
+  adminPrimeRequestDto,
+  debitPrimeRequestWallet,
+  ensurePrimeRequestsSchema,
+  expireOldPrimeRequests,
+  fullPrimeRequestDto,
+  getActivePrimeRequestPass,
+  hasPrimeRequestAccess,
+  insertPrimeRequestAccessPass,
+  insertPrimeRequestUnlock,
+  loadPrimeRequest,
+  normalizePrimeRequestCreateInput,
+  normalizePrimeRequestPassType,
+  publicPrimeRequestDto,
+  validatePrimeRequestCreateInput,
+} from '../services/primeRequests.js';
 
 // ─────────────────────────────────────────────
 // HELPERS
@@ -79,6 +101,63 @@ const createListingSchema = z.object({
 
 const patchListingSchema = createListingSchema.partial().omit({ listing_type_id: true });
 
+const primeRequestUnlockSchema = z.object({
+  fund_source: z.enum(['YO_UGANDA', 'WALLET']).optional().default('YO_UGANDA'),
+});
+
+const primeRequestPassSchema = z.object({
+  pass_type: z.enum(['daily', 'weekly', 'monthly']),
+  fund_source: z.enum(['YO_UGANDA', 'WALLET']).optional().default('YO_UGANDA'),
+});
+
+function parsePositiveInt(value: unknown, fallback: number, max: number) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(1, parsed));
+}
+
+function normalizeQueryText(value: unknown, max = 120) {
+  return String(value ?? '').trim().slice(0, max);
+}
+
+function buildPrimeRequestCheckoutPayload(input: {
+  txRef: string;
+  amount: number;
+  userId: string;
+  user: any;
+  kind: 'PRIME_REQUEST_UNLOCK' | 'PRIME_REQUEST_ACCESS_PASS';
+  country: string;
+  checkoutProfile: ReturnType<typeof resolveAvailableYoUgandaCheckoutProfile>;
+  requestId?: string;
+  passType?: string;
+}) {
+  return {
+    provider: 'YO_UGANDA',
+    mode: 'DIRECT_CHARGE',
+    tx_ref: input.txRef,
+    amount: input.amount,
+    currency: 'UGX',
+    payment_options: input.checkoutProfile.paymentOptions,
+    supported_payment_methods: input.checkoutProfile.supportedPaymentMethods,
+    mobile_money_networks: input.checkoutProfile.mobileMoneyNetworks,
+    phone_country_code: input.checkoutProfile.phoneCountryCode,
+    availability_notes: input.checkoutProfile.availabilityNotes,
+    country: input.checkoutProfile.country,
+    customer: {
+      email: input.user?.email ?? '',
+      name: input.user?.full_name ?? 'Prime Status User',
+      phone_number: input.user?.phone ?? null,
+    },
+    meta: {
+      merchant_reference: input.txRef,
+      kind: input.kind,
+      user_id: input.userId,
+      ...(input.requestId ? { request_id: input.requestId } : {}),
+      ...(input.passType ? { pass_type: input.passType } : {}),
+    },
+  };
+}
+
 // ─────────────────────────────────────────────
 // ROUTE REGISTRATION
 // ─────────────────────────────────────────────
@@ -107,6 +186,432 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       return { categories: rows };
     } catch (err) {
       app.log.error(err, 'marketplace.categories.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PRIME REQUESTS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  app.get('/marketplace/prime-requests/pricing', async (_request, reply) => {
+    reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    return { pricing: PRIME_REQUEST_PRICING };
+  });
+
+  app.post('/marketplace/prime-requests', async (request, reply) => {
+    const input = normalizePrimeRequestCreateInput(request.body ?? {});
+    const issues = validatePrimeRequestCreateInput(input);
+    if (issues.length > 0) {
+      return reply.code(400).send({ error: 'validation_error', issues });
+    }
+
+    try {
+      const id = uuid();
+      const created = await withTransaction(async (client) => {
+        await ensurePrimeRequestsSchema(client);
+        const authUserId = String((request.user as any)?.sub ?? '').trim() || null;
+        const res = await client.query(
+          `INSERT INTO prime_requests
+             (id, requester_user_id, requester_name, requester_phone, requester_whatsapp,
+              preferred_contact_method, title, description, category, subcategory,
+              location, exact_location, budget_min, budget_max, urgency, status,
+              attachments, consent_provider_contact, expires_at)
+           VALUES
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, $12, $13, $14, $15, 'pending', $16::jsonb, $17, now() + interval '30 days')
+           RETURNING *`,
+          [
+            id,
+            authUserId,
+            input.requester_name,
+            input.requester_phone,
+            input.requester_whatsapp,
+            input.preferred_contact_method,
+            input.title,
+            input.description,
+            input.category,
+            input.subcategory,
+            input.location,
+            input.exact_location,
+            input.budget_min,
+            input.budget_max,
+            input.urgency,
+            JSON.stringify(input.attachments),
+            input.consent_provider_contact,
+          ]
+        );
+        return res.rows[0];
+      });
+
+      return reply.code(201).send({
+        ok: true,
+        request: publicPrimeRequestDto(created),
+        message: 'Prime Request submitted for review.',
+      });
+    } catch (err) {
+      app.log.error(err, 'marketplace.primeRequests.create.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.get('/marketplace/prime-requests', async (request, reply) => {
+    const q = request.query as Record<string, unknown>;
+    const page = parsePositiveInt(q.page, 1, 10_000);
+    const limit = parsePositiveInt(q.limit, 20, 50);
+    const offset = (page - 1) * limit;
+    const search = normalizeQueryText(q.search, 100);
+    const category = normalizeQueryText(q.category, 80);
+    const location = normalizeQueryText(q.location, 100);
+    const urgency = normalizeQueryText(q.urgency, 80);
+    const budgetMin = q.budget_min == null || q.budget_min === '' ? null : Number(q.budget_min);
+    const budgetMax = q.budget_max == null || q.budget_max === '' ? null : Number(q.budget_max);
+
+    try {
+      const result = await withTransaction(async (client) => {
+        await ensurePrimeRequestsSchema(client);
+        await expireOldPrimeRequests(client);
+        const conditions = [
+          `(status IN ('approved', 'active'))`,
+          `(expires_at IS NULL OR expires_at > now())`,
+        ];
+        const params: unknown[] = [];
+        if (search) {
+          params.push(`%${search}%`);
+          conditions.push(`(title ILIKE $${params.length} OR description ILIKE $${params.length})`);
+        }
+        if (category) {
+          params.push(category);
+          conditions.push(`category ILIKE $${params.length}`);
+        }
+        if (location) {
+          params.push(`%${location}%`);
+          conditions.push(`location ILIKE $${params.length}`);
+        }
+        if (urgency) {
+          params.push(urgency);
+          conditions.push(`urgency ILIKE $${params.length}`);
+        }
+        if (Number.isFinite(budgetMin)) {
+          params.push(Number(budgetMin));
+          conditions.push(`(budget_max IS NULL OR budget_max >= $${params.length})`);
+        }
+        if (Number.isFinite(budgetMax)) {
+          params.push(Number(budgetMax));
+          conditions.push(`(budget_min IS NULL OR budget_min <= $${params.length})`);
+        }
+        const where = conditions.join(' AND ');
+        const [rows, countRows] = await Promise.all([
+          client.query(
+            `SELECT *
+             FROM prime_requests
+             WHERE ${where}
+             ORDER BY created_at DESC
+             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+            [...params, limit, offset]
+          ),
+          client.query(`SELECT COUNT(*)::int AS total FROM prime_requests WHERE ${where}`, params),
+        ]);
+        const total = Number(countRows.rows[0]?.total ?? 0);
+        return { rows: rows.rows, total };
+      });
+
+      reply.header('Cache-Control', 'public, max-age=20, stale-while-revalidate=40');
+      return {
+        requests: result.rows.map(publicPrimeRequestDto),
+        pricing: PRIME_REQUEST_PRICING,
+        page,
+        limit,
+        total: result.total,
+        total_pages: Math.ceil(result.total / limit),
+      };
+    } catch (err) {
+      app.log.error(err, 'marketplace.primeRequests.list.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.get('/marketplace/prime-requests/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const row = await withTransaction(async (client) => {
+        await ensurePrimeRequestsSchema(client);
+        await expireOldPrimeRequests(client);
+        return loadPrimeRequest(client, id);
+      });
+      if (!row || !['approved', 'active'].includes(String(row.status))) {
+        return reply.code(404).send({ error: 'prime_request_not_found' });
+      }
+      return { request: publicPrimeRequestDto(row), pricing: PRIME_REQUEST_PRICING };
+    } catch (err) {
+      app.log.error(err, 'marketplace.primeRequests.summary.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.get('/marketplace/prime-requests/:id/full', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+
+    try {
+      const result = await withTransaction(async (client) => {
+        await ensurePrimeRequestsSchema(client);
+        await expireOldPrimeRequests(client);
+        const row = await loadPrimeRequest(client, id);
+        if (!row) return { error: 'prime_request_not_found' } as const;
+        const status = String(row.status ?? '');
+        const owner = String(row.requester_user_id ?? '') === userId;
+        if (!owner && !['approved', 'active'].includes(status)) {
+          return { error: 'prime_request_not_found' } as const;
+        }
+        const hasAccess = await hasPrimeRequestAccess(client, id, userId);
+        if (!hasAccess) {
+          return {
+            request: publicPrimeRequestDto(row),
+            access_required: true,
+            pricing: PRIME_REQUEST_PRICING,
+          };
+        }
+        return {
+          request: fullPrimeRequestDto(row),
+          access_required: false,
+          pricing: PRIME_REQUEST_PRICING,
+        };
+      });
+
+      if ('error' in result) return reply.code(404).send({ error: result.error });
+      return result;
+    } catch (err) {
+      app.log.error(err, 'marketplace.primeRequests.full.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.post('/marketplace/prime-requests/:id/unlock', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+    const parsed = primeRequestUnlockSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'validation_error', issues: parsed.error.issues });
+    }
+
+    try {
+      const result = await withTransaction(async (client) => {
+        await ensurePrimeRequestsSchema(client);
+        await expireOldPrimeRequests(client);
+        const row = await loadPrimeRequest(client, id);
+        if (!row || !['approved', 'active'].includes(String(row.status))) {
+          return { error: 'prime_request_not_found' } as const;
+        }
+        if (await hasPrimeRequestAccess(client, id, userId)) {
+          return {
+            ok: true,
+            already_unlocked: true,
+            request: fullPrimeRequestDto(row),
+            pricing: PRIME_REQUEST_PRICING,
+          };
+        }
+
+        if (parsed.data.fund_source === 'WALLET') {
+          const debited = await debitPrimeRequestWallet(client, {
+            userId,
+            amount: PRIME_REQUEST_UNLOCK_PRICE_UGX,
+            reference: `PRIME_REQUEST_UNLOCK:${id}`,
+          });
+          if ('error' in debited) return debited;
+          await insertPrimeRequestUnlock(client, {
+            requestId: id,
+            userId,
+            amountPaid: PRIME_REQUEST_UNLOCK_PRICE_UGX,
+            paymentReference: `WALLET:${id}:${Date.now()}`,
+          });
+          return {
+            ok: true,
+            funded: true,
+            fund_source: 'WALLET',
+            request: fullPrimeRequestDto(row),
+            pricing: PRIME_REQUEST_PRICING,
+          };
+        }
+
+        if (!hasYoClientCredentials()) return { error: 'yo_uganda_not_configured' } as const;
+        const userRes = await client.query(
+          `SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1`,
+          [userId]
+        );
+        const user = userRes.rows[0] ?? {};
+        const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(user.country ?? 'UG', {
+          cardEnabled: hasYoEncryptionKey(),
+        });
+        const txRef = uuid();
+        const rawPayload = {
+          kind: 'PRIME_REQUEST_UNLOCK',
+          user_id: userId,
+          request_id: id,
+          amount: PRIME_REQUEST_UNLOCK_PRICE_UGX,
+          currency: 'UGX',
+          customer: { email: user.email ?? '', name: user.full_name ?? 'Prime Status User', phone_number: user.phone ?? null },
+          supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+          mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+          phone_country_code: checkoutProfile.phoneCountryCode,
+        };
+        await new PaymentRepo().createPesaPalTransaction(client, {
+          escrow_id: undefined,
+          type: 'FUNDING',
+          amount: PRIME_REQUEST_UNLOCK_PRICE_UGX,
+          merchant_reference: txRef,
+          raw_payload: rawPayload,
+        });
+        return {
+          ok: true,
+          tx_ref: txRef,
+          amount: PRIME_REQUEST_UNLOCK_PRICE_UGX,
+          currency: 'UGX',
+          checkout_payload: buildPrimeRequestCheckoutPayload({
+            txRef,
+            amount: PRIME_REQUEST_UNLOCK_PRICE_UGX,
+            userId,
+            user,
+            kind: 'PRIME_REQUEST_UNLOCK',
+            country: checkoutProfile.country,
+            checkoutProfile,
+            requestId: id,
+          }),
+          pricing: PRIME_REQUEST_PRICING,
+        };
+      });
+
+      if ('error' in result) {
+        const status = result.error === 'prime_request_not_found'
+          ? 404
+          : result.error === 'insufficient_wallet_balance'
+            ? 400
+            : result.error === 'yo_uganda_not_configured'
+              ? 503
+              : 400;
+        return reply.code(status).send(result);
+      }
+      return result;
+    } catch (err) {
+      app.log.error(err, 'marketplace.primeRequests.unlock.error');
+      return reply.code(500).send({ error: 'internal_server_error' });
+    }
+  });
+
+  app.post('/marketplace/prime-requests/access-passes', {
+    preHandler: [(app as any).authenticate],
+  }, async (request, reply) => {
+    const userId = String((request.user as any)?.sub ?? '').trim();
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+    const parsed = primeRequestPassSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'validation_error', issues: parsed.error.issues });
+    }
+    const passType = normalizePrimeRequestPassType(parsed.data.pass_type)!;
+    const plan = PRIME_REQUEST_ACCESS_PASS_PLANS[passType];
+
+    try {
+      const result = await withTransaction(async (client) => {
+        await ensurePrimeRequestsSchema(client);
+        await expireOldPrimeRequests(client);
+        const activePass = await getActivePrimeRequestPass(client, userId);
+        if (activePass) {
+          return {
+            ok: true,
+            already_active: true,
+            access_pass: activePass,
+            pricing: PRIME_REQUEST_PRICING,
+          };
+        }
+
+        if (parsed.data.fund_source === 'WALLET') {
+          const reference = `PRIME_REQUEST_PASS:${passType}:${Date.now()}`;
+          const debited = await debitPrimeRequestWallet(client, {
+            userId,
+            amount: plan.amount_ugx,
+            reference,
+          });
+          if ('error' in debited) return debited;
+          const accessPass = await insertPrimeRequestAccessPass(client, {
+            userId,
+            passType,
+            amountPaid: plan.amount_ugx,
+            paymentReference: reference,
+          });
+          return {
+            ok: true,
+            funded: true,
+            fund_source: 'WALLET',
+            access_pass: accessPass,
+            pricing: PRIME_REQUEST_PRICING,
+          };
+        }
+
+        if (!hasYoClientCredentials()) return { error: 'yo_uganda_not_configured' } as const;
+        const userRes = await client.query(
+          `SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1`,
+          [userId]
+        );
+        const user = userRes.rows[0] ?? {};
+        const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(user.country ?? 'UG', {
+          cardEnabled: hasYoEncryptionKey(),
+        });
+        const txRef = uuid();
+        const rawPayload = {
+          kind: 'PRIME_REQUEST_ACCESS_PASS',
+          user_id: userId,
+          pass_type: passType,
+          amount: plan.amount_ugx,
+          currency: 'UGX',
+          customer: { email: user.email ?? '', name: user.full_name ?? 'Prime Status User', phone_number: user.phone ?? null },
+          supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+          mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+          phone_country_code: checkoutProfile.phoneCountryCode,
+        };
+        await new PaymentRepo().createPesaPalTransaction(client, {
+          escrow_id: undefined,
+          type: 'FUNDING',
+          amount: plan.amount_ugx,
+          merchant_reference: txRef,
+          raw_payload: rawPayload,
+        });
+        return {
+          ok: true,
+          tx_ref: txRef,
+          amount: plan.amount_ugx,
+          currency: 'UGX',
+          pass_type: passType,
+          checkout_payload: buildPrimeRequestCheckoutPayload({
+            txRef,
+            amount: plan.amount_ugx,
+            userId,
+            user,
+            kind: 'PRIME_REQUEST_ACCESS_PASS',
+            country: checkoutProfile.country,
+            checkoutProfile,
+            passType,
+          }),
+          pricing: PRIME_REQUEST_PRICING,
+        };
+      });
+
+      if ('error' in result) {
+        const status = result.error === 'insufficient_wallet_balance'
+          ? 400
+          : result.error === 'yo_uganda_not_configured'
+            ? 503
+            : 400;
+        return reply.code(status).send(result);
+      }
+      return result;
+    } catch (err) {
+      app.log.error(err, 'marketplace.primeRequests.pass.error');
       return reply.code(500).send({ error: 'internal_server_error' });
     }
   });

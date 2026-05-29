@@ -6,8 +6,8 @@ import { config, hasYoClientCredentials, YO_API_PASSWORD_MISSING_MESSAGE, YO_API
 import { isDirectYoTaskUrl } from '@prime/shared';
 import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { queueSmsDispatch } from '../services/smsDispatch.js';
-import { markBusinessProSubscriptionPaid } from '../services/businessSubscriptions.js';
 import { activateListingBoost } from '../services/listingBoosts.js';
+import { insertPrimeRequestAccessPass, insertPrimeRequestUnlock, normalizePrimeRequestPassType, } from '../services/primeRequests.js';
 const yoProviderReferenceInputKeys = [
     'transaction_id',
     'transactionId',
@@ -466,25 +466,6 @@ export async function paymentRoutes(app) {
             await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
             return { ok: true, pending: true, type: 'ambassador_subscription' };
         }
-        if (txKind === 'BUSINESS_PRO_SUBSCRIPTION') {
-            if (txn.status === 'COMPLETED') {
-                return { ok: true, duplicate: true, type: 'business_pro_subscription' };
-            }
-            if (statusSuccess.has(statusText)) {
-                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'COMPLETED', String(paymentEvent.transactionId));
-                const userId = String(txnPayload.user_id ?? '');
-                if (userId) {
-                    await markBusinessProSubscriptionPaid(client, userId, String(paymentEvent.reference));
-                }
-                return { ok: true, type: 'business_pro_subscription', smsJobs: [] };
-            }
-            if (statusFailure.has(statusText)) {
-                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'FAILED', String(paymentEvent.transactionId));
-                return { ok: true, type: 'business_pro_subscription', smsJobs: [] };
-            }
-            await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
-            return { ok: true, pending: true, type: 'business_pro_subscription' };
-        }
         if (txKind === 'LISTING_BOOST') {
             if (txn.status === 'COMPLETED') {
                 return { ok: true, duplicate: true, type: 'listing_boost' };
@@ -517,6 +498,84 @@ export async function paymentRoutes(app) {
             }
             await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
             return { ok: true, pending: true, type: 'listing_boost' };
+        }
+        if (txKind === 'MARKETPLACE_LISTING_SUBSCRIPTION') {
+            if (txn.status === 'COMPLETED') {
+                return { ok: true, duplicate: true, type: 'marketplace_listing_subscription' };
+            }
+            if (statusSuccess.has(statusText)) {
+                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'COMPLETED', String(paymentEvent.transactionId));
+                const businessId = String(txnPayload.user_id ?? '');
+                const planCode = String(txnPayload.plan_code ?? '');
+                const amount = Number(txnPayload.amount ?? 0);
+                if (businessId && planCode && amount > 0) {
+                    const validUntil = new Date();
+                    validUntil.setDate(validUntil.getDate() + 30);
+                    await client.query(`INSERT INTO business_listing_subscriptions
+               (business_id, plan_code, amount, currency, paid_at, valid_until, payment_reference)
+             VALUES ($1, $2, $3, 'UGX', now(), $4, $5)
+             ON CONFLICT DO NOTHING`, [businessId, planCode, amount, validUntil.toISOString(), String(paymentEvent.reference)]);
+                }
+                return { ok: true, type: 'marketplace_listing_subscription', smsJobs: [] };
+            }
+            if (statusFailure.has(statusText)) {
+                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'FAILED', String(paymentEvent.transactionId));
+                return { ok: true, type: 'marketplace_listing_subscription', smsJobs: [] };
+            }
+            await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
+            return { ok: true, pending: true, type: 'marketplace_listing_subscription' };
+        }
+        if (txKind === 'PRIME_REQUEST_UNLOCK') {
+            if (txn.status === 'COMPLETED') {
+                return { ok: true, duplicate: true, type: 'prime_request_unlock' };
+            }
+            if (statusSuccess.has(statusText)) {
+                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'COMPLETED', String(paymentEvent.transactionId));
+                const userId = String(txnPayload.user_id ?? '');
+                const requestId = String(txnPayload.request_id ?? '');
+                const amount = Number(txnPayload.amount ?? txn.amount ?? 0);
+                if (userId && requestId && amount > 0) {
+                    await insertPrimeRequestUnlock(client, {
+                        requestId,
+                        userId,
+                        amountPaid: amount,
+                        paymentReference: String(paymentEvent.reference),
+                    });
+                }
+                return { ok: true, type: 'prime_request_unlock', smsJobs: [] };
+            }
+            if (statusFailure.has(statusText)) {
+                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'FAILED', String(paymentEvent.transactionId));
+                return { ok: true, type: 'prime_request_unlock', smsJobs: [] };
+            }
+            await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
+            return { ok: true, pending: true, type: 'prime_request_unlock' };
+        }
+        if (txKind === 'PRIME_REQUEST_ACCESS_PASS') {
+            if (txn.status === 'COMPLETED') {
+                return { ok: true, duplicate: true, type: 'prime_request_access_pass' };
+            }
+            if (statusSuccess.has(statusText)) {
+                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'COMPLETED', String(paymentEvent.transactionId));
+                const userId = String(txnPayload.user_id ?? '');
+                const passType = normalizePrimeRequestPassType(txnPayload.pass_type);
+                const amount = Number(txnPayload.amount ?? txn.amount ?? 0);
+                if (userId && passType && amount > 0) {
+                    await insertPrimeRequestAccessPass(client, {
+                        userId,
+                        passType,
+                        amountPaid: amount,
+                        paymentReference: String(paymentEvent.reference),
+                    });
+                }
+                return { ok: true, type: 'prime_request_access_pass', smsJobs: [] };
+            }
+            if (statusFailure.has(statusText)) {
+                await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'FAILED', String(paymentEvent.transactionId));
+                return { ok: true, type: 'prime_request_access_pass', smsJobs: [] };
+            }
+            await paymentRepo.updatePesaPalTxnStatus(client, String(paymentEvent.reference), 'PENDING', String(paymentEvent.transactionId));
+            return { ok: true, pending: true, type: 'prime_request_access_pass' };
         }
         const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
         const escrow = escrowRows.rows[0];
@@ -750,7 +809,9 @@ export async function paymentRoutes(app) {
         }
         const rawPayload = (txn.raw_payload ?? {});
         const txKind = String(rawPayload.kind ?? '').toUpperCase();
-        if (txKind === 'WALLET_DEPOSIT' || txKind === 'AMBASSADOR_SUBSCRIPTION') {
+        if (txKind === 'WALLET_DEPOSIT' || txKind === 'AMBASSADOR_SUBSCRIPTION'
+            || txKind === 'LISTING_BOOST' || txKind === 'MARKETPLACE_LISTING_SUBSCRIPTION'
+            || txKind === 'PRIME_REQUEST_UNLOCK' || txKind === 'PRIME_REQUEST_ACCESS_PASS') {
             if (String(rawPayload.user_id ?? '') !== authUser) {
                 return { error: 'forbidden' };
             }
@@ -872,10 +933,12 @@ export async function paymentRoutes(app) {
                             return `Wallet deposit ${parsed.data.tx_ref}`;
                         if (k === 'AMBASSADOR_SUBSCRIPTION')
                             return `Ambassador subscription ${parsed.data.tx_ref}`;
-                        if (k === 'BUSINESS_PRO_SUBSCRIPTION')
-                            return `Pro Prime subscription ${parsed.data.tx_ref}`;
                         if (k === 'LISTING_BOOST')
                             return `Listing boost ${parsed.data.tx_ref}`;
+                        if (k === 'PRIME_REQUEST_UNLOCK')
+                            return `Prime Request unlock ${parsed.data.tx_ref}`;
+                        if (k === 'PRIME_REQUEST_ACCESS_PASS')
+                            return `Prime Requests access pass ${parsed.data.tx_ref}`;
                         return `Campaign funding ${parsed.data.tx_ref}`;
                     })(),
                     reference: parsed.data.tx_ref,
@@ -913,7 +976,7 @@ export async function paymentRoutes(app) {
                 else if (statusFailure.has(providerStatus)) {
                     await paymentRepo.updatePesaPalTxnStatus(client, parsed.data.tx_ref, 'FAILED', chargeId ?? undefined);
                     const failedKind = String(context.rawPayload.kind ?? '').toUpperCase();
-                    if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION' || failedKind === 'BUSINESS_PRO_SUBSCRIPTION' || failedKind === 'LISTING_BOOST') {
+                    if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION' || failedKind === 'LISTING_BOOST' || failedKind === 'PRIME_REQUEST_UNLOCK' || failedKind === 'PRIME_REQUEST_ACCESS_PASS') {
                         smsJobs = await planPaymentOutcomeNotification(client, {
                             userId: authUser,
                             txRef: parsed.data.tx_ref,

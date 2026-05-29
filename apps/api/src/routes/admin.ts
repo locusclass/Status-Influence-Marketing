@@ -88,6 +88,13 @@ import {
 import { queueSmsDispatch } from '../services/smsDispatch.js';
 import { ensureUserProfilesTable } from '../services/userProfiles.js';
 import { ensureViewerVerificationSchema } from '../services/viewerVerification.js';
+import {
+  PRIME_REQUEST_PRICING,
+  adminPrimeRequestDto,
+  ensurePrimeRequestsSchema,
+  expireOldPrimeRequests,
+  normalizePrimeRequestStatus,
+} from '../services/primeRequests.js';
 
 const UpdateUserRoleSchema = z.object({
   role: z
@@ -156,6 +163,11 @@ const UpdatePayoutSchema = z.object({
 
 const UpdateEscrowSchema = z.object({
   status: z.enum(['PENDING', 'FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED'])
+});
+
+const PrimeRequestAdminStatusSchema = z.object({
+  status: z.enum(['pending', 'approved', 'rejected', 'active', 'expired', 'fulfilled']),
+  moderation_notes: z.string().trim().max(1000).optional().nullable(),
 });
 
 const UpdateCampaignSchema = z.object({
@@ -2798,6 +2810,155 @@ export async function adminRoutes(app: FastifyInstance) {
         rows: rows.rows,
         series
       };
+    });
+  });
+
+  app.get('/admin/prime-requests/revenue', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    return withTransaction(async (client) => {
+      await getLiveDashboardAccess(client, request);
+      await ensurePrimeRequestsSchema(client);
+      await expireOldPrimeRequests(client);
+
+      const [unlockRevenue, passRevenue, byPassType, byStatus] = await Promise.all([
+        client.query(
+          `SELECT COALESCE(SUM(amount_paid), 0)::bigint AS revenue_ugx,
+                  COUNT(*)::int AS count
+           FROM prime_request_unlocks`
+        ),
+        client.query(
+          `SELECT COALESCE(SUM(amount_paid), 0)::bigint AS revenue_ugx,
+                  COUNT(*)::int AS count
+           FROM prime_request_access_passes`
+        ),
+        client.query(
+          `SELECT pass_type,
+                  COALESCE(SUM(amount_paid), 0)::bigint AS revenue_ugx,
+                  COUNT(*)::int AS count
+           FROM prime_request_access_passes
+           GROUP BY pass_type
+           ORDER BY pass_type`
+        ),
+        client.query(
+          `SELECT status, COUNT(*)::int AS count
+           FROM prime_requests
+           GROUP BY status
+           ORDER BY status`
+        ),
+      ]);
+
+      return {
+        pricing: PRIME_REQUEST_PRICING,
+        unlock_revenue_ugx: Number(unlockRevenue.rows[0]?.revenue_ugx ?? 0),
+        unlock_count: Number(unlockRevenue.rows[0]?.count ?? 0),
+        access_pass_revenue_ugx: Number(passRevenue.rows[0]?.revenue_ugx ?? 0),
+        access_pass_count: Number(passRevenue.rows[0]?.count ?? 0),
+        access_pass_revenue_by_type: byPassType.rows.map((row: any) => ({
+          pass_type: row.pass_type,
+          revenue_ugx: Number(row.revenue_ugx ?? 0),
+          count: Number(row.count ?? 0),
+        })),
+        request_status_counts: byStatus.rows.map((row: any) => ({
+          status: row.status,
+          count: Number(row.count ?? 0),
+        })),
+      };
+    });
+  });
+
+  app.get('/admin/prime-requests', { preHandler: [app.adminOnly] }, async (request) => {
+    const q = (request.query ?? {}) as Record<string, unknown>;
+    const limit = Math.min(100, Math.max(1, Number.parseInt(String(q.limit ?? '50'), 10) || 50));
+    const offset = Math.max(0, Number.parseInt(String(q.offset ?? '0'), 10) || 0);
+    const search = String(q.q ?? '').trim();
+    const status = normalizePrimeRequestStatus(q.status);
+    const category = String(q.category ?? '').trim();
+    const location = String(q.location ?? '').trim();
+    const from = String(q.from ?? '').trim();
+    const to = String(q.to ?? '').trim();
+
+    return withTransaction(async (client) => {
+      await getLiveDashboardAccess(client, request);
+      await ensurePrimeRequestsSchema(client);
+      await expireOldPrimeRequests(client);
+
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      if (search) {
+        params.push(`%${search}%`);
+        conditions.push(`(pr.title ILIKE $${params.length} OR pr.description ILIKE $${params.length} OR pr.requester_name ILIKE $${params.length} OR pr.requester_phone ILIKE $${params.length})`);
+      }
+      if (status) {
+        params.push(status);
+        conditions.push(`pr.status = $${params.length}`);
+      }
+      if (category) {
+        params.push(category);
+        conditions.push(`pr.category ILIKE $${params.length}`);
+      }
+      if (location) {
+        params.push(`%${location}%`);
+        conditions.push(`pr.location ILIKE $${params.length}`);
+      }
+      if (from) {
+        params.push(from);
+        conditions.push(`pr.created_at >= $${params.length}::timestamptz`);
+      }
+      if (to) {
+        params.push(to);
+        conditions.push(`pr.created_at <= $${params.length}::timestamptz`);
+      }
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const data = await client.query(
+        `SELECT pr.*,
+                COUNT(u.id)::int AS unlock_count,
+                COALESCE(SUM(u.amount_paid), 0)::bigint AS unlock_revenue_ugx
+         FROM prime_requests pr
+         LEFT JOIN prime_request_unlocks u ON u.request_id = pr.id
+         ${where}
+         GROUP BY pr.id
+         ORDER BY pr.created_at DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset]
+      );
+      const count = await client.query(
+        `SELECT COUNT(*)::int AS total FROM prime_requests pr ${where}`,
+        params
+      );
+      return {
+        requests: data.rows.map(adminPrimeRequestDto),
+        total: Number(count.rows[0]?.total ?? 0),
+        limit,
+        offset,
+      };
+    });
+  });
+
+  app.patch('/admin/prime-requests/:id/status', { preHandler: [app.adminOnly] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsed = PrimeRequestAdminStatusSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'validation_failed', issues: parsed.error.issues });
+    }
+
+    return withTransaction(async (client) => {
+      await getLiveDashboardAccess(client, request);
+      await ensurePrimeRequestsSchema(client);
+      const res = await client.query(
+        `UPDATE prime_requests
+         SET status=$2,
+             moderation_notes=$3,
+             updated_at=now(),
+             expires_at = CASE
+               WHEN $2 IN ('approved', 'active') AND expires_at IS NULL THEN now() + interval '30 days'
+               ELSE expires_at
+             END
+         WHERE id=$1
+         RETURNING *`,
+        [params.id, parsed.data.status, parsed.data.moderation_notes ?? null]
+      );
+      const row = res.rows[0];
+      if (!row) return reply.code(404).send({ error: 'prime_request_not_found' });
+      return { ok: true, request: adminPrimeRequestDto(row) };
     });
   });
 

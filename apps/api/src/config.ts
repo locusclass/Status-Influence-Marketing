@@ -90,6 +90,13 @@ const isTestRuntime =
 const allowInsecureDevDefaults =
   isTestRuntime || process.env.ALLOW_INSECURE_DEV_DEFAULTS === '1';
 
+function parseSecretList(value: string | undefined) {
+  return String(value ?? '')
+    .split(',')
+    .map((secret) => stripWrappingQuotes(secret))
+    .filter((secret, index, list) => secret.length > 0 && list.indexOf(secret) === index);
+}
+
 const yoConfig = {
   allowDirectApiBypass,
   baseUrl: normalizeYoTaskUrl(
@@ -144,7 +151,8 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   jwtSecret: process.env.JWT_SECRET ?? 'dev-secret',
-  jwtExpiresIn: stripWrappingQuotes(process.env.JWT_EXPIRES_IN ?? '12h'),
+  jwtPreviousSecrets: parseSecretList(process.env.JWT_PREVIOUS_SECRETS),
+  jwtExpiresIn: stripWrappingQuotes(process.env.JWT_EXPIRES_IN ?? '30d'),
   corsOrigin: process.env.CORS_ORIGIN ?? '',
   apiBaseUrl: process.env.API_BASE_URL ?? '',
   publicAppBaseUrl: stripWrappingQuotes(

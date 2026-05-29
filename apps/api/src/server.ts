@@ -84,6 +84,7 @@ import {
   isUserAccountActive,
   resolveDisabledAccountErrorCode,
 } from './services/roles.js';
+import { verifyRequestJwt } from './services/jwtSession.js';
 
 export function buildServer() {
   assertSecureRuntimeConfig();
@@ -365,7 +366,7 @@ export function buildServer() {
 
   app.decorate('authenticate', async (request: any, reply: any) => {
     try {
-      await request.jwtVerify();
+      await verifyRequestJwt(app, request);
     } catch {
       reply.code(401).send({ error: 'unauthorized' });
       return;
@@ -403,7 +404,7 @@ export function buildServer() {
 
   app.decorate('adminOnly', async (request: any, reply: any) => {
     try {
-      await request.jwtVerify();
+      await verifyRequestJwt(app, request);
     } catch {
       return reply.code(401).send({ error: 'unauthorized' });
     }

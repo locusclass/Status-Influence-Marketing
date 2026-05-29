@@ -17,6 +17,11 @@ import { isDirectYoTaskUrl } from '@prime/shared';
 import { createUserNotificationsWithSmsPlan } from '../services/notificationDelivery.js';
 import { queueSmsDispatch } from '../services/smsDispatch.js';
 import { activateListingBoost } from '../services/listingBoosts.js';
+import {
+  insertPrimeRequestAccessPass,
+  insertPrimeRequestUnlock,
+  normalizePrimeRequestPassType,
+} from '../services/primeRequests.js';
 
 const yoProviderReferenceInputKeys = [
   'transaction_id',
@@ -723,6 +728,96 @@ export async function paymentRoutes(app: FastifyInstance) {
       return { ok: true, pending: true, type: 'marketplace_listing_subscription' };
     }
 
+    if (txKind === 'PRIME_REQUEST_UNLOCK') {
+      if (txn.status === 'COMPLETED') {
+        return { ok: true, duplicate: true, type: 'prime_request_unlock' };
+      }
+
+      if (statusSuccess.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'COMPLETED',
+          String(paymentEvent.transactionId)
+        );
+        const userId = String(txnPayload.user_id ?? '');
+        const requestId = String(txnPayload.request_id ?? '');
+        const amount = Number(txnPayload.amount ?? txn.amount ?? 0);
+        if (userId && requestId && amount > 0) {
+          await insertPrimeRequestUnlock(client, {
+            requestId,
+            userId,
+            amountPaid: amount,
+            paymentReference: String(paymentEvent.reference),
+          });
+        }
+        return { ok: true, type: 'prime_request_unlock', smsJobs: [] };
+      }
+
+      if (statusFailure.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'FAILED',
+          String(paymentEvent.transactionId)
+        );
+        return { ok: true, type: 'prime_request_unlock', smsJobs: [] };
+      }
+
+      await paymentRepo.updatePesaPalTxnStatus(
+        client,
+        String(paymentEvent.reference),
+        'PENDING',
+        String(paymentEvent.transactionId)
+      );
+      return { ok: true, pending: true, type: 'prime_request_unlock' };
+    }
+
+    if (txKind === 'PRIME_REQUEST_ACCESS_PASS') {
+      if (txn.status === 'COMPLETED') {
+        return { ok: true, duplicate: true, type: 'prime_request_access_pass' };
+      }
+
+      if (statusSuccess.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'COMPLETED',
+          String(paymentEvent.transactionId)
+        );
+        const userId = String(txnPayload.user_id ?? '');
+        const passType = normalizePrimeRequestPassType(txnPayload.pass_type);
+        const amount = Number(txnPayload.amount ?? txn.amount ?? 0);
+        if (userId && passType && amount > 0) {
+          await insertPrimeRequestAccessPass(client, {
+            userId,
+            passType,
+            amountPaid: amount,
+            paymentReference: String(paymentEvent.reference),
+          });
+        }
+        return { ok: true, type: 'prime_request_access_pass', smsJobs: [] };
+      }
+
+      if (statusFailure.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'FAILED',
+          String(paymentEvent.transactionId)
+        );
+        return { ok: true, type: 'prime_request_access_pass', smsJobs: [] };
+      }
+
+      await paymentRepo.updatePesaPalTxnStatus(
+        client,
+        String(paymentEvent.reference),
+        'PENDING',
+        String(paymentEvent.transactionId)
+      );
+      return { ok: true, pending: true, type: 'prime_request_access_pass' };
+    }
+
     const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
     const escrow = escrowRows.rows[0];
     if (!escrow || Number(txn.amount ?? 0) !== Number(escrow.amount_total ?? 0)) {
@@ -1018,7 +1113,8 @@ export async function paymentRoutes(app: FastifyInstance) {
     const txKind = String(rawPayload.kind ?? '').toUpperCase();
 
     if (txKind === 'WALLET_DEPOSIT' || txKind === 'AMBASSADOR_SUBSCRIPTION'
-        || txKind === 'LISTING_BOOST' || txKind === 'MARKETPLACE_LISTING_SUBSCRIPTION') {
+        || txKind === 'LISTING_BOOST' || txKind === 'MARKETPLACE_LISTING_SUBSCRIPTION'
+        || txKind === 'PRIME_REQUEST_UNLOCK' || txKind === 'PRIME_REQUEST_ACCESS_PASS') {
       if (String(rawPayload.user_id ?? '') !== authUser) {
         return { error: 'forbidden' } as const;
       }
@@ -1167,6 +1263,8 @@ export async function paymentRoutes(app: FastifyInstance) {
             if (k === 'WALLET_DEPOSIT') return `Wallet deposit ${parsed.data.tx_ref}`;
             if (k === 'AMBASSADOR_SUBSCRIPTION') return `Ambassador subscription ${parsed.data.tx_ref}`;
             if (k === 'LISTING_BOOST') return `Listing boost ${parsed.data.tx_ref}`;
+            if (k === 'PRIME_REQUEST_UNLOCK') return `Prime Request unlock ${parsed.data.tx_ref}`;
+            if (k === 'PRIME_REQUEST_ACCESS_PASS') return `Prime Requests access pass ${parsed.data.tx_ref}`;
             return `Campaign funding ${parsed.data.tx_ref}`;
           })(),
           reference: parsed.data.tx_ref,
@@ -1218,7 +1316,7 @@ export async function paymentRoutes(app: FastifyInstance) {
             chargeId ?? undefined
           );
           const failedKind = String(context.rawPayload.kind ?? '').toUpperCase();
-          if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION' || failedKind === 'LISTING_BOOST') {
+          if (failedKind === 'WALLET_DEPOSIT' || failedKind === 'AMBASSADOR_SUBSCRIPTION' || failedKind === 'LISTING_BOOST' || failedKind === 'PRIME_REQUEST_UNLOCK' || failedKind === 'PRIME_REQUEST_ACCESS_PASS') {
             smsJobs = await planPaymentOutcomeNotification(client, {
               userId: authUser,
               txRef: parsed.data.tx_ref,

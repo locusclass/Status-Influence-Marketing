@@ -1,10 +1,9 @@
-import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, normalizeExecutionMeta, recordCampaignRevenueEntry, resolveDeliveryModel, } from '@prime/shared';
+import { CreateCampaignSchema, DeliveryModelSchema, FundCampaignSchema, MediaTypeSchema, PlatformAdapterSchema, getPublicContractUnitRate, getCampaignBurstMode, normalizeExecutionMeta, recordCampaignRevenueEntry, resolveDeliveryModel, CAMPAIGN_PACKAGES, CAMPAIGN_PACKAGE_MIN_CUSTOM_UGX, MARKETPLACE_LISTING_PLANS, FEATURED_AUTO_QUALIFY_SPEND_UGX, getMarketplaceListingPlan, PUBLIC_CONTRACT_RATE_UGX, } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
 import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
-import { BUSINESS_PRO_PLANS, getBusinessProSubscriptionStatus, reserveBusinessProSubscription, markBusinessProSubscriptionPaid, } from '../services/businessSubscriptions.js';
 import { config, hasYoClientCredentials, hasYoEncryptionKey, } from '../config.js';
 import { resolveAvailableYoUgandaCheckoutProfile } from '../services/yoUgandaCheckoutProfile.js';
 import { ensureChatSchema } from '../services/chat.js';
@@ -18,6 +17,8 @@ import { ensureUserProfilesTable } from '../services/userProfiles.js';
 import { queueSmsDispatch } from '../services/smsDispatch.js';
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
+// Platform service fee added on top of campaign budget, charged to the business.
+const BUSINESS_PLATFORM_FEE_MULTIPLIER = 1.20;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
 const CREATOR_DEFAULT_TARGET_METRIC = 100;
 const ACTIVE_CAMPAIGN_PLATFORM = 'WHATSAPP_STATUS';
@@ -2052,6 +2053,184 @@ export async function campaignRoutes(app) {
         message: 'Either q, group_id or group_public_id is required.',
         path: ['q'],
     });
+    // GET /campaigns/packages — public campaign package catalog
+    app.get('/campaigns/packages', async (_request, _reply) => {
+        return {
+            rate_per_view_ugx: PUBLIC_CONTRACT_RATE_UGX,
+            min_custom_budget_ugx: CAMPAIGN_PACKAGE_MIN_CUSTOM_UGX,
+            packages: CAMPAIGN_PACKAGES,
+        };
+    });
+    // GET /marketplace/listing-plans — marketplace listing plan catalog
+    app.get('/marketplace/listing-plans', async (_request, _reply) => {
+        return {
+            plans: MARKETPLACE_LISTING_PLANS,
+            featured_auto_qualify_spend_ugx: FEATURED_AUTO_QUALIFY_SPEND_UGX,
+        };
+    });
+    // GET /marketplace/listing-subscription — current business listing subscription status
+    app.get('/marketplace/listing-subscription', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        return withTransaction(async (client) => {
+            // Check paid/waived subscription
+            const subRes = await client.query(`
+        SELECT bls.plan_code, bls.valid_until, bls.paid_at, bls.is_waived, bls.auto_qualified,
+               mlp.label, mlp.price_ugx_monthly
+        FROM business_listing_subscriptions bls
+        JOIN marketplace_listing_plans mlp ON mlp.code = bls.plan_code
+        WHERE bls.business_id = $1
+          AND (bls.valid_until IS NULL OR bls.valid_until > now())
+          AND (bls.paid_at IS NOT NULL OR bls.is_waived = TRUE OR bls.auto_qualified = TRUE)
+        ORDER BY mlp.sort_order DESC
+        LIMIT 1
+      `, [authUser]);
+            // Check auto-qualify: >= FEATURED_AUTO_QUALIFY_SPEND_UGX this calendar month via campaigns
+            const spendRes = await client.query(`
+        SELECT COALESCE(SUM(el.amount_total), 0)::int AS monthly_spend
+        FROM escrow_ledger el
+        JOIN campaigns c ON c.id = el.campaign_id
+        WHERE c.user_id = $1
+          AND el.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+          AND date_trunc('month', el.created_at) = date_trunc('month', now())
+      `, [authUser]);
+            const monthlySpend = Number(spendRes.rows[0]?.monthly_spend ?? 0);
+            const autoQualifiesFeatured = monthlySpend >= FEATURED_AUTO_QUALIFY_SPEND_UGX;
+            // Active campaigns grant exposure during their window
+            const activeCampaignRes = await client.query(`
+        SELECT COUNT(*) AS count
+        FROM campaigns
+        WHERE user_id = $1
+          AND status = 'ACTIVE'
+          AND (end_date IS NULL OR end_date > now())
+      `, [authUser]);
+            const hasActiveCampaign = Number(activeCampaignRes.rows[0]?.count ?? 0) > 0;
+            const sub = subRes.rows[0];
+            return {
+                has_active_subscription: !!sub,
+                plan_code: sub?.plan_code ?? null,
+                plan_label: sub?.label ?? null,
+                valid_until: sub?.valid_until ?? null,
+                auto_qualified_featured: autoQualifiesFeatured,
+                has_active_campaign_exposure: hasActiveCampaign,
+                monthly_campaign_spend_ugx: monthlySpend,
+                featured_auto_qualify_threshold_ugx: FEATURED_AUTO_QUALIFY_SPEND_UGX,
+            };
+        });
+    });
+    // POST /marketplace/listing-subscription/pay — initiate a listing plan payment
+    app.post('/marketplace/listing-subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        const body = request.body ?? {};
+        const planCode = String(body.plan_code ?? '').trim().toUpperCase();
+        const plan = getMarketplaceListingPlan(planCode);
+        if (!plan)
+            return reply.code(400).send({ error: 'invalid_plan_code' });
+        const fundSource = String(body.fund_source ?? 'YO_UGANDA').trim().toUpperCase();
+        if (fundSource === 'WALLET') {
+            return withTransaction(async (client) => {
+                const walletRes = await client.query('SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE', [authUser]);
+                const wallet = walletRes.rows[0];
+                const balance = Number(wallet?.balance_available ?? 0);
+                if (!wallet || balance < plan.price_ugx_monthly) {
+                    reply.code(400);
+                    return { error: 'insufficient_wallet_balance' };
+                }
+                const reference = `MARKETPLACE_LISTING:${planCode}:${new Date().toISOString().slice(0, 10)}`;
+                await client.query(`UPDATE wallets SET balance_available = balance_available - $2, balance = balance - $2 WHERE id = $1`, [wallet.id, plan.price_ugx_monthly]);
+                await client.query(`INSERT INTO wallet_txns (wallet_id, direction, amount, currency, reference)
+           VALUES ($1, 'DEBIT', $2, 'UGX', $3)`, [wallet.id, plan.price_ugx_monthly, reference]);
+                const validUntil = new Date();
+                validUntil.setDate(validUntil.getDate() + 30);
+                await client.query(`INSERT INTO business_listing_subscriptions
+             (business_id, plan_code, amount, currency, paid_at, valid_until, payment_reference)
+           VALUES ($1, $2, $3, 'UGX', now(), $4, $5)`, [authUser, planCode, plan.price_ugx_monthly, validUntil.toISOString(), reference]);
+                return { ok: true, funded: true, fund_source: 'WALLET', plan_code: planCode, valid_until: validUntil };
+            });
+        }
+        // YO_UGANDA checkout
+        if (!hasYoClientCredentials()) {
+            reply.code(503);
+            return { error: 'yo_uganda_not_configured' };
+        }
+        const { v4: uuidGen } = await import('uuid');
+        const merchantReference = uuidGen();
+        return withTransaction(async (client) => {
+            const userRes = await client.query('SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1', [authUser]);
+            const user = userRes.rows[0];
+            const userCountry = user?.country ?? 'UG';
+            const userEmail = user?.email ?? '';
+            const userPhone = user?.phone ?? null;
+            const userName = user?.full_name ?? 'Business';
+            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
+            const paymentRepo = new PaymentRepo();
+            await paymentRepo.createPesaPalTransaction(client, {
+                escrow_id: undefined,
+                type: 'FUNDING',
+                amount: plan.price_ugx_monthly,
+                merchant_reference: merchantReference,
+                raw_payload: {
+                    kind: 'MARKETPLACE_LISTING_SUBSCRIPTION',
+                    user_id: authUser,
+                    plan_code: planCode,
+                    amount: plan.price_ugx_monthly,
+                    currency: 'UGX',
+                },
+            });
+            return {
+                ok: true,
+                tx_ref: merchantReference,
+                amount: plan.price_ugx_monthly,
+                currency: 'UGX',
+                plan,
+                checkout_payload: {
+                    provider: 'YO_UGANDA',
+                    mode: 'DIRECT_CHARGE',
+                    tx_ref: merchantReference,
+                    amount: plan.price_ugx_monthly,
+                    currency: 'UGX',
+                    payment_options: checkoutProfile.paymentOptions,
+                    supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+                    mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+                    phone_country_code: checkoutProfile.phoneCountryCode,
+                    availability_notes: checkoutProfile.availabilityNotes,
+                    country: checkoutProfile.country,
+                    customer: { email: userEmail, name: userName, phone_number: userPhone },
+                    meta: { merchant_reference: merchantReference, kind: 'MARKETPLACE_LISTING_SUBSCRIPTION', user_id: authUser, plan_code: planCode },
+                },
+            };
+        });
+    });
+    // POST /marketplace/listing-subscription/confirm — confirm after checkout
+    app.post('/marketplace/listing-subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const authUser = request.user?.sub;
+        if (!authUser)
+            return reply.code(401).send({ error: 'unauthorized' });
+        const body = request.body ?? {};
+        const paymentReference = String(body.payment_reference ?? '').trim();
+        const planCode = String(body.plan_code ?? '').trim().toUpperCase();
+        if (!paymentReference || !planCode)
+            return reply.code(400).send({ error: 'payment_reference_and_plan_code_required' });
+        const plan = getMarketplaceListingPlan(planCode);
+        if (!plan)
+            return reply.code(400).send({ error: 'invalid_plan_code' });
+        return withTransaction(async (client) => {
+            const paymentRepo = new PaymentRepo();
+            try {
+                await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+            }
+            catch (_) { }
+            const validUntil = new Date();
+            validUntil.setDate(validUntil.getDate() + 30);
+            await client.query(`INSERT INTO business_listing_subscriptions
+           (business_id, plan_code, amount, currency, paid_at, valid_until, payment_reference)
+         VALUES ($1, $2, $3, 'UGX', now(), $4, $5)`, [authUser, planCode, plan.price_ugx_monthly, validUntil.toISOString(), paymentReference]);
+            return { ok: true };
+        });
+    });
     app.get('/campaigns/ambassador-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
         const role = normalizeActiveRole(request.user?.active_role, request.user?.role);
         if (!canAccessBusinessFeatures(role)) {
@@ -2970,8 +3149,8 @@ export async function campaignRoutes(app) {
                 }
                 else {
                     await paymentRepo.createEscrow(client, bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''), bundleId
-                        ? totalEscrowAmount
-                        : Number(createdRootCampaigns[0]?.budget_total ?? 0));
+                        ? Math.ceil(totalEscrowAmount * BUSINESS_PLATFORM_FEE_MULTIPLIER)
+                        : Math.ceil(Number(createdRootCampaigns[0]?.budget_total ?? 0) * BUSINESS_PLATFORM_FEE_MULTIPLIER));
                 }
                 // Set approval status based on admin_settings
                 const settingRes = await client.query(`SELECT value FROM admin_settings WHERE key='campaign_approval_mode' LIMIT 1`);
@@ -3150,7 +3329,9 @@ export async function campaignRoutes(app) {
                 const escrowStatus = String(editable.escrow.status ?? 'PENDING').toUpperCase();
                 const currentRootBudget = Number(editable.root.budget_total ?? 0);
                 const nextRootBudget = resolvedBudgetTotal;
-                const nextEscrowTotal = Number(editable.escrow.amount_total ?? 0) - currentRootBudget + nextRootBudget;
+                const nextEscrowTotal = Number(editable.escrow.amount_total ?? 0)
+                    - Math.ceil(currentRootBudget * BUSINESS_PLATFORM_FEE_MULTIPLIER)
+                    + Math.ceil(nextRootBudget * BUSINESS_PLATFORM_FEE_MULTIPLIER);
                 if (escrowStatus !== 'PENDING' &&
                     currentRootBudget !== nextRootBudget) {
                     return { error: 'campaign_edit_budget_locked' };
@@ -3386,7 +3567,7 @@ export async function campaignRoutes(app) {
          WHERE campaign_id = ANY($1::uuid[])`, [campaignIds]);
             await deleteCampaignLinkedArtifacts(client, campaignIds);
             if (editable.bundle_id && remainingBundleRoots.length > 0) {
-                const nextEscrowTotal = Math.max(0, Number(editable.escrow.amount_total ?? 0) - Number(editable.root.budget_total ?? 0));
+                const nextEscrowTotal = Math.max(0, Number(editable.escrow.amount_total ?? 0) - Math.ceil(Number(editable.root.budget_total ?? 0) * BUSINESS_PLATFORM_FEE_MULTIPLIER));
                 if (isBundleOwner) {
                     const nextOwnerId = String(remainingBundleRoots[0].id);
                     await client.query(`
@@ -4528,17 +4709,48 @@ export async function campaignRoutes(app) {
             };
         });
     });
-    // POST /ambassador/subscription/pay — reserves a subscription slot, creates a pesapal_transactions
-    // record, and returns a checkout_payload so the mobile client can open the payment screen.
+    // POST /ambassador/subscription/pay — reserves a subscription slot.
+    // Supports fund_source: 'WALLET' (immediate) or 'YO_UGANDA' (mobile money checkout).
     app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
         const authUser = request.user?.sub;
         if (!authUser)
             return reply.code(401).send({ error: 'unauthorized' });
+        const reqBody = request.body ?? {};
+        const fundSource = String(reqBody.fund_source ?? 'YO_UGANDA').toUpperCase().trim();
+        const SUBSCRIPTION_AMOUNT = 1000;
+        const periodStart = new Date().toISOString().slice(0, 10);
+        // ── Wallet payment path ───────────────────────────────────────────────────
+        if (fundSource === 'WALLET') {
+            return withTransaction(async (client) => {
+                const wallet = await ensureWalletForUser(client, authUser);
+                const lockedRes = await client.query('SELECT * FROM wallets WHERE id=$1 FOR UPDATE', [wallet.id]);
+                const lockedWallet = lockedRes.rows[0];
+                const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);
+                if (!lockedWallet || balanceAvailable < SUBSCRIPTION_AMOUNT) {
+                    reply.code(400);
+                    return { error: 'insufficient_wallet_balance' };
+                }
+                await client.query(`UPDATE wallets
+           SET balance_available = balance_available - $2,
+               balance = GREATEST(balance - $2, 0)
+           WHERE id=$1`, [wallet.id, SUBSCRIPTION_AMOUNT]);
+                const walletRef = `AMBASSADOR_SUBSCRIPTION:${periodStart}`;
+                await client.query(`INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+           VALUES ($1,$2,'DEBIT',$3)`, [wallet.id, SUBSCRIPTION_AMOUNT, walletRef]);
+                await client.query(`INSERT INTO ambassador_subscriptions
+             (ambassador_id, period_start, amount, currency, payment_reference, paid_at)
+           VALUES ($1,$2,$3,'UGX',$4,now())
+           ON CONFLICT (ambassador_id, period_start)
+           DO UPDATE SET payment_reference = EXCLUDED.payment_reference,
+                         paid_at = COALESCE(ambassador_subscriptions.paid_at, now())`, [authUser, periodStart, SUBSCRIPTION_AMOUNT, walletRef]);
+                return { ok: true, funded: true, fund_source: 'WALLET' };
+            });
+        }
+        // ── YO Uganda (mobile money) path ─────────────────────────────────────────
         if (!hasYoClientCredentials()) {
             reply.code(503);
             return { error: 'yo_uganda_not_configured' };
         }
-        const periodStart = new Date().toISOString().slice(0, 10);
         const merchantReference = uuid();
         return withTransaction(async (client) => {
             // Look up user details for checkout payload customer info
@@ -4644,110 +4856,6 @@ export async function campaignRoutes(app) {
                 await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
             }
             catch (_) { /* non-fatal if record doesn't exist */ }
-            return { ok: true };
-        });
-    });
-    // ── BUSINESS PRO SUBSCRIPTION ─────────────────────────────────────────────
-    // GET /business/subscription/status
-    app.get('/business/subscription/status', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const authUser = request.user?.sub;
-        if (!authUser)
-            return reply.code(401).send({ error: 'unauthorized' });
-        return withTransaction(async (client) => {
-            const status = await getBusinessProSubscriptionStatus(client, authUser);
-            return status;
-        });
-    });
-    // POST /business/subscription/pay — reserves a Pro subscription slot and returns checkout_payload
-    app.post('/business/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const authUser = request.user?.sub;
-        if (!authUser)
-            return reply.code(401).send({ error: 'unauthorized' });
-        if (!hasYoClientCredentials()) {
-            reply.code(503);
-            return { error: 'yo_uganda_not_configured' };
-        }
-        const body = request.body ?? {};
-        const planCodeRaw = String(body.plan ?? 'monthly').trim().toLowerCase();
-        const plan = BUSINESS_PRO_PLANS[planCodeRaw] ?? BUSINESS_PRO_PLANS.monthly;
-        const merchantReference = uuid();
-        return withTransaction(async (client) => {
-            const userRes = await client.query('SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1', [authUser]);
-            const user = userRes.rows[0];
-            const userCountry = user?.country ?? 'UG';
-            const userEmail = user?.email ?? '';
-            const userPhone = user?.phone ?? null;
-            const userName = user?.full_name ?? 'Business';
-            const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(userCountry, { cardEnabled: hasYoEncryptionKey() });
-            const rawPayload = {
-                kind: 'BUSINESS_PRO_SUBSCRIPTION',
-                user_id: authUser,
-                plan_code: plan.code,
-                amount: plan.amountUgx,
-                currency: 'UGX',
-                country: checkoutProfile.country,
-                payment_options: checkoutProfile.paymentOptions,
-                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
-                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
-                phone_country_code: checkoutProfile.phoneCountryCode,
-                availability_notes: checkoutProfile.availabilityNotes,
-                customer: { email: userEmail, name: userName, phone_number: userPhone },
-            };
-            await reserveBusinessProSubscription(client, authUser, merchantReference, plan.code);
-            const paymentRepo = new PaymentRepo();
-            await paymentRepo.createPesaPalTransaction(client, {
-                escrow_id: undefined,
-                type: 'FUNDING',
-                amount: plan.amountUgx,
-                merchant_reference: merchantReference,
-                raw_payload: rawPayload,
-            });
-            const checkoutPayload = {
-                provider: 'YO_UGANDA',
-                mode: 'DIRECT_CHARGE',
-                tx_ref: merchantReference,
-                amount: plan.amountUgx,
-                currency: 'UGX',
-                payment_options: checkoutProfile.paymentOptions,
-                supported_payment_methods: checkoutProfile.supportedPaymentMethods,
-                mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
-                phone_country_code: checkoutProfile.phoneCountryCode,
-                availability_notes: checkoutProfile.availabilityNotes,
-                country: checkoutProfile.country,
-                customer: { email: userEmail, name: userName, phone_number: userPhone },
-                meta: {
-                    merchant_reference: merchantReference,
-                    kind: 'BUSINESS_PRO_SUBSCRIPTION',
-                    user_id: authUser,
-                    plan_code: plan.code,
-                },
-            };
-            return {
-                ok: true,
-                tx_ref: merchantReference,
-                amount: plan.amountUgx,
-                currency: 'UGX',
-                plan,
-                checkout_payload: checkoutPayload,
-            };
-        });
-    });
-    // POST /business/subscription/confirm — marks subscription paid after checkout completes
-    app.post('/business/subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
-        const authUser = request.user?.sub;
-        if (!authUser)
-            return reply.code(401).send({ error: 'unauthorized' });
-        const body = request.body ?? {};
-        const paymentReference = String(body.payment_reference ?? '').trim();
-        if (!paymentReference)
-            return reply.code(400).send({ error: 'payment_reference_required' });
-        return withTransaction(async (client) => {
-            await markBusinessProSubscriptionPaid(client, authUser, paymentReference);
-            const paymentRepo = new PaymentRepo();
-            try {
-                await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
-            }
-            catch (_) { /* non-fatal */ }
             return { ok: true };
         });
     });

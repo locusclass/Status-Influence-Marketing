@@ -107,6 +107,9 @@ describe('Session security hardening', () => {
     const decoded = app.jwt.decode(token) as Record<string, any>;
     expect(typeof decoded.exp).toBe('number');
     expect(Number(decoded.exp)).toBeGreaterThan(Number(decoded.iat ?? 0));
+    expect(Number(decoded.exp) - Number(decoded.iat ?? 0)).toBeGreaterThanOrEqual(
+      29 * 24 * 60 * 60
+    );
   });
 
   it('blocks suspended users from logging in', async () => {

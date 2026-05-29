@@ -2,6 +2,7 @@ import { ADMIN_MODULE_ADMIN_MANAGEMENT, ADMIN_MODULE_OVERVIEW, ADMIN_MODULE_OPER
 import { withTransaction } from '../db.js';
 import { resolveCountry } from '../countryResolver.js';
 import { hashPassword } from './auth.js';
+import { verifyRequestJwt } from './jwtSession.js';
 const PRIMARY_SUPER_ADMIN = {
     fullName: 'ARIAKA WALTER',
     email: 'kariaka247@gmail.com',
@@ -529,7 +530,7 @@ function canSatisfyRole(access, requiredRole) {
 export function requireRole(roles) {
     return async (request, reply) => {
         try {
-            await request.jwtVerify();
+            await verifyRequestJwt(request.server, request);
         }
         catch {
             return reply.code(401).send({ error: 'unauthorized' });

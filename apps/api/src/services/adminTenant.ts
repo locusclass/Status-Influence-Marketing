@@ -19,6 +19,7 @@ import {
 import { withTransaction } from '../db.js';
 import { resolveCountry } from '../countryResolver.js';
 import { hashPassword } from './auth.js';
+import { verifyRequestJwt } from './jwtSession.js';
 
 const PRIMARY_SUPER_ADMIN = {
   fullName: 'ARIAKA WALTER',
@@ -762,7 +763,7 @@ function canSatisfyRole(
 export function requireRole(roles: AdminDashboardRole[]) {
   return async (request: any, reply: any) => {
     try {
-      await request.jwtVerify();
+      await verifyRequestJwt(request.server, request);
     } catch {
       return reply.code(401).send({ error: 'unauthorized' });
     }
