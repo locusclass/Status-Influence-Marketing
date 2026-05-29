@@ -1017,7 +1017,8 @@ export async function paymentRoutes(app: FastifyInstance) {
     const rawPayload = (txn.raw_payload ?? {}) as Record<string, any>;
     const txKind = String(rawPayload.kind ?? '').toUpperCase();
 
-    if (txKind === 'WALLET_DEPOSIT' || txKind === 'AMBASSADOR_SUBSCRIPTION') {
+    if (txKind === 'WALLET_DEPOSIT' || txKind === 'AMBASSADOR_SUBSCRIPTION'
+        || txKind === 'LISTING_BOOST' || txKind === 'MARKETPLACE_LISTING_SUBSCRIPTION') {
       if (String(rawPayload.user_id ?? '') !== authUser) {
         return { error: 'forbidden' } as const;
       }

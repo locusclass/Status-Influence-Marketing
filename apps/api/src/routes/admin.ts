@@ -6649,7 +6649,7 @@ export async function adminRoutes(app: FastifyInstance) {
         const adminId = access.admin_user_id ?? null;
         await client.query(`
           INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, is_waived, waived_by_admin_id, waived_at, waived_note)
-          VALUES ($1, $2, 5000, 'UGX', true, $3, now(), $4)
+          VALUES ($1, $2, 1000, 'UGX', true, $3, now(), $4)
           ON CONFLICT (ambassador_id, period_start)
           DO UPDATE SET is_waived = true, waived_by_admin_id = $3, waived_at = now(), waived_note = $4
         `, [userId, period, adminId, note]);
