@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   calculateAmbassadorPayoutBreakdown,
-  Ambassador_PLATFORM_FEE_PERCENT,
+  AMBASSADOR_PLATFORM_FEE_PERCENT,
 } from '@prime/shared';
 
 describe('calculateAmbassadorPayoutBreakdown', () => {
-  it('credits the gross amount and derives the platform fee from Ambassador earnings', () => {
+  it('tracks the platform fee charged to the business; ambassador receives full gross', () => {
     expect(calculateAmbassadorPayoutBreakdown(10_000)).toEqual({
       gross_amount: 10_000,
-      platform_fee_percent: Ambassador_PLATFORM_FEE_PERCENT,
-      platform_fee_amount: 1_500,
-      net_amount: 8_500,
+      platform_fee_percent: AMBASSADOR_PLATFORM_FEE_PERCENT,
+      platform_fee_amount: 2_000,
+      net_amount: 10_000,
     });
   });
 

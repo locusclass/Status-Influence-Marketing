@@ -18,19 +18,6 @@ import {
   activateListingBoost,
   ensureListingBoostSchema,
 } from '../services/listingBoosts.js';
-import {
-  hasActiveBusinessProSubscription,
-  ensureBusinessProSubscriptionSchema,
-  proKeepAliveConditionSql,
-} from '../services/businessSubscriptions.js';
-
-// Ensure Pro subscription table exists on first advert route use
-let proSchemaEnsured = false;
-async function ensureProSchemaOnce(client: any) {
-  if (proSchemaEnsured) return;
-  await ensureBusinessProSubscriptionSchema(client);
-  proSchemaEnsured = true;
-}
 
 const DEFAULT_LISTING_KEEP_HOURS = 12;
 const LISTING_LIFETIME_BUFFER_HOURS = 1;
@@ -1304,12 +1291,9 @@ export async function advertRoutes(app: FastifyInstance) {
 
         // Enforce the buffered campaign window:
         // listing is inaccessible once campaign_end_at has passed,
-        // unless admin_keep_alive is set or the business has an active Pro subscription.
+        // unless admin_keep_alive is set.
         const timeRemainingSecs = Number(listing.time_remaining_secs ?? -1);
-        const hasProSubscription = listing.business_id
-          ? await hasActiveBusinessProSubscription(client, String(listing.business_id))
-          : false;
-        const isExpired = !listing.admin_keep_alive && !hasProSubscription && timeRemainingSecs <= 0;
+        const isExpired = !listing.admin_keep_alive && timeRemainingSecs <= 0;
 
         // Auto-expire in DB if needed
         if (isExpired && listing.status === 'ACTIVE') {
@@ -1417,10 +1401,7 @@ export async function advertRoutes(app: FastifyInstance) {
         `, [slug]);
         const r = row.rows[0];
         if (!r) return null;
-        const hasProSub = r.business_id
-          ? await hasActiveBusinessProSubscription(client, String(r.business_id))
-          : false;
-        return { ...r, has_pro_subscription: hasProSub };
+        return r;
       });
       if (!result) return reply.code(404).send({ error: 'listing_not_found' });
       if (String(result.status ?? '').toUpperCase() === 'DRAFT') {
@@ -1436,16 +1417,14 @@ export async function advertRoutes(app: FastifyInstance) {
       }
       const accessState = String(result.access_state ?? 'PUBLIC').toUpperCase();
       const remaining = Number(result.time_remaining_secs ?? -1);
-      const hasProSub = result.has_pro_subscription === true;
       const isLive = accessState === 'PUBLIC' && (
         result.status === 'DRAFT' ||
         result.admin_keep_alive ||
-        hasProSub ||
         remaining > 0
       );
       return reply.send({
         is_live: isLive,
-        time_remaining_secs: hasProSub ? null : Math.max(0, remaining),
+        time_remaining_secs: Math.max(0, remaining),
         campaign_start_at: result.campaign_start_at,
         campaign_end_at: result.campaign_end_at,
         status: result.status,
@@ -3578,13 +3557,12 @@ export async function advertRoutes(app: FastifyInstance) {
       if (!listing) return reply.code(404).send({ error: 'listing_not_found' });
       if (listing.business_id !== userId) return reply.code(403).send({ error: 'forbidden' });
 
-      const isPro = await hasActiveBusinessProSubscription(client, userId);
-      const options = buildListingBoostOptions(isPro);
+      const options = buildListingBoostOptions(false);
       const boostExpiresAt = listing.boost_expires_at ? new Date(listing.boost_expires_at) : null;
       const isCurrentlyBoosted = boostExpiresAt != null && boostExpiresAt.getTime() > Date.now();
 
       return {
-        is_pro: isPro,
+        is_pro: false,
         is_currently_boosted: isCurrentlyBoosted,
         boost_expires_at: listing.boost_expires_at ?? null,
         current_boost_plan: listing.boost_plan ?? null,
@@ -3632,11 +3610,8 @@ export async function advertRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: 'listing_boost_requires_active_listing' });
       }
 
-      const isPro = await hasActiveBusinessProSubscription(client, userId);
       const { amount_ugx: amountUgx } = resolveListingBoostPlan(planCode)!;
-      const discountedAmount = isPro
-        ? Math.max(0, Math.round(amountUgx * 0.8))
-        : amountUgx;
+      const discountedAmount = amountUgx;
 
       const userRes = await client.query(
         'SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1',
@@ -3661,7 +3636,6 @@ export async function advertRoutes(app: FastifyInstance) {
         plan_code: planCode,
         amount: discountedAmount,
         currency: 'UGX',
-        is_pro_discounted: isPro,
         country: checkoutProfile.country,
         payment_options: checkoutProfile.paymentOptions,
         supported_payment_methods: checkoutProfile.supportedPaymentMethods,

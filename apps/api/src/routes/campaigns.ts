@@ -18,12 +18,6 @@ import { CampaignRepo } from '../repositories/campaignRepo.js';
 import { PaymentRepo } from '../repositories/paymentRepo.js';
 import { v4 as uuid } from 'uuid';
 import {
-  BUSINESS_PRO_PLANS,
-  getBusinessProSubscriptionStatus,
-  reserveBusinessProSubscription,
-  markBusinessProSubscriptionPaid,
-} from '../services/businessSubscriptions.js';
-import {
   config,
   hasYoClientCredentials,
   hasYoEncryptionKey,
@@ -56,6 +50,8 @@ import { queueSmsDispatch, type SmsDispatchJob } from '../services/smsDispatch.j
 
 const PRIVATE_PLATFORM_FEE_PERCENT = 0;
 const OPEN_PLATFORM_FEE_PERCENT = 0;
+// Platform service fee added on top of campaign budget, charged to the business.
+const BUSINESS_PLATFORM_FEE_MULTIPLIER = 1.20;
 const PRIVATE_CONTRACT_WINDOW_HOURS = 24;
 const CREATOR_DEFAULT_TARGET_METRIC = 100;
 const ACTIVE_CAMPAIGN_PLATFORM = 'WHATSAPP_STATUS' as const;
@@ -4006,8 +4002,8 @@ export async function campaignRoutes(app: FastifyInstance) {
             client,
             bundleRootCampaignId ?? String(createdRootCampaigns[0]?.id ?? ''),
             bundleId
-              ? totalEscrowAmount
-              : Number(createdRootCampaigns[0]?.budget_total ?? 0)
+              ? Math.ceil(totalEscrowAmount * BUSINESS_PLATFORM_FEE_MULTIPLIER)
+              : Math.ceil(Number(createdRootCampaigns[0]?.budget_total ?? 0) * BUSINESS_PLATFORM_FEE_MULTIPLIER)
           );
         }
 
@@ -4253,7 +4249,9 @@ export async function campaignRoutes(app: FastifyInstance) {
         const currentRootBudget = Number(editable.root.budget_total ?? 0);
         const nextRootBudget = resolvedBudgetTotal;
         const nextEscrowTotal =
-          Number(editable.escrow.amount_total ?? 0) - currentRootBudget + nextRootBudget;
+          Number(editable.escrow.amount_total ?? 0)
+          - Math.ceil(currentRootBudget * BUSINESS_PLATFORM_FEE_MULTIPLIER)
+          + Math.ceil(nextRootBudget * BUSINESS_PLATFORM_FEE_MULTIPLIER);
         if (
           escrowStatus !== 'PENDING' &&
           currentRootBudget !== nextRootBudget
@@ -4580,7 +4578,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       if (editable.bundle_id && remainingBundleRoots.length > 0) {
         const nextEscrowTotal = Math.max(
           0,
-          Number(editable.escrow.amount_total ?? 0) - Number(editable.root.budget_total ?? 0)
+          Number(editable.escrow.amount_total ?? 0) - Math.ceil(Number(editable.root.budget_total ?? 0) * BUSINESS_PLATFORM_FEE_MULTIPLIER)
         );
         if (isBundleOwner) {
           const nextOwnerId = String(remainingBundleRoots[0].id);
@@ -6022,24 +6020,70 @@ export async function campaignRoutes(app: FastifyInstance) {
         is_active: isActive,
         is_waived: isWaived,
         paid_at: sub?.paid_at ?? null,
-        amount: 5000,
+        amount: 1000,
         currency: 'UGX',
       };
     });
   });
 
-  // POST /ambassador/subscription/pay — reserves a subscription slot, creates a pesapal_transactions
-  // record, and returns a checkout_payload so the mobile client can open the payment screen.
+  // POST /ambassador/subscription/pay — reserves a subscription slot.
+  // Supports fund_source: 'WALLET' (immediate) or 'YO_UGANDA' (mobile money checkout).
   app.post('/ambassador/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
     const authUser = (request.user as any)?.sub as string;
     if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
 
+    const reqBody = (request.body as any) ?? {};
+    const fundSource = String(reqBody.fund_source ?? 'YO_UGANDA').toUpperCase().trim();
+    const SUBSCRIPTION_AMOUNT = 1000;
+    const periodStart = new Date().toISOString().slice(0, 10);
+
+    // ── Wallet payment path ───────────────────────────────────────────────────
+    if (fundSource === 'WALLET') {
+      return withTransaction(async (client) => {
+        const wallet = await ensureWalletForUser(client, authUser);
+        const lockedRes = await client.query(
+          'SELECT * FROM wallets WHERE id=$1 FOR UPDATE',
+          [wallet.id]
+        );
+        const lockedWallet = lockedRes.rows[0];
+        const balanceAvailable = Number(lockedWallet?.balance_available ?? 0);
+        if (!lockedWallet || balanceAvailable < SUBSCRIPTION_AMOUNT) {
+          reply.code(400);
+          return { error: 'insufficient_wallet_balance' };
+        }
+
+        await client.query(
+          `UPDATE wallets
+           SET balance_available = balance_available - $2,
+               balance = GREATEST(balance - $2, 0)
+           WHERE id=$1`,
+          [wallet.id, SUBSCRIPTION_AMOUNT]
+        );
+        const walletRef = `AMBASSADOR_SUBSCRIPTION:${periodStart}`;
+        await client.query(
+          `INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+           VALUES ($1,$2,'DEBIT',$3)`,
+          [wallet.id, SUBSCRIPTION_AMOUNT, walletRef]
+        );
+        await client.query(
+          `INSERT INTO ambassador_subscriptions
+             (ambassador_id, period_start, amount, currency, payment_reference, paid_at)
+           VALUES ($1,$2,$3,'UGX',$4,now())
+           ON CONFLICT (ambassador_id, period_start)
+           DO UPDATE SET payment_reference = EXCLUDED.payment_reference,
+                         paid_at = COALESCE(ambassador_subscriptions.paid_at, now())`,
+          [authUser, periodStart, SUBSCRIPTION_AMOUNT, walletRef]
+        );
+        return { ok: true, funded: true, fund_source: 'WALLET' };
+      });
+    }
+
+    // ── YO Uganda (mobile money) path ─────────────────────────────────────────
     if (!hasYoClientCredentials()) {
       reply.code(503);
       return { error: 'yo_uganda_not_configured' };
     }
 
-    const periodStart = new Date().toISOString().slice(0, 10);
     const merchantReference = uuid();
 
     return withTransaction(async (client) => {
@@ -6062,7 +6106,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       const rawPayload = {
         kind: 'AMBASSADOR_SUBSCRIPTION',
         user_id: authUser,
-        amount: 5000,
+        amount: 1000,
         currency: 'UGX',
         country: checkoutProfile.country,
         payment_options: checkoutProfile.paymentOptions,
@@ -6080,7 +6124,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       // Reserve the subscription slot
       await client.query(
         `INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference)
-         VALUES ($1, $2, 5000, 'UGX', $3)
+         VALUES ($1, $2, 1000, 'UGX', $3)
          ON CONFLICT (ambassador_id, period_start)
          DO UPDATE SET payment_reference = EXCLUDED.payment_reference`,
         [authUser, periodStart, merchantReference]
@@ -6091,7 +6135,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       await paymentRepo.createPesaPalTransaction(client, {
         escrow_id: undefined,
         type: 'FUNDING',
-        amount: 5000,
+        amount: 1000,
         merchant_reference: merchantReference,
         raw_payload: rawPayload,
       });
@@ -6100,7 +6144,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         provider: 'YO_UGANDA',
         mode: 'DIRECT_CHARGE',
         tx_ref: merchantReference,
-        amount: 5000,
+        amount: 1000,
         currency: 'UGX',
         payment_options: checkoutProfile.paymentOptions,
         supported_payment_methods: checkoutProfile.supportedPaymentMethods,
@@ -6123,7 +6167,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       return {
         ok: true,
         tx_ref: merchantReference,
-        amount: 5000,
+        amount: 1000,
         currency: 'UGX',
         period_start: periodStart,
         checkout_payload: checkoutPayload,
@@ -6173,124 +6217,6 @@ export async function campaignRoutes(app: FastifyInstance) {
     });
   });
 
-  // ── BUSINESS PRO SUBSCRIPTION ─────────────────────────────────────────────
-
-  // GET /business/subscription/status
-  app.get('/business/subscription/status', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const authUser = (request.user as any)?.sub as string;
-    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
-    return withTransaction(async (client) => {
-      const status = await getBusinessProSubscriptionStatus(client, authUser);
-      return status;
-    });
-  });
-
-  // POST /business/subscription/pay — reserves a Pro subscription slot and returns checkout_payload
-  app.post('/business/subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const authUser = (request.user as any)?.sub as string;
-    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
-
-    if (!hasYoClientCredentials()) {
-      reply.code(503);
-      return { error: 'yo_uganda_not_configured' };
-    }
-
-    const body = (request.body as any) ?? {};
-    const planCodeRaw = String(body.plan ?? 'monthly').trim().toLowerCase() as keyof typeof BUSINESS_PRO_PLANS;
-    const plan = BUSINESS_PRO_PLANS[planCodeRaw] ?? BUSINESS_PRO_PLANS.monthly;
-    const merchantReference = uuid();
-
-    return withTransaction(async (client) => {
-      const userRes = await client.query(
-        'SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1',
-        [authUser]
-      );
-      const user = userRes.rows[0];
-      const userCountry = (user?.country as string | undefined) ?? 'UG';
-      const userEmail = (user?.email as string | undefined) ?? '';
-      const userPhone = (user?.phone as string | undefined) ?? null;
-      const userName = (user?.full_name as string | undefined) ?? 'Business';
-
-      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
-        userCountry,
-        { cardEnabled: hasYoEncryptionKey() }
-      );
-
-      const rawPayload = {
-        kind: 'BUSINESS_PRO_SUBSCRIPTION',
-        user_id: authUser,
-        plan_code: plan.code,
-        amount: plan.amountUgx,
-        currency: 'UGX',
-        country: checkoutProfile.country,
-        payment_options: checkoutProfile.paymentOptions,
-        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
-        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
-        phone_country_code: checkoutProfile.phoneCountryCode,
-        availability_notes: checkoutProfile.availabilityNotes,
-        customer: { email: userEmail, name: userName, phone_number: userPhone },
-      };
-
-      await reserveBusinessProSubscription(client, authUser, merchantReference, plan.code);
-
-      const paymentRepo = new PaymentRepo();
-      await paymentRepo.createPesaPalTransaction(client, {
-        escrow_id: undefined,
-        type: 'FUNDING',
-        amount: plan.amountUgx,
-        merchant_reference: merchantReference,
-        raw_payload: rawPayload,
-      });
-
-      const checkoutPayload = {
-        provider: 'YO_UGANDA',
-        mode: 'DIRECT_CHARGE',
-        tx_ref: merchantReference,
-        amount: plan.amountUgx,
-        currency: 'UGX',
-        payment_options: checkoutProfile.paymentOptions,
-        supported_payment_methods: checkoutProfile.supportedPaymentMethods,
-        mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
-        phone_country_code: checkoutProfile.phoneCountryCode,
-        availability_notes: checkoutProfile.availabilityNotes,
-        country: checkoutProfile.country,
-        customer: { email: userEmail, name: userName, phone_number: userPhone },
-        meta: {
-          merchant_reference: merchantReference,
-          kind: 'BUSINESS_PRO_SUBSCRIPTION',
-          user_id: authUser,
-          plan_code: plan.code,
-        },
-      };
-
-      return {
-        ok: true,
-        tx_ref: merchantReference,
-        amount: plan.amountUgx,
-        currency: 'UGX',
-        plan,
-        checkout_payload: checkoutPayload,
-      };
-    });
-  });
-
-  // POST /business/subscription/confirm — marks subscription paid after checkout completes
-  app.post('/business/subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const authUser = (request.user as any)?.sub as string;
-    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
-    const body = (request.body as any) ?? {};
-    const paymentReference = String(body.payment_reference ?? '').trim();
-    if (!paymentReference) return reply.code(400).send({ error: 'payment_reference_required' });
-
-    return withTransaction(async (client) => {
-      await markBusinessProSubscriptionPaid(client, authUser, paymentReference);
-      const paymentRepo = new PaymentRepo();
-      try {
-        await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
-      } catch (_) { /* non-fatal */ }
-      return { ok: true };
-    });
-  });
 }
 
 

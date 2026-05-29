@@ -680,7 +680,7 @@ CREATE TABLE IF NOT EXISTS payout_requests (
   proof_id UUID NOT NULL UNIQUE REFERENCES proofs(id),
   user_id UUID NOT NULL REFERENCES users(id),
   amount INTEGER NOT NULL,
-  platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 15,
+  platform_fee_percent NUMERIC(5,2) NOT NULL DEFAULT 20,
   platform_fee_amount INTEGER NOT NULL DEFAULT 0,
   net_amount INTEGER,
   status payout_status NOT NULL DEFAULT 'REQUESTED',

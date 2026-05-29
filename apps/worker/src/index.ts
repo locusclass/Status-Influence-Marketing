@@ -1290,9 +1290,9 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
   const payoutBreakdown = calculateAmbassadorPayoutBreakdown(
     Number(campaign?.payout_amount ?? campaign?.budget_total ?? 0)
   );
-  const escrowDebitAmount = Math.max(
-    0,
-    Math.round(Number(campaign?.budget_total ?? payoutBreakdown.gross_amount))
+  // Escrow now holds gross_amount + 20% platform fee (charged to business).
+  const escrowDebitAmount = Math.ceil(
+    Math.max(0, payoutBreakdown.gross_amount) * 1.20
   );
   const contractRes = await client.query(
     `SELECT id
@@ -1440,28 +1440,7 @@ async function preparePayoutRequest(client: any, proof: any, campaign: any) {
     `,
     [wallet.id, payoutBreakdown.gross_amount, `PROOF_PAYOUT_GROSS:${proof.id}`]
   );
-  if (payoutBreakdown.platform_fee_amount > 0) {
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_available = balance_available - $2,
-          balance = balance - $2
-      WHERE id=$1
-      `,
-      [wallet.id, payoutBreakdown.platform_fee_amount]
-    );
-    await client.query(
-      `
-      INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
-      VALUES ($1,$2,'DEBIT',$3)
-      `,
-      [
-        wallet.id,
-        payoutBreakdown.platform_fee_amount,
-        `AMBASSADOR_PLATFORM_FEE:${proof.id}`,
-      ]
-    );
-  }
+  // Platform fee is charged to the business via the escrow; no deduction from ambassador.
   await client.query(
     `
     UPDATE payout_requests
@@ -2402,14 +2381,6 @@ async function expireEndedAdvertListingsIfDue() {
       AND al.admin_keep_alive = FALSE
       AND al.campaign_end_at IS NOT NULL
       AND al.campaign_end_at < now()
-      AND NOT EXISTS (
-        SELECT 1
-        FROM campaigns c
-        JOIN business_pro_subscriptions bps ON bps.business_id = c.user_id
-        WHERE c.id = al.campaign_id
-          AND bps.valid_until > now()
-          AND (bps.is_waived = TRUE OR bps.paid_at IS NOT NULL)
-      )
   `);
 
   if ((rowCount ?? 0) > 0) {

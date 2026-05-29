@@ -1,4 +1,6 @@
-export const AMBASSADOR_PLATFORM_FEE_PERCENT = 15;
+// Platform fee is charged to the business on top of the campaign budget.
+// Ambassadors receive their full gross payout with no deduction.
+export const AMBASSADOR_PLATFORM_FEE_PERCENT = 20;
 
 export type AmbassadorPayoutBreakdown = {
   gross_amount: number;
@@ -16,8 +18,9 @@ export function calculateAmbassadorPayoutBreakdown(
     100,
     Math.max(0, Number.isFinite(Number(feePercent)) ? Number(feePercent) : 0)
   );
+  // Fee is charged to the business; ambassador receives the full gross amount.
   const platformFeeAmount = Math.round((gross * normalizedPercent) / 100);
-  const netAmount = Math.max(0, gross - platformFeeAmount);
+  const netAmount = gross;
 
   return {
     gross_amount: gross,

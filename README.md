@@ -3,7 +3,7 @@
 Prime is a Pan-African escrow and verification infrastructure that formalizes paid social media distribution. It turns informal peer-to-peer promotion into structured, escrow-backed distribution contracts with automated compliance enforcement. The platform enforces distribution integrity, not marketing outcomes.
 
 ## Operating modes
-- Private Contract Mode: Businesss and Ambassadors negotiate off-platform, then execute via Prime. Funds are held in escrow, and payouts release only after verified compliance (content authenticity, posting duration, and validated impression accumulation). A 15% execution fee is applied to successful settlements.
+- Private Contract Mode: Businesss and Ambassadors negotiate off-platform, then execute via Prime. Funds are held in escrow, and payouts release only after verified compliance (content authenticity, posting duration, and validated impression accumulation). A 20% platform service fee is charged to the business on top of the campaign budget; ambassadors receive their full contracted payout.
 - Open Budget Mode: Businesss deposit a budget and upload content. The system converts funds into a fixed number of verified impressions using a deterministic pricing model. Qualified Ambassadors claim portions of the campaign, and payouts are calculated strictly per verified unit delivered.
 
 ## Verification and risk controls
