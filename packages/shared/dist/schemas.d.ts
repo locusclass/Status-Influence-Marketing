@@ -83,7 +83,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "VIDEO" | "IMAGE" | "TEXT";
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
@@ -116,7 +116,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "VIDEO" | "IMAGE" | "TEXT";
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
@@ -149,7 +149,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "VIDEO" | "IMAGE" | "TEXT";
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
@@ -182,7 +182,7 @@ export declare const CampaignBundleItemSchema: z.ZodEffects<z.ZodObject<{
     budget_total: number;
     start_date: string;
     end_date: string;
-    media_type: "VIDEO" | "IMAGE" | "TEXT";
+    media_type: "IMAGE" | "VIDEO" | "TEXT";
     delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
     impression_target?: number | undefined;
     title?: string | undefined;
@@ -265,7 +265,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -298,7 +298,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -331,7 +331,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -364,7 +364,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -457,7 +457,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     start_date?: string | undefined;
     end_date?: string | undefined;
     public_ad_viewer_target?: number | undefined;
-    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
+    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -474,7 +474,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -525,7 +525,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     start_date?: string | undefined;
     end_date?: string | undefined;
     public_ad_viewer_target?: number | undefined;
-    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
+    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -542,7 +542,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -593,7 +593,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     start_date?: string | undefined;
     end_date?: string | undefined;
     public_ad_viewer_target?: number | undefined;
-    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
+    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -610,7 +610,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;
@@ -661,7 +661,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
     start_date?: string | undefined;
     end_date?: string | undefined;
     public_ad_viewer_target?: number | undefined;
-    media_type?: "VIDEO" | "IMAGE" | "TEXT" | undefined;
+    media_type?: "IMAGE" | "VIDEO" | "TEXT" | undefined;
     media_url?: string | undefined;
     media_urls?: string[] | undefined;
     media_text?: string | undefined;
@@ -678,7 +678,7 @@ export declare const CreateCampaignSchema: z.ZodEffects<z.ZodObject<{
         budget_total: number;
         start_date: string;
         end_date: string;
-        media_type: "VIDEO" | "IMAGE" | "TEXT";
+        media_type: "IMAGE" | "VIDEO" | "TEXT";
         delivery_model?: "DETERMINISTIC" | "PROBABILISTIC" | undefined;
         impression_target?: number | undefined;
         title?: string | undefined;

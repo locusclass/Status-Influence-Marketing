@@ -1,4 +1,4 @@
-export declare const AMBASSADOR_PLATFORM_FEE_PERCENT = 15;
+export declare const AMBASSADOR_PLATFORM_FEE_PERCENT = 20;
 export type AmbassadorPayoutBreakdown = {
     gross_amount: number;
     platform_fee_percent: number;

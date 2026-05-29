@@ -23,7 +23,7 @@ export function canAccessAdminDashboard(value) {
 }
 export function calculateRevenueBreakdown(grossAmount, hasDivision) {
     const gross = roundMoney(Math.max(0, Number(grossAmount) || 0));
-    const platformFee = roundMoney(gross * 0.15);
+    const platformFee = roundMoney(gross * 0.20);
     const countryShare = roundMoney(platformFee * 0.15);
     const divisionShare = hasDivision ? roundMoney(platformFee * 0.15) : 0;
     const netPlatformRevenue = roundMoney(platformFee - countryShare - divisionShare);

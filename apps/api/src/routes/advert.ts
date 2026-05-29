@@ -1349,8 +1349,7 @@ export async function advertRoutes(app: FastifyInstance) {
             gallery_media: galleryMedia,
             field_values: fieldValues,
             field_types: fieldTypes,
-            // Pro subscribers have no countdown — return null so the client renders no timer
-            time_remaining_secs: hasProSubscription ? null : Math.max(0, timeRemainingSecs),
+            time_remaining_secs: Math.max(0, timeRemainingSecs),
             business_id: undefined,
           },
         };
@@ -3682,7 +3681,7 @@ export async function advertRoutes(app: FastifyInstance) {
         amount: discountedAmount,
         currency: 'UGX',
         plan: plan,
-        is_pro_discounted: isPro,
+        is_pro_discounted: false,
         checkout_payload: checkoutPayload,
       };
     });

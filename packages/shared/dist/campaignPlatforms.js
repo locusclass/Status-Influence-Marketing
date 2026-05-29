@@ -47,9 +47,10 @@ export function isCreatorPlatform(value) {
 export function resolveDeliveryModel(platform, requested) {
     return 'DETERMINISTIC';
 }
-export function getPublicContractUnitRate(mediaType) {
-    const normalized = String(mediaType ?? '').trim().toUpperCase();
-    return normalized === 'VIDEO' ? 200 : 100;
+/** UGX paid per verified WhatsApp Status view, regardless of media type. */
+export const PUBLIC_CONTRACT_RATE_UGX = 20;
+export function getPublicContractUnitRate(_mediaType) {
+    return PUBLIC_CONTRACT_RATE_UGX;
 }
 export function normalizeExecutionMeta(platform, rawMeta) {
     const source = toRecord(rawMeta);
