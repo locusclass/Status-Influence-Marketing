@@ -675,6 +675,54 @@ export async function paymentRoutes(app: FastifyInstance) {
       return { ok: true, pending: true, type: 'listing_boost' };
     }
 
+    if (txKind === 'MARKETPLACE_LISTING_SUBSCRIPTION') {
+      if (txn.status === 'COMPLETED') {
+        return { ok: true, duplicate: true, type: 'marketplace_listing_subscription' };
+      }
+
+      if (statusSuccess.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'COMPLETED',
+          String(paymentEvent.transactionId)
+        );
+        const businessId = String(txnPayload.user_id ?? '');
+        const planCode = String(txnPayload.plan_code ?? '');
+        const amount = Number(txnPayload.amount ?? 0);
+        if (businessId && planCode && amount > 0) {
+          const validUntil = new Date();
+          validUntil.setDate(validUntil.getDate() + 30);
+          await client.query(
+            `INSERT INTO business_listing_subscriptions
+               (business_id, plan_code, amount, currency, paid_at, valid_until, payment_reference)
+             VALUES ($1, $2, $3, 'UGX', now(), $4, $5)
+             ON CONFLICT DO NOTHING`,
+            [businessId, planCode, amount, validUntil.toISOString(), String(paymentEvent.reference)]
+          );
+        }
+        return { ok: true, type: 'marketplace_listing_subscription', smsJobs: [] };
+      }
+
+      if (statusFailure.has(statusText)) {
+        await paymentRepo.updatePesaPalTxnStatus(
+          client,
+          String(paymentEvent.reference),
+          'FAILED',
+          String(paymentEvent.transactionId)
+        );
+        return { ok: true, type: 'marketplace_listing_subscription', smsJobs: [] };
+      }
+
+      await paymentRepo.updatePesaPalTxnStatus(
+        client,
+        String(paymentEvent.reference),
+        'PENDING',
+        String(paymentEvent.transactionId)
+      );
+      return { ok: true, pending: true, type: 'marketplace_listing_subscription' };
+    }
+
     const escrowRows = await client.query('SELECT * FROM escrow_ledger WHERE id=$1', [txn.escrow_id]);
     const escrow = escrowRows.rows[0];
     if (!escrow || Number(txn.amount ?? 0) !== Number(escrow.amount_total ?? 0)) {

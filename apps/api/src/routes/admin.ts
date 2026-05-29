@@ -2769,7 +2769,7 @@ export async function adminRoutes(app: FastifyInstance) {
             COALESCE(SUM(amount), 0)::bigint AS total_amount,
             COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS payout_amount,
           COALESCE(SUM(CASE WHEN source_type <> 'PAYOUT' THEN amount ELSE 0 END), 0)::bigint AS provider_amount,
-            ROUND(COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0) * 0.15)::bigint AS platform_fee
+            ROUND(COALESCE(SUM(CASE WHEN source_type = 'PAYOUT' THEN amount ELSE 0 END), 0) * 0.20)::bigint AS platform_fee
           FROM filtered
           GROUP BY bucket
           ORDER BY bucket DESC
@@ -2782,7 +2782,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const totals = summary.rows[0] ?? {};
       const payoutAmount = Number(totals.payout_amount ?? 0);
-      const platformFee = Math.round(payoutAmount * 0.15);
+      const platformFee = Math.round(payoutAmount * 0.20);
       const contractsFinanced = Number(escrowRes.rows[0]?.contracts_financed ?? 0);
       return {
         summary: {

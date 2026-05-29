@@ -11,6 +11,13 @@ import {
   normalizeExecutionMeta,
   recordCampaignRevenueEntry,
   resolveDeliveryModel,
+  CAMPAIGN_PACKAGES,
+  CAMPAIGN_PACKAGE_MIN_CUSTOM_UGX,
+  estimateViewsForBudget,
+  MARKETPLACE_LISTING_PLANS,
+  FEATURED_AUTO_QUALIFY_SPEND_UGX,
+  getMarketplaceListingPlan,
+  PUBLIC_CONTRACT_RATE_UGX,
 } from '@prime/shared';
 import { z } from 'zod';
 import { withTransaction } from '../db.js';
@@ -2829,6 +2836,217 @@ export async function campaignRoutes(app: FastifyInstance) {
         path: ['q'],
       }
     );
+
+  // GET /campaigns/packages — public campaign package catalog
+  app.get('/campaigns/packages', async (_request, _reply) => {
+    return {
+      rate_per_view_ugx: PUBLIC_CONTRACT_RATE_UGX,
+      min_custom_budget_ugx: CAMPAIGN_PACKAGE_MIN_CUSTOM_UGX,
+      packages: CAMPAIGN_PACKAGES,
+    };
+  });
+
+  // GET /marketplace/listing-plans — marketplace listing plan catalog
+  app.get('/marketplace/listing-plans', async (_request, _reply) => {
+    return {
+      plans: MARKETPLACE_LISTING_PLANS,
+      featured_auto_qualify_spend_ugx: FEATURED_AUTO_QUALIFY_SPEND_UGX,
+    };
+  });
+
+  // GET /marketplace/listing-subscription — current business listing subscription status
+  app.get('/marketplace/listing-subscription', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const authUser = (request.user as any)?.sub as string;
+    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
+
+    return withTransaction(async (client) => {
+      // Check paid/waived subscription
+      const subRes = await client.query(`
+        SELECT bls.plan_code, bls.valid_until, bls.paid_at, bls.is_waived, bls.auto_qualified,
+               mlp.label, mlp.price_ugx_monthly
+        FROM business_listing_subscriptions bls
+        JOIN marketplace_listing_plans mlp ON mlp.code = bls.plan_code
+        WHERE bls.business_id = $1
+          AND (bls.valid_until IS NULL OR bls.valid_until > now())
+          AND (bls.paid_at IS NOT NULL OR bls.is_waived = TRUE OR bls.auto_qualified = TRUE)
+        ORDER BY mlp.sort_order DESC
+        LIMIT 1
+      `, [authUser]);
+
+      // Check auto-qualify: >= FEATURED_AUTO_QUALIFY_SPEND_UGX this calendar month via campaigns
+      const spendRes = await client.query(`
+        SELECT COALESCE(SUM(el.amount_total), 0)::int AS monthly_spend
+        FROM escrow_ledger el
+        JOIN campaigns c ON c.id = el.campaign_id
+        WHERE c.user_id = $1
+          AND el.status IN ('FUNDED', 'PARTIALLY_DISBURSED', 'COMPLETED')
+          AND date_trunc('month', el.created_at) = date_trunc('month', now())
+      `, [authUser]);
+
+      const monthlySpend = Number(spendRes.rows[0]?.monthly_spend ?? 0);
+      const autoQualifiesFeatured = monthlySpend >= FEATURED_AUTO_QUALIFY_SPEND_UGX;
+
+      // Active campaigns grant exposure during their window
+      const activeCampaignRes = await client.query(`
+        SELECT COUNT(*) AS count
+        FROM campaigns
+        WHERE user_id = $1
+          AND status = 'ACTIVE'
+          AND (end_date IS NULL OR end_date > now())
+      `, [authUser]);
+      const hasActiveCampaign = Number(activeCampaignRes.rows[0]?.count ?? 0) > 0;
+
+      const sub = subRes.rows[0];
+      return {
+        has_active_subscription: !!sub,
+        plan_code: sub?.plan_code ?? null,
+        plan_label: sub?.label ?? null,
+        valid_until: sub?.valid_until ?? null,
+        auto_qualified_featured: autoQualifiesFeatured,
+        has_active_campaign_exposure: hasActiveCampaign,
+        monthly_campaign_spend_ugx: monthlySpend,
+        featured_auto_qualify_threshold_ugx: FEATURED_AUTO_QUALIFY_SPEND_UGX,
+      };
+    });
+  });
+
+  // POST /marketplace/listing-subscription/pay — initiate a listing plan payment
+  app.post('/marketplace/listing-subscription/pay', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const authUser = (request.user as any)?.sub as string;
+    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
+
+    const body = (request.body as any) ?? {};
+    const planCode = String(body.plan_code ?? '').trim().toUpperCase();
+    const plan = getMarketplaceListingPlan(planCode);
+    if (!plan) return reply.code(400).send({ error: 'invalid_plan_code' });
+
+    const fundSource = String(body.fund_source ?? 'YO_UGANDA').trim().toUpperCase();
+
+    if (fundSource === 'WALLET') {
+      return withTransaction(async (client) => {
+        const walletRes = await client.query(
+          'SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE',
+          [authUser]
+        );
+        const wallet = walletRes.rows[0];
+        const balance = Number(wallet?.balance_available ?? 0);
+        if (!wallet || balance < plan.price_ugx_monthly) {
+          reply.code(400);
+          return { error: 'insufficient_wallet_balance' };
+        }
+        const reference = `MARKETPLACE_LISTING:${planCode}:${new Date().toISOString().slice(0, 10)}`;
+        await client.query(
+          `UPDATE wallets SET balance_available = balance_available - $2, balance = balance - $2 WHERE id = $1`,
+          [wallet.id, plan.price_ugx_monthly]
+        );
+        await client.query(
+          `INSERT INTO wallet_txns (wallet_id, direction, amount, currency, reference)
+           VALUES ($1, 'DEBIT', $2, 'UGX', $3)`,
+          [wallet.id, plan.price_ugx_monthly, reference]
+        );
+        const validUntil = new Date();
+        validUntil.setDate(validUntil.getDate() + 30);
+        await client.query(
+          `INSERT INTO business_listing_subscriptions
+             (business_id, plan_code, amount, currency, paid_at, valid_until, payment_reference)
+           VALUES ($1, $2, $3, 'UGX', now(), $4, $5)`,
+          [authUser, planCode, plan.price_ugx_monthly, validUntil.toISOString(), reference]
+        );
+        return { ok: true, funded: true, fund_source: 'WALLET', plan_code: planCode, valid_until: validUntil };
+      });
+    }
+
+    // YO_UGANDA checkout
+    if (!hasYoClientCredentials()) {
+      reply.code(503);
+      return { error: 'yo_uganda_not_configured' };
+    }
+    const { v4: uuidGen } = await import('uuid');
+    const merchantReference = uuidGen();
+
+    return withTransaction(async (client) => {
+      const userRes = await client.query(
+        'SELECT email, phone, country, full_name FROM users WHERE id=$1 LIMIT 1',
+        [authUser]
+      );
+      const user = userRes.rows[0];
+      const userCountry = (user?.country as string | undefined) ?? 'UG';
+      const userEmail = (user?.email as string | undefined) ?? '';
+      const userPhone = (user?.phone as string | undefined) ?? null;
+      const userName = (user?.full_name as string | undefined) ?? 'Business';
+
+      const checkoutProfile = resolveAvailableYoUgandaCheckoutProfile(
+        userCountry,
+        { cardEnabled: hasYoEncryptionKey() }
+      );
+
+      const paymentRepo = new PaymentRepo();
+      await paymentRepo.createPesaPalTransaction(client, {
+        escrow_id: undefined,
+        type: 'FUNDING',
+        amount: plan.price_ugx_monthly,
+        merchant_reference: merchantReference,
+        raw_payload: {
+          kind: 'MARKETPLACE_LISTING_SUBSCRIPTION',
+          user_id: authUser,
+          plan_code: planCode,
+          amount: plan.price_ugx_monthly,
+          currency: 'UGX',
+        },
+      });
+
+      return {
+        ok: true,
+        tx_ref: merchantReference,
+        amount: plan.price_ugx_monthly,
+        currency: 'UGX',
+        plan,
+        checkout_payload: {
+          provider: 'YO_UGANDA',
+          mode: 'DIRECT_CHARGE',
+          tx_ref: merchantReference,
+          amount: plan.price_ugx_monthly,
+          currency: 'UGX',
+          payment_options: checkoutProfile.paymentOptions,
+          supported_payment_methods: checkoutProfile.supportedPaymentMethods,
+          mobile_money_networks: checkoutProfile.mobileMoneyNetworks,
+          phone_country_code: checkoutProfile.phoneCountryCode,
+          availability_notes: checkoutProfile.availabilityNotes,
+          country: checkoutProfile.country,
+          customer: { email: userEmail, name: userName, phone_number: userPhone },
+          meta: { merchant_reference: merchantReference, kind: 'MARKETPLACE_LISTING_SUBSCRIPTION', user_id: authUser, plan_code: planCode },
+        },
+      };
+    });
+  });
+
+  // POST /marketplace/listing-subscription/confirm — confirm after checkout
+  app.post('/marketplace/listing-subscription/confirm', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const authUser = (request.user as any)?.sub as string;
+    if (!authUser) return reply.code(401).send({ error: 'unauthorized' });
+    const body = (request.body as any) ?? {};
+    const paymentReference = String(body.payment_reference ?? '').trim();
+    const planCode = String(body.plan_code ?? '').trim().toUpperCase();
+    if (!paymentReference || !planCode) return reply.code(400).send({ error: 'payment_reference_and_plan_code_required' });
+    const plan = getMarketplaceListingPlan(planCode);
+    if (!plan) return reply.code(400).send({ error: 'invalid_plan_code' });
+
+    return withTransaction(async (client) => {
+      const paymentRepo = new PaymentRepo();
+      try {
+        await paymentRepo.updatePesaPalTxnStatus(client, paymentReference, 'COMPLETED', paymentReference);
+      } catch (_) {}
+      const validUntil = new Date();
+      validUntil.setDate(validUntil.getDate() + 30);
+      await client.query(
+        `INSERT INTO business_listing_subscriptions
+           (business_id, plan_code, amount, currency, paid_at, valid_until, payment_reference)
+         VALUES ($1, $2, $3, 'UGX', now(), $4, $5)`,
+        [authUser, planCode, plan.price_ugx_monthly, validUntil.toISOString(), paymentReference]
+      );
+      return { ok: true };
+    });
+  });
 
   app.get('/campaigns/ambassador-lookup', { preHandler: [app.authenticate] }, async (request, reply) => {
     const role = normalizeActiveRole(
