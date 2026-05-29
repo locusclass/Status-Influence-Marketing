@@ -4523,7 +4523,7 @@ export async function campaignRoutes(app) {
                 is_active: isActive,
                 is_waived: isWaived,
                 paid_at: sub?.paid_at ?? null,
-                amount: 5000,
+                amount: 1000,
                 currency: 'UGX',
             };
         });
@@ -4552,7 +4552,7 @@ export async function campaignRoutes(app) {
             const rawPayload = {
                 kind: 'AMBASSADOR_SUBSCRIPTION',
                 user_id: authUser,
-                amount: 5000,
+                amount: 1000,
                 currency: 'UGX',
                 country: checkoutProfile.country,
                 payment_options: checkoutProfile.paymentOptions,
@@ -4568,7 +4568,7 @@ export async function campaignRoutes(app) {
             };
             // Reserve the subscription slot
             await client.query(`INSERT INTO ambassador_subscriptions (ambassador_id, period_start, amount, currency, payment_reference)
-         VALUES ($1, $2, 5000, 'UGX', $3)
+         VALUES ($1, $2, 1000, 'UGX', $3)
          ON CONFLICT (ambassador_id, period_start)
          DO UPDATE SET payment_reference = EXCLUDED.payment_reference`, [authUser, periodStart, merchantReference]);
             // Create the pesapal_transactions record so initiateYoUgandaPayment can find it
@@ -4576,7 +4576,7 @@ export async function campaignRoutes(app) {
             await paymentRepo.createPesaPalTransaction(client, {
                 escrow_id: undefined,
                 type: 'FUNDING',
-                amount: 5000,
+                amount: 1000,
                 merchant_reference: merchantReference,
                 raw_payload: rawPayload,
             });
@@ -4584,7 +4584,7 @@ export async function campaignRoutes(app) {
                 provider: 'YO_UGANDA',
                 mode: 'DIRECT_CHARGE',
                 tx_ref: merchantReference,
-                amount: 5000,
+                amount: 1000,
                 currency: 'UGX',
                 payment_options: checkoutProfile.paymentOptions,
                 supported_payment_methods: checkoutProfile.supportedPaymentMethods,
@@ -4606,7 +4606,7 @@ export async function campaignRoutes(app) {
             return {
                 ok: true,
                 tx_ref: merchantReference,
-                amount: 5000,
+                amount: 1000,
                 currency: 'UGX',
                 period_start: periodStart,
                 checkout_payload: checkoutPayload,
