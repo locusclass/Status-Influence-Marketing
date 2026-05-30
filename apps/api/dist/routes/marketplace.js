@@ -550,7 +550,7 @@ export async function marketplaceRoutes(app) {
     app.get('/marketplace/categories/:categoryId/listing-types', async (request, reply) => {
         const { categoryId } = request.params;
         try {
-            const rows = await query(`SELECT lt.id, lt.name, lt.slug, lt.icon, lt.sort_order,
+            const rows = await query(`SELECT lt.id, lt.name, lt.slug, NULL::text AS icon, lt.sort_order,
                 sub.id AS subcategory_id, sub.name AS subcategory_name
          FROM advert_listing_types lt
          JOIN advert_subcategories sub ON sub.id = lt.subcategory_id
