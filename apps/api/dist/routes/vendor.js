@@ -31,6 +31,31 @@ async function getVendorForUser(userId) {
     const rows = await query(`SELECT * FROM vendor_profiles WHERE user_id = $1 LIMIT 1`, [userId]);
     return rows[0] ?? null;
 }
+async function ensureWalletForVendorUser(client, userId) {
+    const existing = await client.query(`SELECT * FROM wallets WHERE user_id=$1 LIMIT 1`, [userId]);
+    if (existing.rows[0])
+        return existing.rows[0];
+    const created = await client.query(`INSERT INTO wallets (user_id, currency, balance, balance_available, balance_escrow)
+     VALUES ($1, 'UGX', 0, 0, 0)
+     RETURNING *`, [userId]);
+    return created.rows[0];
+}
+async function debitVendorWallet(client, input) {
+    const wallet = await ensureWalletForVendorUser(client, input.userId);
+    const locked = await client.query(`SELECT * FROM wallets WHERE id=$1 FOR UPDATE`, [wallet.id]);
+    const lockedWallet = locked.rows[0];
+    const balance = Number(lockedWallet?.balance_available ?? 0);
+    if (!lockedWallet || balance < input.amount) {
+        return { error: 'insufficient_wallet_balance' };
+    }
+    await client.query(`UPDATE wallets
+     SET balance_available = balance_available - $2,
+         balance = GREATEST(balance - $2, 0)
+     WHERE id=$1`, [wallet.id, input.amount]);
+    await client.query(`INSERT INTO wallet_txns (wallet_id, amount, direction, reference)
+     VALUES ($1, $2, 'DEBIT', $3)`, [wallet.id, input.amount, input.reference]);
+    return { ok: true };
+}
 // ─────────────────────────────────────────────
 // VALIDATION SCHEMAS
 // ─────────────────────────────────────────────
@@ -602,9 +627,34 @@ export async function vendorRoutes(app) {
                 return reply.code(404).send({ error: 'plan_not_found' });
             const boostId = uuid();
             const endsAt = new Date(Date.now() + plan.duration_hours * 3600000).toISOString();
-            const rows = await query(`INSERT INTO vendor_boosts (id, vendor_id, listing_id, plan_id, boost_type, ends_at, cost_ugx)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [boostId, vendor.id, listing_id ?? null, plan_id, plan.boost_type, endsAt, plan.price_ugx]);
-            return reply.code(201).send({ ok: true, boost: rows[0] });
+            const amount = Number(plan.price_ugx ?? 0);
+            if (!Number.isFinite(amount) || amount <= 0) {
+                return reply.code(400).send({ error: 'invalid_boost_price' });
+            }
+            const result = await withTransaction(async (client) => {
+                if (listing_id) {
+                    const listingRows = await client.query(`SELECT id FROM advert_listings
+             WHERE id = $1 AND vendor_id = $2 AND status = 'ACTIVE'
+             LIMIT 1`, [listing_id, vendor.id]);
+                    if (!listingRows.rows[0])
+                        return { error: 'listing_not_found' };
+                }
+                const debit = await debitVendorWallet(client, {
+                    userId,
+                    amount,
+                    reference: `VENDOR_BOOST:${boostId}`,
+                });
+                if ('error' in debit)
+                    return debit;
+                const rows = await client.query(`INSERT INTO vendor_boosts (id, vendor_id, listing_id, plan_id, boost_type, ends_at, cost_ugx)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [boostId, vendor.id, listing_id ?? null, plan_id, plan.boost_type, endsAt, amount]);
+                return { ok: true, boost: rows.rows[0] };
+            });
+            if ('error' in result) {
+                const status = result.error === 'insufficient_wallet_balance' ? 400 : 404;
+                return reply.code(status).send(result);
+            }
+            return reply.code(201).send(result);
         }
         catch (err) {
             app.log.error(err, 'vendor.boosts.create.error');
@@ -628,6 +678,16 @@ export async function vendorRoutes(app) {
             return reply.code(400).send({ error: 'invalid_event_type' });
         }
         try {
+            const vendorRows = await query(`SELECT id FROM vendor_profiles WHERE id = $1 AND status = 'ACTIVE' LIMIT 1`, [vendor_id]);
+            if (!vendorRows[0])
+                return reply.code(404).send({ error: 'vendor_not_found' });
+            if (listing_id) {
+                const listingRows = await query(`SELECT id FROM advert_listings
+           WHERE id = $1 AND vendor_id = $2 AND status = 'ACTIVE' AND access_state = 'PUBLIC'
+           LIMIT 1`, [listing_id, vendor_id]);
+                if (!listingRows[0])
+                    return reply.code(400).send({ error: 'listing_vendor_mismatch' });
+            }
             await query(`INSERT INTO vendor_analytics_events
            (id, vendor_id, listing_id, event_type, source, ip_address, user_agent, referrer)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [

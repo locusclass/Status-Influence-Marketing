@@ -1298,11 +1298,20 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       message, source,
     } = body ?? {};
 
-    if (!vendor_id || !message?.trim()) {
-      return reply.code(400).send({ error: 'vendor_id and message are required' });
+    const safeBuyerName = String(buyer_name ?? '').trim();
+    const safeBuyerPhone = String(buyer_phone ?? buyer_whatsapp ?? '').trim();
+    const safeBuyerEmail = String(buyer_email ?? '').trim();
+    if (!vendor_id || !safeBuyerName || !message?.trim() || (!safeBuyerPhone && !safeBuyerEmail)) {
+      return reply.code(400).send({ error: 'buyer_name_contact_vendor_id_and_message_required' });
     }
     if (String(message).trim().length < 5) {
       return reply.code(400).send({ error: 'message_too_short' });
+    }
+    if (safeBuyerPhone && !/^\+?[0-9\s().-]{7,30}$/.test(safeBuyerPhone)) {
+      return reply.code(400).send({ error: 'invalid_buyer_phone' });
+    }
+    if (safeBuyerEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(safeBuyerEmail)) {
+      return reply.code(400).send({ error: 'invalid_buyer_email' });
     }
 
     try {
@@ -1310,6 +1319,15 @@ export async function marketplaceRoutes(app: FastifyInstance) {
         `SELECT id FROM vendor_profiles WHERE id = $1 AND status = 'ACTIVE' LIMIT 1`, [vendor_id]
       );
       if (!vendorRows[0]) return reply.code(404).send({ error: 'vendor_not_found' });
+      if (listing_id) {
+        const listingRows = await query<any>(
+          `SELECT id FROM advert_listings
+           WHERE id = $1 AND vendor_id = $2 AND status = 'ACTIVE' AND access_state = 'PUBLIC'
+           LIMIT 1`,
+          [listing_id, vendor_id]
+        );
+        if (!listingRows[0]) return reply.code(400).send({ error: 'listing_vendor_mismatch' });
+      }
 
       const validSources = ['MARKETPLACE', 'STOREFRONT', 'QR', 'LINK', 'DIRECT'];
       const safeSource = validSources.includes(source) ? source : 'MARKETPLACE';
@@ -1322,7 +1340,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           inquiryId, vendor_id, listing_id ?? null,
-          buyer_name ?? null, buyer_phone ?? null, buyer_whatsapp ?? null, buyer_email ?? null,
+          safeBuyerName, safeBuyerPhone || null, (buyer_whatsapp ?? safeBuyerPhone) || null, safeBuyerEmail || null,
           String(message).trim(), safeSource, request.ip,
         ]
       );
