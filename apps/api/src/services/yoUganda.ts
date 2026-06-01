@@ -300,6 +300,7 @@ function isGatewayFailoverError(error: unknown, endpoint: string) {
 
   const message = error instanceof Error ? error.message : String(error ?? '');
   return (
+    /YO Uganda request failed:\s*5\d\d\b/i.test(message) ||
     /YO proxy (request failed|error)/i.test(message) ||
     /YO payment proxy/i.test(message) ||
     /timeout of \d+ms exceeded/i.test(message) ||

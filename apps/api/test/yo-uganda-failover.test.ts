@@ -120,6 +120,56 @@ describe('YO Uganda failover handling', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('retries direct YO for withdrawal payouts when the gateway returns a bare 502', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        text: async () => 'Bad Gateway',
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () =>
+          '<?xml version="1.0" encoding="UTF-8"?><AutoCreate><Response><Status>OK</Status><StatusCode>0</StatusCode><TransactionReference>yo-withdraw-123</TransactionReference></Response></AutoCreate>',
+      } as any);
+
+    const { requestPayout } = await loadService({
+      YO_PROXY_URL: 'http://34.79.189.141:3000/yo',
+      YO_API_URL: 'https://paymentsapi1.yo.co.ug/ybs/task.php',
+      YO_AUTHORIZATION: 'demo-authorization',
+      YO_API_USERNAME: 'demo-user',
+      YO_API_PASSWORD: 'demo-pass',
+    });
+
+    const response = await requestPayout({
+      amount: 2500,
+      currency: 'UGX',
+      narration: 'Wallet withdrawal WD-test',
+      reference: 'WD-test',
+      receiverName: 'Test User',
+      receiverPhone: '0700000000',
+      receiverNetwork: 'MTN',
+      nonBlocking: true,
+    });
+
+    expect(response.transactionReference).toBe('yo-withdraw-123');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://34.79.189.141:3000/yo/ybs/task.php'
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'https://paymentsapi1.yo.co.ug/ybs/task.php'
+    );
+
+    const [, requestInit] = fetchMock.mock.calls[1] ?? [];
+    const xmlBody = String(requestInit?.body ?? '');
+    expect(xmlBody).toContain('<Method>acwithdrawfunds</Method>');
+    expect(xmlBody).toContain('<NonBlocking>TRUE</NonBlocking>');
+    expect(xmlBody).toContain('<Account>256700000000</Account>');
+    expect(xmlBody).toContain('<AccountProviderCode>MTN_UGANDA</AccountProviderCode>');
+  });
+
   it('posts exact-case proxy field names for collection requests', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
