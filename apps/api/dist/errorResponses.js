@@ -37,7 +37,7 @@ const EXPLICIT_USER_MESSAGES = {
     payment_reference_required: 'A payment reference is required.',
     invalid_payment_reference: 'The payment reference is invalid.',
     campaign_missing_product_listing: 'Create a product listing and attach it to the campaign before continuing.',
-    subscription_required: 'An active subscription is required to continue.',
+    subscription_required: 'Your account is not eligible for this action yet.',
 };
 function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);

@@ -268,15 +268,15 @@ export async function paymentRoutes(app) {
                 ? 'Wallet deposit received'
                 : 'Wallet deposit failed'
             : isSuccess
-                ? 'Campaign payment successful'
-                : 'Campaign payment failed';
+                ? 'Promotion payment successful'
+                : 'Promotion payment failed';
         const body = isWalletDeposit
             ? isSuccess
                 ? `Your wallet deposit of ${amountText} was successful and is now available in your Prime Status wallet.`
                 : `Your wallet deposit of ${amountText} was not completed. You can try again from the app.`
             : isSuccess
-                ? `Your payment of ${amountText} for "${input.campaignTitle ?? 'your campaign'}" was successful. Funding is now confirmed.`
-                : `Your payment of ${amountText} for "${input.campaignTitle ?? 'your campaign'}" was not completed. The campaign is still awaiting funding.`;
+                ? `Your payment of ${amountText} for "${input.campaignTitle ?? 'your promotion'}" was successful. Funding is now confirmed.`
+                : `Your payment of ${amountText} for "${input.campaignTitle ?? 'your promotion'}" was not completed. The promotion is still awaiting funding.`;
         const plan = await createUserNotificationsWithSmsPlan(client, [userId], {
             category: isSuccess ? 'PAYMENT_SUCCESS' : 'PAYMENT_FAILURE',
             title,

@@ -110,18 +110,18 @@ function buildPrompt(campaignSpec: any, challenge: any, hasCampaignMedia: boolea
 
   const mediaDescription =
     mediaType === 'TEXT' && mediaText
-      ? `Campaign ad content (TEXT): "${mediaText}"`
+      ? `Promotion advert content (TEXT): "${mediaText}"`
       : hasCampaignMedia
-      ? `The first image provided is the CAMPAIGN REFERENCE IMAGE — this is the actual ad creative the ambassador was supposed to post as their WhatsApp Status.`
-      : `No campaign media reference is available. Assess based on campaign title only.`;
+      ? `The first image provided is the PROMOTION REFERENCE IMAGE — this is the actual advert creative the poster was supposed to post as their WhatsApp Status.`
+      : `No promotion media reference is available. Assess based on promotion title only.`;
 
   const proofFrameNote = hasCampaignMedia
-    ? `The remaining images are PROOF FRAMES extracted from the ambassador's screen recording.`
-    : `The images are PROOF FRAMES extracted from the ambassador's screen recording.`;
+    ? `The remaining images are PROOF FRAMES extracted from the poster's screen recording.`
+    : `The images are PROOF FRAMES extracted from the poster's screen recording.`;
 
-  return `You are verifying a WhatsApp Status advertising proof video for Prime Status. The ambassador is paid based on verified views.
+  return `You are verifying a WhatsApp Status advertising proof video for Prime Status. The poster is paid based on verified views.
 
-CAMPAIGN DETAILS
+PROMOTION DETAILS
 Title: ${campaignSpec?.title ?? 'Unknown'}
 Platform: ${campaignSpec?.platform ?? 'Unknown'}
 Media type: ${mediaType}
@@ -130,13 +130,13 @@ ${mediaDescription}
 PROOF RECORDING
 ${proofFrameNote}
 
-Challenge code the ambassador must display: "${challenge?.challenge_code ?? ''}"
-Challenge phrase the ambassador must speak/show: "${challenge?.challenge_phrase ?? ''}"
+Challenge code the poster must display: "${challenge?.challenge_code ?? ''}"
+Challenge phrase the poster must speak/show: "${challenge?.challenge_phrase ?? ''}"
 
 YOUR TASK
 Carefully examine all provided images and determine:
 1. Does the proof recording show the real WhatsApp Status viewer count screen?
-2. Is the campaign ad creative (the content the ambassador posted) visible in the recording${hasCampaignMedia || mediaText ? ' and does it match the reference provided above' : ''}?
+2. Is the promotion advert creative (the content the poster posted) visible in the recording${hasCampaignMedia || mediaText ? ' and does it match the reference provided above' : ''}?
 3. Is the UI genuinely WhatsApp (not a mock, editor, or photo of a screen)?
 4. Are the challenge code and phrase visible in the recording?
 5. Are there any signs of tampering, editing, frozen frames, overlays, or AI-generated content?
@@ -144,7 +144,7 @@ Carefully examine all provided images and determine:
 REQUIRED EVIDENCE CHECKLIST
 - WhatsApp Status viewer count screen clearly visible
 - Viewer count number legible
-- Campaign ad content visible in the recording${hasCampaignMedia || mediaText ? ' and matching the reference creative' : ''}
+- Promotion advert content visible in the recording${hasCampaignMedia || mediaText ? ' and matching the reference creative' : ''}
 - Challenge code "${challenge?.challenge_code ?? ''}" present in the frames
 - Challenge phrase "${challenge?.challenge_phrase ?? ''}" present in the frames
 

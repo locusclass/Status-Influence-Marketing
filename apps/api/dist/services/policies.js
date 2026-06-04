@@ -36,27 +36,27 @@ export function buildCurrentPolicyDocuments() {
             slug: 'privacy_policy',
             title: 'User Privacy Policy',
             version: CURRENT_PRIVACY_POLICY_VERSION,
-            summary: 'This policy explains how Prime Status collects, uses, shares, protects, and retains personal data for account access, campaign delivery, contracts, chat, verification, payments, and fraud prevention.',
+            summary: 'This policy explains how Prime Status collects, uses, shares, protects, and retains personal data for account access, WhatsApp Status promotions, verification, payments, and fraud prevention.',
             sections: [
                 {
                     heading: 'What We Collect',
                     body: [
                         'We collect account and profile details such as your name, email address, phone number, role, country, and optional profile media.',
-                        'We process campaign, contract, chat, verification, payment, payout, and support records, including media you upload and the counterparties you choose to engage.',
+                        'We process product, promotion, chat, verification, payment, payout, and support records, including media you upload and the businesses or posters you choose to engage.',
                         'We also keep device, session, and security records needed to protect the platform, investigate abuse, and maintain service reliability.',
                     ],
                 },
                 {
                     heading: 'Why We Use Your Data',
                     body: [
-                        'We use personal data to create and secure accounts, verify participation, form and administer contracts, process payments and payouts, deliver chat and notifications, and support customer care.',
+                        'We use personal data to create and secure accounts, verify WhatsApp Status posts, process payments and payouts, deliver chat and notifications, and support customer care.',
                         'We also use data to prevent fraud, enforce platform rules, comply with lawful requests, keep auditable records, and improve service performance.',
                     ],
                 },
                 {
                     heading: 'How We Share Data',
                     body: [
-                        'We share data only where reasonably necessary with service providers such as hosting, storage, messaging, authentication, and payment partners, and with counterparties where disclosure is necessary to perform a contract or campaign.',
+                        'We share data only where reasonably necessary with service providers such as hosting, storage, messaging, authentication, and payment partners, and with businesses or posters where disclosure is necessary to run a promotion.',
                         'We may also disclose data to regulators, courts, law-enforcement agencies, or professional advisers where required by law or reasonably necessary to protect rights, safety, or the integrity of the platform.',
                         'We do not sell personal data.',
                     ],
@@ -64,7 +64,7 @@ export function buildCurrentPolicyDocuments() {
                 {
                     heading: 'Retention, Security, and Transfers',
                     body: [
-                        'We retain personal data only for as long as it is reasonably required for account administration, campaigns, contracts, disputes, audits, fraud prevention, or legal compliance.',
+                        'We retain personal data only for as long as it is reasonably required for account administration, promotions, verification, payments, disputes, audits, fraud prevention, or legal compliance.',
                         'We apply reasonable technical and organisational safeguards, access controls, logging, and review processes to reduce unauthorised access, loss, alteration, or misuse.',
                         'Where personal data is processed or stored outside Uganda, we require appropriate protections or another lawful basis permitted by the applicable Ugandan data-protection framework.',
                     ],
@@ -96,19 +96,19 @@ export function buildCurrentPolicyDocuments() {
             slug: 'platform_policy',
             title: 'Platform Use and Community Policy',
             version: CURRENT_PLATFORM_POLICY_VERSION,
-            summary: 'This policy sets the rules for lawful use of Prime Status, including contracts, communications, uploads, beneficiary data, verification, and payment activity.',
+            summary: 'This policy sets the rules for lawful use of Prime Status, including product pages, WhatsApp Status promotions, uploads, verification, and payment activity.',
             sections: [
                 {
                     heading: 'Permitted Use',
                     body: [
-                        'Prime Status may only be used for lawful marketing, contracting, campaign delivery, collaboration, proof submission, and related business communication.',
+                        'Prime Status may only be used for lawful product promotion through WhatsApp Status, proof submission, payment activity, and related business communication.',
                         'You must use accurate account information, act on your own authority or on behalf of a properly authorised business, and keep your credentials and device access secure.',
                     ],
                 },
                 {
                     heading: 'Prohibited Conduct',
                     body: [
-                        'You must not use the platform for fraud, impersonation, unlawful surveillance, harassment, extortion, hate activity, violence, child exploitation, adult sexual exploitation, unlawful data disclosure, malicious software, or any campaign or communication that is illegal or misleading under Ugandan law.',
+                        'You must not use the platform for fraud, impersonation, unlawful surveillance, harassment, extortion, hate activity, violence, child exploitation, adult sexual exploitation, unlawful data disclosure, malicious software, or any promotion or communication that is illegal or misleading under Ugandan law.',
                         'You must not upload or promote content that infringes privacy, intellectual property, confidentiality, or other legal rights, or that advertises restricted or unlawful goods, services, schemes, or claims.',
                     ],
                 },
@@ -120,9 +120,9 @@ export function buildCurrentPolicyDocuments() {
                     ],
                 },
                 {
-                    heading: 'Contracts, Proof, and Payments',
+                    heading: 'Promotions, Proof, and Payments',
                     body: [
-                        'Contracts, offers, approvals, proof submissions, and payment-related records must be truthful, complete, and not manipulated. Fabricated proof, collusive conduct, refund abuse, off-platform settlement evasion, or payout fraud is prohibited.',
+                        'Promotions, offers, approvals, proof submissions, and payment-related records must be truthful, complete, and not manipulated. Fabricated proof, collusive conduct, refund abuse, off-platform settlement evasion, or payout fraud is prohibited.',
                         'Platform records, audit trails, and authenticated electronic acceptances may be relied upon for operational enforcement and dispute handling.',
                     ],
                 },

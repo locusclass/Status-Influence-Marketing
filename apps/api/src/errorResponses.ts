@@ -61,7 +61,7 @@ const EXPLICIT_USER_MESSAGES: Record<string, string> = {
   invalid_payment_reference: 'The payment reference is invalid.',
   campaign_missing_product_listing:
     'Create a product listing and attach it to the campaign before continuing.',
-  subscription_required: 'An active subscription is required to continue.',
+  subscription_required: 'Your account is not eligible for this action yet.',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
